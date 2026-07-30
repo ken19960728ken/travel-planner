@@ -122,6 +122,10 @@ create policy "非 owner 成員可自行退出"
 create function public.handle_new_trip() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
+  -- owner_id 可為 null（帳號刪除後的 set null、或 service_role 的系統寫入），此時不建 membership
+  if new.owner_id is null then
+    return new;
+  end if;
   insert into public.trip_members (trip_id, user_id, role)
   values (new.id, new.owner_id, 'owner');
   return new;

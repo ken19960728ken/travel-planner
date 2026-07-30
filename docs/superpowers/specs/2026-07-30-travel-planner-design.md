@@ -321,3 +321,4 @@ flowchart LR
 | updated_by / created_by 無 FK | 使用者刪除後這些欄位殘留孤兒 uuid，UI 需 fallback 顯示「已離開的成員」 | Plan 3 UI 實作時 |
 | Realtime DELETE 事件不套 RLS | Supabase 官方行為：DELETE 廣播給所有訂閱者（payload 僅剩 PK），client 須以「本地有此 id 才移除」冪等處理，且不可依賴 payload 中的 trip_id | Plan 5 共編實作時 |
 | 本機 supabase db reset 故障 | CLI 2.110.0 報 LegacyDbBootstrapError；本機重建 schema 的替代指令：drop schema public cascade 後以 psql 重跑 migration | CLI 修復後移除 workaround |
+| Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |

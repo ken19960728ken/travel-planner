@@ -615,6 +615,8 @@ Expected: 輸出本地各服務 URL 與 anon / service_role key。第一次啟�
 
 - [ ] **Step 3: 撰寫初始 migration**
 
+> ⚠️ **本區塊已過時**：實作後 schema 經 db-expert 審查大幅硬化（複合 FK、成員管理 policies、my_trip_ids semi-join、check constraints、GRANT、NULL guard 等），**權威版本是 repo 中的 `supabase/migrations/20260730000000_init.sql`**。重建 schema 請以該檔為準，不要複製下方 SQL。
+
 Create `supabase/migrations/20260730000000_init.sql`:
 
 ```sql
@@ -1484,7 +1486,7 @@ git push
 ## 完成定義（Definition of Done）
 
 - [ ] `npm run build` 成功
-- [ ] `npm test` 全綠（本地 Supabase 啟動時 22 tests，含 RLS 5）
+- [ ] `npm test` 全綠（本地 Supabase 啟動時 26 tests，含 RLS 5；比原計畫多 4 個係審查過程追加的邊界測試）
 - [ ] 手動流程通過：註冊 → 登入 → 建立行程 → 清單顯示；未登入訪問 `/trips` 被導向 `/login`
 - [ ] 非成員無法讀寫他人行程（RLS 測試證明）
 - [ ] 全部改動已 commit 並 push

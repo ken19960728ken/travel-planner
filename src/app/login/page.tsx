@@ -1,24 +1,22 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [notice, setNotice] = useState<Notice>(null)
+  const [notice, setNotice] = useState<Notice>(() =>
+    searchParams.get('error') === 'oauth_failed'
+      ? { kind: 'error', text: 'Google 登入失敗，請再試一次或改用 Email 登入' }
+      : null,
+  )
   const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    if (params.get('error') === 'oauth_failed') {
-      setNotice({ kind: 'error', text: 'Google 登入失敗，請再試一次或改用 Email 登入' })
-    }
-  }, [])
 
   async function signIn(e: React.FormEvent) {
     e.preventDefault()
@@ -97,5 +95,13 @@ export default function LoginPage() {
         )}
       </form>
     </main>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   )
 }

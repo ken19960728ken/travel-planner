@@ -14,7 +14,8 @@ export type LegDuration = {
 }
 
 export type ScheduleWarning =
-  | { type: 'overlap'; stopIds: [string, string] }
+  | /** stopIds 依時間順序排列：[較早的停留點, 較晚的停留點] */
+    { type: 'overlap'; stopIds: [string, string] }
   | {
       type: 'transit_too_tight'
       fromStopId: string

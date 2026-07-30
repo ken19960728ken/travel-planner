@@ -37,6 +37,12 @@ describe('cascadeShift', () => {
     expect(cascadeShift(stops, 'missing', HOUR).map(s => s.id)).toEqual(['a', 'b'])
   })
 
+  it('deltaMs 為負時後續停留點整體提前', () => {
+    const stops = [stop('a', 9, 10), stop('b', 11, 12)]
+    const result = cascadeShift(stops, 'a', -HOUR)
+    expect(result.find(s => s.id === 'b')!.startsAt).toBe(10 * HOUR)
+  })
+
   it('不改動輸入陣列（不可變）', () => {
     const stops = [stop('a', 9, 10), stop('b', 11, 12)]
     cascadeShift(stops, 'a', HOUR)

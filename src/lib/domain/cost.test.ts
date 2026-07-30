@@ -17,6 +17,10 @@ describe('perPersonCost', () => {
     expect(perPersonCost(1380, 3)).toBe(460)
   })
 
+  it('除不盡時回傳原始浮點數，不四捨五入（顯示層的事）', () => {
+    expect(perPersonCost(1000, 3)).toBeCloseTo(1000 / 3, 10)
+  })
+
   it('人數小於 1 時回傳總額', () => {
     expect(perPersonCost(1380, 0)).toBe(1380)
   })

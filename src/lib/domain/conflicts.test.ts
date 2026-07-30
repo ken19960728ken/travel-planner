@@ -40,4 +40,19 @@ describe('detectConflicts', () => {
     const stops = [stop('a', 9, 10), stop('b', 10.25, 12)]
     expect(detectConflicts(stops, [])).toEqual([])
   })
+
+  it('偵測 3+ 停留點的連環/巢狀重疊', () => {
+    const stops = [stop('a', 9, 11), stop('b', 9.5, 9.6), stop('c', 9.7, 13)]
+    const warnings = detectConflicts(stops, [])
+    expect(warnings).toEqual([
+      { type: 'overlap', stopIds: ['a', 'b'] },
+      { type: 'overlap', stopIds: ['a', 'c'] },
+    ])
+  })
+
+  it('重疊時不重複回報 transit_too_tight（避免雙重警示）', () => {
+    const stops = [stop('a', 9, 11), stop('b', 10, 12)]
+    const legs: LegDuration[] = [{ fromStopId: 'a', toStopId: 'b', durationMinutes: 45 }]
+    expect(detectConflicts(stops, legs)).toEqual([{ type: 'overlap', stopIds: ['a', 'b'] }])
+  })
 })

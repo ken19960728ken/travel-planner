@@ -828,6 +828,16 @@ create trigger legs_touch before update on public.legs
 alter publication supabase_realtime add table public.trips, public.stops, public.legs;
 alter table public.stops replica identity full;
 alter table public.legs replica identity full;
+
+-- ============ 表級權限（RLS 的前置門檻：沒有 GRANT，policy 根本不會被評估） ============
+-- CLI migration 以 postgres 角色執行，不套用 supabase_admin 的 default ACL，必須顯式 GRANT
+grant usage on schema public to anon, authenticated, service_role;
+grant select, insert, update, delete
+  on public.profiles, public.trips, public.trip_members,
+     public.stops, public.legs, public.trip_snapshots
+  to authenticated;
+-- route_cache 刻意不 grant 給 authenticated/anon（用戶端全拒）；service_role 全表可用
+grant select, insert, update, delete on all tables in schema public to service_role;
 ```
 
 - [ ] **Step 4: 套用 migration 並驗證**

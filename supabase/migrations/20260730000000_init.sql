@@ -72,8 +72,12 @@ language sql security definer stable set search_path = public as $$
 $$;
 
 alter table public.trips enable row level security;
+-- owner 條件除了語義上合理（owner 永遠可見自己的行程），也是必要的：
+-- INSERT ... RETURNING 的可見性檢查發生在 AFTER trigger 寫入 trip_members 之前，
+-- 只靠 is_trip_member 會讓「建立行程並取回 id」的標準流程被 RLS 拒絕
 create policy "成員可讀行程"
-  on public.trips for select to authenticated using (public.is_trip_member(id));
+  on public.trips for select to authenticated
+  using (public.is_trip_member(id) or owner_id = auth.uid());
 create policy "登入者可建行程（owner 是自己）"
   on public.trips for insert to authenticated with check (owner_id = auth.uid());
 create policy "editor 以上可改行程"

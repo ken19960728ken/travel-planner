@@ -6,7 +6,7 @@ export function totalEstimatedCost(items: CostItem[]): number {
   return items.reduce((sum, item) => sum + (item.estimatedCost ?? 0), 0)
 }
 
-/** 平均每人預估花費；人數 < 1（尚無成員/草稿階段）時回傳總額，不除以 0。 */
+/** 平均每人預估花費；memberCount < 1 時回傳總額，防禦性避免除以 0 或負值。 */
 export function perPersonCost(total: number, memberCount: number): number {
   if (memberCount < 1) return total
   return total / memberCount

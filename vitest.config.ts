@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { loadEnv } from 'vite'
 import path from 'node:path'
 
 export default defineConfig({
@@ -7,5 +8,6 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.ts'],
+    env: loadEnv('test', process.cwd(), ''),
   },
 })

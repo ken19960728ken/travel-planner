@@ -735,6 +735,7 @@ create table public.stops (
   timezone text not null,
   starts_at timestamptz not null,
   ends_at timestamptz not null,
+  locked boolean not null default false,
   notes text,
   estimated_cost numeric,
   updated_by uuid default auth.uid(),

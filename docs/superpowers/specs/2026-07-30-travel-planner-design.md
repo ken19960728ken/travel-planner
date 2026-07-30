@@ -128,6 +128,7 @@ erDiagram
         text timezone "IANA 時區，如 Asia/Tokyo，由座標自動判定"
         timestamptz starts_at
         timestamptz ends_at
+        bool locked "鎖定時間（航班、訂位），連鎖順延不移動"
         text notes
         numeric estimated_cost "可空"
         uuid updated_by

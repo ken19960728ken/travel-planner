@@ -109,8 +109,10 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   }
   for (const id of plan.removeAuto) {
     if (budgetExceeded()) { incomplete = true; break }
-    const { error } = await supabase.from('legs').delete().eq('id', id)
-    if (!error) { changed = true; removedCount++ }
+    // 審查 Critical-1：snapshot 讀取後到這行之間，該段可能已被 LegEditor 改成 manual——
+    // 加 .eq('source', 'auto') 讓刪除在 DB 層原子化重新確認，0 列＝已被搶先改 manual，不算變化
+    const { data, error } = await supabase.from('legs').delete().eq('id', id).eq('source', 'auto').select('id')
+    if (!error) { if ((data ?? []).length > 0) { changed = true; removedCount++ } }
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (let i = 0; i < plan.create.length; i++) {
@@ -246,7 +248,10 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     }
 
     if (result.ok) {
-      const { error } = await supabase.from('legs').update({
+      // 審查 Critical-1：Google 呼叫期間（可長達數秒）該段可能已被 LegEditor 改成 manual，
+      // .eq('source', 'auto') 讓寫回在 DB 層原子化重新確認，絕不能用「呼叫前讀到的 mode/source」
+      // 這種 check-then-act 判斷，那道間隙正是 PoC 復現的缺口
+      const { data, error } = await supabase.from('legs').update({
         duration_minutes: result.durationMinutes,
         distance_meters: result.distanceMeters,
         polyline: result.polyline,
@@ -255,23 +260,28 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         arrives_at: new Date(from.endsAt + result.durationMinutes * 60_000).toISOString(),
         computed_at: new Date(now).toISOString(),
         stale: false,
-      }).eq('id', item.legId)
+      }).eq('id', item.legId).eq('source', 'auto').select('id')
       if (!error) {
-        computed++
-        changed = true
+        // 0 列＝寫回瞬間已被改成 manual，這段已完工換人負責，不計 computed 也不計 pending
+        if ((data ?? []).length > 0) {
+          computed++
+          changed = true
+        }
       } else {
         pending++ // R-3：寫回失敗，leg 仍未真正算完，須計入 pending 才可重試（原本漏記，此段會悄悄消失於統計外）
         console.error('[legs/sync] update computed leg failed', { tripId, code: error.code, message: error.message })
       }
     } else if (result.reason === 'no_route') {
-      const { error } = await supabase.from('legs').update({
+      const { data, error } = await supabase.from('legs').update({
         duration_minutes: null, distance_meters: null, polyline: null,
         detail: { no_route: true },
         departs_at: new Date(from.endsAt).toISOString(), arrives_at: null,
         computed_at: new Date(now).toISOString(), stale: false,
-      }).eq('id', item.legId)
-      if (!error) changed = true
-      else {
+      }).eq('id', item.legId).eq('source', 'auto').select('id')
+      if (!error) {
+        // 同上：0 列＝已被改成 manual，不算變化也不計 pending（Critical-1 source 守衛）
+        if ((data ?? []).length > 0) changed = true
+      } else {
         pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
         console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
       }

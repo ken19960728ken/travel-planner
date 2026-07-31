@@ -53,6 +53,7 @@ export type Leg = {
   departs_at: string | null
   arrives_at: string | null
   estimated_cost: number | null
+  updated_at: string
 }
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
@@ -338,6 +339,15 @@ export default function TripView({
   )
   const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
   const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+
+  // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
+  // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方
+  // 建議的「記錄前一輪 legs 參照＋render 期間比對」樣式——只在 legs 參照真的變動那一輪才比對一次
+  const prevLegsRef = useRef(legs)
+  if (prevLegsRef.current !== legs) {
+    prevLegsRef.current = legs
+    if (selectedLegId !== null && !legs.some(l => l.id === selectedLegId)) setSelectedLegId(null)
+  }
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">

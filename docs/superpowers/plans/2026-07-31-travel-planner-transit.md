@@ -782,8 +782,10 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   }
   for (const id of plan.removeAuto) {
     if (budgetExceeded()) { incomplete = true; break }
-    const { error } = await supabase.from('legs').delete().eq('id', id)
-    if (!error) { changed = true; removedCount++ }
+    // 審查 Critical-1：snapshot 讀取後到這行之間，該段可能已被 LegEditor 改成 manual——
+    // 加 .eq('source', 'auto') 讓刪除在 DB 層原子化重新確認，0 列＝已被搶先改 manual，不算變化
+    const { data, error } = await supabase.from('legs').delete().eq('id', id).eq('source', 'auto').select('id')
+    if (!error) { if ((data ?? []).length > 0) { changed = true; removedCount++ } }
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (let i = 0; i < plan.create.length; i++) {
@@ -919,7 +921,10 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     }
 
     if (result.ok) {
-      const { error } = await supabase.from('legs').update({
+      // 審查 Critical-1：Google 呼叫期間（可長達數秒）該段可能已被 LegEditor 改成 manual，
+      // .eq('source', 'auto') 讓寫回在 DB 層原子化重新確認，絕不能用「呼叫前讀到的 mode/source」
+      // 這種 check-then-act 判斷，那道間隙正是 PoC 復現的缺口
+      const { data, error } = await supabase.from('legs').update({
         duration_minutes: result.durationMinutes,
         distance_meters: result.distanceMeters,
         polyline: result.polyline,
@@ -928,23 +933,28 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         arrives_at: new Date(from.endsAt + result.durationMinutes * 60_000).toISOString(),
         computed_at: new Date(now).toISOString(),
         stale: false,
-      }).eq('id', item.legId)
+      }).eq('id', item.legId).eq('source', 'auto').select('id')
       if (!error) {
-        computed++
-        changed = true
+        // 0 列＝寫回瞬間已被改成 manual，這段已完工換人負責，不計 computed 也不計 pending
+        if ((data ?? []).length > 0) {
+          computed++
+          changed = true
+        }
       } else {
         pending++ // R-3：寫回失敗，leg 仍未真正算完，須計入 pending 才可重試（原本漏記，此段會悄悄消失於統計外）
         console.error('[legs/sync] update computed leg failed', { tripId, code: error.code, message: error.message })
       }
     } else if (result.reason === 'no_route') {
-      const { error } = await supabase.from('legs').update({
+      const { data, error } = await supabase.from('legs').update({
         duration_minutes: null, distance_meters: null, polyline: null,
         detail: { no_route: true },
         departs_at: new Date(from.endsAt).toISOString(), arrives_at: null,
         computed_at: new Date(now).toISOString(), stale: false,
-      }).eq('id', item.legId)
-      if (!error) changed = true
-      else {
+      }).eq('id', item.legId).eq('source', 'auto').select('id')
+      if (!error) {
+        // 同上：0 列＝已被改成 manual，不算變化也不計 pending（Critical-1 source 守衛）
+        if ((data ?? []).length > 0) changed = true
+      } else {
         pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
         console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
       }
@@ -957,7 +967,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
 }
 ```
 
-- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）` + 複審遺留 `fix: sync 牆鐘涵蓋結構同步、duration 上限、寫回失敗計數` + Task 5 審查 `fix: 前端接線加固（併發可見性、連接條死區、sync 去重與續跑）`（route.ts 部分：23505 分支改回報 changed/pending、回應加 legCount/incomplete、no_route 寫回失敗補 pending++）
+（Task 6 審查 Critical-1：`legRows` 讀取那一刻到 Google 呼叫完成寫回之間有數秒的競態窗口，若使用者剛好在這段時間用 LegEditor 把段改成 manual，修復前的 `.eq('id', ...)` 寫法會照樣把 Google 算出的 auto 資料蓋上去——manual 段因此被夾帶 Google 衍生資料且使用者剛存的值消失，違反 spec §4 的 ToS 分層與「manual 絕不被覆蓋」承諾。修復：`removeAuto` 刪除與兩個寫回分支都加 `.eq('source', 'auto').select('id')`，讓「重新確認 source 沒變」與「寫入」在同一條 SQL 內原子化完成；回傳 0 列即代表已被搶先改 manual，此時不計 `computed`、不計 `pending`（語義上這段已完工換人負責），`removedCount` 同步只在真的刪除成功時累加。PoC 於本機以「先把段改 manual，再套用寫回前 / 後兩種寫法」對照驗證：舊寫法 1 列受影響且 manual 值被蓋掉；新寫法 0 列受影響、manual 值與 `polyline` 均完好。）
+
+- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）` + 複審遺留 `fix: sync 牆鐘涵蓋結構同步、duration 上限、寫回失敗計數` + Task 5 審查 `fix: 前端接線加固（併發可見性、連接條死區、sync 去重與續跑）`（route.ts 部分：23505 分支改回報 changed/pending、回應加 legCount/incomplete、no_route 寫回失敗補 pending++）+ Task 6 審查 `fix: 交通段寫回 source 守衛與編輯器樂觀鎖（manual 覆寫保護）`（route.ts 部分：Critical-1 source 守衛，見上）
 
 ---
 
@@ -970,13 +982,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
 ```tsx
   const { data: legs, error: legsError } = await supabase
     .from('legs')
-    .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost')
+    .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost, updated_at')
     .eq('trip_id', tripId)
     .order('id', { ascending: true })
     .limit(500)
 ```
 
-（M-3：`.order('id')` 與 stops 查詢的排序慣例對齊；曾一度誤用 `.limit(501)` 比照 sync route.ts 的哨兵慣例，經複審指出這裡是單純分頁讀取非結構同步護欄，501 那套語義不適用，M-3 回退為 500。）
+（M-3：`.order('id')` 與 stops 查詢的排序慣例對齊；曾一度誤用 `.limit(501)` 比照 sync route.ts 的哨兵慣例，經複審指出這裡是單純分頁讀取非結構同步護欄，501 那套語義不適用，M-3 回退為 500。`updated_at` 欄位為 Task 6 審查 Important-2/3 追加——LegEditor 的樂觀鎖需要它比對外部改動，見 Task 6 Step 4。）
 
 `<TripView ... legs={(legs ?? []) as Leg[]} />`（page.tsx 補 `import type { Leg } from './TripView'`）。**M-3 定案**：DB 的 `mode`/`source` 是 text 欄位，聯集型別的收斂就在這個邊界以 `as Leg[]` 做一次——值域由 DB check constraint 保證，不引 zod、不逐欄位轉換，其他地方一律不再 cast。legsError 併入現有 stopsError 橫幅語義（讀取失敗提示 + 寫入入口不關閉——legs 讀失敗不影響 stops 編輯，僅交通列缺席，如實顯示「交通段讀取失敗」）。
 
@@ -1021,8 +1033,11 @@ export type Leg = {
   departs_at: string | null
   arrives_at: string | null
   estimated_cost: number | null
+  updated_at: string
 }
 ```
+
+（`updated_at` 為 Task 6 審查 Important-2/3 追加，理由同上。）
 
 props 增 `legs: Leg[]`；狀態增 `const [selectedLegId, setSelectedLegId] = useState<string | null>(null)`（`changeDay` 一併歸 null）。
 
@@ -1303,13 +1318,26 @@ export default function LegEditor({
     setBusy(true)
     try {
       const supabase = createClient()
-      const { error } = await supabase.from('legs').update(patch).eq('id', leg.id)
+      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以「當下 props 值」比對
+      // updated_at，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/協作者）——
+      // 比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
+      const { data, error } = await supabase
+        .from('legs')
+        .update(patch)
+        .eq('id', leg.id)
+        .eq('updated_at', leg.updated_at)
+        .select('id')
       if (error) {
         setNotice(
-          error.code === '23514'
+          error.code === '23514' || error.code === '22003'
             ? { kind: 'error', text: '輸入內容不符限制，請檢查數值' }
             : { kind: 'error', text: '儲存失敗，請稍後再試' },
         )
+        return
+      }
+      if (data.length === 0) {
+        setNotice({ kind: 'error', text: '此交通段已被其他操作變更或刪除，請重新整理後再編輯' })
+        router.refresh()
         return
       }
       setNotice({ kind: 'success', text: successText })
@@ -1336,6 +1364,9 @@ export default function LegEditor({
       const dep = wallInputToUtcMs(departsAt, fromStop.timezone)
       const arr = wallInputToUtcMs(arrivesAt, toStop.timezone)
       if (!(arr > dep)) return setNotice({ kind: 'error', text: '抵達必須晚於出發（注意兩地時區）' })
+      // Important-4（軟警示，spec §5：警示不阻擋）：出發早於起點停留點結束、或抵達晚於終點停留點開始，
+      // 代表班機時刻與停留點時段兜不起來，可能是使用者輸錯——仍允許儲存，只是提示確認
+      const outOfWindow = dep < new Date(fromStop.ends_at).getTime() || arr > new Date(toStop.starts_at).getTime()
       return write({
         mode, source: 'manual',
         departs_at: new Date(dep).toISOString(),
@@ -1343,11 +1374,12 @@ export default function LegEditor({
         duration_minutes: Math.max(1, Math.round((arr - dep) / 60_000)),
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         stale: false, estimated_cost: costNum,
-      }, '已儲存 ✓')
+      }, outOfWindow ? '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' : '已儲存 ✓')
     }
     if (duration.trim() !== '') {
       const n = Number(duration)
       if (!Number.isInteger(n) || n < 0) return setNotice({ kind: 'error', text: '時長必須是不小於 0 的整數分鐘' })
+      if (n > 43200) return setNotice({ kind: 'error', text: '時長需在 0–43200 分鐘之間' }) // M-5：上界 30 天
       return write({
         mode, source: 'manual', duration_minutes: n,
         distance_meters: null, polyline: null, detail: null, computed_at: null,
@@ -1390,6 +1422,7 @@ export default function LegEditor({
         <label className="flex flex-col gap-1 text-xs">
           時長（分鐘；留空 = 自動計算，填寫 = 手動覆寫且不被自動蓋掉）
           <input className="rounded border p-1" type="number" min="0" step="1"
+            placeholder={leg.duration_minutes !== null ? `目前自動計算：${leg.duration_minutes} 分` : ''}
             value={duration} onChange={e => setDuration(e.target.value)} />
         </label>
       )}
@@ -1440,6 +1473,32 @@ export default function LegEditor({
   - **跨午夜段（M-4 驗證案例）**：from 停留點 23:30（Asia/Taipei）、to 停留點隔日 08:00（Asia/Tokyo）→ 交通列顯示在出發日末尾並標「→ 隔日 <名稱>」、時間軸連接條右端夾到視窗尾；切 flight 填跨日起訖（如 23:55 出發、隔日 03:10 抵達）儲存正確、隔日視角不重複出現。
   - 「已重新確認」清 stale；「留空時長儲存」交還自動計算。
   → **Commit** `feat: 交通段編輯器（手動修正不被覆蓋、flight 跨日跨時區起訖）`
+
+- [ ] **Step 4: 審查修復（Critical-1 換人負責之外的前端側）** — LegEditor 過稿本身 byte-identical、多時區驗算全過，但複審揪出 1 Important 級併發缺口與若干 Minor：
+
+  1. **`page.tsx`** 的 legs 查詢 `.select(...)` 補一個欄位 `updated_at`（其餘欄位不動）；`TripView.tsx` 的 `Leg` type 對應補 `updated_at: string`。
+
+  2. **`LegEditor.tsx` 樂觀鎖（Important-2/3）**：`write()` 的 `.eq('id', leg.id)` 後加 `.eq('updated_at', leg.updated_at).select('id')`，`data.length === 0` 視為「已被其他操作變更或刪除」，走與 StopEditor.tsx:56-76 相同模式（設 error notice + `router.refresh()`，不可靜默覆寫或假裝成功）。完整程式碼見上方 Step 1 程式碼區塊（已回寫最終版）。
+
+  3. **flight 軟警示（Important-4）**：`save()` 的 `isTimed` 分支算出 `dep`/`arr` 後，若 `dep < fromStop.ends_at` 或 `arr > toStop.starts_at`（班機時刻落在停留點時段之外）——**仍允許儲存**（spec §5：警示不阻擋），只是 `successText` 換成提示文案。
+
+  4. **M-5**：手動時長輸入補上界 `n > 43200`（30 天）擋下；`write()` 的錯誤分支把 `22003`（numeric 溢位，主要來自 `estimated_cost`）併入 `23514` 的「輸入內容不符限制」文案。
+
+  5. **M-7**：`TripView.tsx` 補一段 render-phase 比對（**不是** `useEffect`——line 296 已有「避免另開 effect 直接 setState 觸發連鎖渲染 lint 錯誤」的前例）：用 `useRef` 記錄前一輪 `legs` 參照，`legs` 參照變動的那一輪，若 `selectedLegId` 指向的段已不在新的 `legs` 裡就 `setSelectedLegId(null)`，避免結構同步移除/重建該段後選取殘留成 dangling id。程式碼緊接在 `legByPair` 之後、`content = (` 之前：
+
+```tsx
+  const prevLegsRef = useRef(legs)
+  if (prevLegsRef.current !== legs) {
+    prevLegsRef.current = legs
+    if (selectedLegId !== null && !legs.some(l => l.id === selectedLegId)) setSelectedLegId(null)
+  }
+```
+
+  6. **S-9**：LegEditor 的 auto 模式時長欄補 `placeholder={leg.duration_minutes !== null ? \`目前自動計算：${leg.duration_minutes} 分\` : ''}`，留空時能看到目前的自動計算值當參考。
+
+  **遺留（不在本輪範圍，記入 spec §8 / Plan 5）**：M-6（跨 DST 邊界的 flight 起訖換算，`date-fns-tz` 已處理但無專屬測試案例覆蓋）、S-8（custom 模式目前與 flight 共用「必填起訖」表單，未來若要支援「custom 也能只填時長」需要拆兩種子表單）。
+
+  **驗證**：lint/tsc/build/vitest（維持 80，本輪不新增常駐案例）/smoke 全綠；PoC 重測 Critical-1（見 Task 4 Step 2 後的說明）+ 用 Playwright 臨時腳本重跑一次跨午夜案例確認樂觀鎖與軟警示不誤傷正常流程（在邊界值 dep=fromStop.ends_at/arr=toStop.starts_at 恰好不觸發 Important-4 警示文案；`updated_at` 刷新後仍可正常再次儲存；外部併發改動時正確擋下並提示重新整理）。→ **Commit** `fix: 交通段寫回 source 守衛與編輯器樂觀鎖（manual 覆寫保護）`
 
 ---
 

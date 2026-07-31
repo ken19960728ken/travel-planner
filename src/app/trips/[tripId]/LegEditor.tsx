@@ -51,13 +51,26 @@ export default function LegEditor({
     setBusy(true)
     try {
       const supabase = createClient()
-      const { error } = await supabase.from('legs').update(patch).eq('id', leg.id)
+      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以「當下 props 值」比對
+      // updated_at，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/協作者）——
+      // 比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
+      const { data, error } = await supabase
+        .from('legs')
+        .update(patch)
+        .eq('id', leg.id)
+        .eq('updated_at', leg.updated_at)
+        .select('id')
       if (error) {
         setNotice(
-          error.code === '23514'
+          error.code === '23514' || error.code === '22003'
             ? { kind: 'error', text: '輸入內容不符限制，請檢查數值' }
             : { kind: 'error', text: '儲存失敗，請稍後再試' },
         )
+        return
+      }
+      if (data.length === 0) {
+        setNotice({ kind: 'error', text: '此交通段已被其他操作變更或刪除，請重新整理後再編輯' })
+        router.refresh()
         return
       }
       setNotice({ kind: 'success', text: successText })
@@ -84,6 +97,9 @@ export default function LegEditor({
       const dep = wallInputToUtcMs(departsAt, fromStop.timezone)
       const arr = wallInputToUtcMs(arrivesAt, toStop.timezone)
       if (!(arr > dep)) return setNotice({ kind: 'error', text: '抵達必須晚於出發（注意兩地時區）' })
+      // Important-4（軟警示，spec §5：警示不阻擋）：出發早於起點停留點結束、或抵達晚於終點停留點開始，
+      // 代表班機時刻與停留點時段兜不起來，可能是使用者輸錯——仍允許儲存，只是提示確認
+      const outOfWindow = dep < new Date(fromStop.ends_at).getTime() || arr > new Date(toStop.starts_at).getTime()
       return write({
         mode, source: 'manual',
         departs_at: new Date(dep).toISOString(),
@@ -91,11 +107,12 @@ export default function LegEditor({
         duration_minutes: Math.max(1, Math.round((arr - dep) / 60_000)),
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         stale: false, estimated_cost: costNum,
-      }, '已儲存 ✓')
+      }, outOfWindow ? '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' : '已儲存 ✓')
     }
     if (duration.trim() !== '') {
       const n = Number(duration)
       if (!Number.isInteger(n) || n < 0) return setNotice({ kind: 'error', text: '時長必須是不小於 0 的整數分鐘' })
+      if (n > 43200) return setNotice({ kind: 'error', text: '時長需在 0–43200 分鐘之間' }) // M-5：上界 30 天
       return write({
         mode, source: 'manual', duration_minutes: n,
         distance_meters: null, polyline: null, detail: null, computed_at: null,
@@ -138,6 +155,7 @@ export default function LegEditor({
         <label className="flex flex-col gap-1 text-xs">
           時長（分鐘；留空 = 自動計算，填寫 = 手動覆寫且不被自動蓋掉）
           <input className="rounded border p-1" type="number" min="0" step="1"
+            placeholder={leg.duration_minutes !== null ? `目前自動計算：${leg.duration_minutes} 分` : ''}
             value={duration} onChange={e => setDuration(e.target.value)} />
         </label>
       )}

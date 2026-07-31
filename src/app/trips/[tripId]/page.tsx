@@ -40,7 +40,7 @@ export default async function TripDetailPage({
 
   const { data: legs, error: legsError } = await supabase
     .from('legs')
-    .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost')
+    .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost, updated_at')
     .eq('trip_id', tripId)
     .order('id', { ascending: true })
     .limit(500)

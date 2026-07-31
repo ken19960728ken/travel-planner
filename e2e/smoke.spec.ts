@@ -37,9 +37,11 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
   await expect(page.getByText('還沒有停留點')).toBeVisible({ timeout: 10_000 })
 
   // 無金鑰環境顯示占位訊息；有金鑰環境顯示地圖——兩者擇一存在即可
+  // timeout 30s（非 10s）：外部 Google Maps JS 載入偶爾偏慢（實測過 21.6s），10s 會 flake；
+  // 保留真實地圖載入驗證（不 stub），單純放寬等待時間
   const placeholder = page.getByText(/尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY/)
   const mapCanvas = page.locator('.gm-style').first()
-  await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 10_000 })
+  await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 30_000 })
 
   // 時間軸：Day 分頁存在且可切換
   await expect(page.getByRole('button', { name: /^D1 / })).toBeVisible()
@@ -54,10 +56,12 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
   if (sbUrl && sbService && createdTripId) {
     const admin = createClient(sbUrl, sbService, { auth: { persistSession: false } })
     const mk = (h: number) => new Date(Date.UTC(2026, 9, 1, h)).toISOString()
-    await admin.from('stops').insert([
+    // reload 依賴顯式：admin 直插不觸發 client refresh，必須 reload 才看得到新停留點（下方斷言依賴此行為）
+    const { error: insertErr } = await admin.from('stops').insert([
       { trip_id: createdTripId, name: 'E2E拖曳A', lat: 33.59, lng: 130.4, timezone: 'Asia/Tokyo', starts_at: mk(1), ends_at: mk(2) },
       { trip_id: createdTripId, name: 'E2E拖曳B', lat: 33.6, lng: 130.42, timezone: 'Asia/Tokyo', starts_at: mk(3), ends_at: mk(4) },
     ])
+    expect(insertErr).toBeNull()
     await page.reload()
     const blockA = page.locator('[data-stop-block]').first()
     await expect(blockA).toBeVisible({ timeout: 10_000 })
@@ -75,6 +79,15 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
     const deltaB = afterMap['E2E拖曳B'] - beforeMap['E2E拖曳B']
     expect(deltaA).toBeGreaterThanOrEqual(5 * 60 * 1000) // 至少一個 snap
     expect(deltaB).toBe(deltaA) // 連鎖：B 跟 A 同步平移
+
+    // 交通段：掛載 sync 會為相鄰配對建 leg。無伺服器金鑰的環境 duration 為空、顯示「待計算」——
+    // 斷言連接條存在（UI）+ legs 落地（DB），兩者缺一都是紅燈，不依賴外部 Google 呼叫（確定性）
+    await page.reload()
+    await expect(page.locator('[data-leg-connector]').first()).toBeVisible({ timeout: 15_000 })
+    const legsInDb = await admin.from('legs').select('id, source').eq('trip_id', createdTripId)
+    expect(legsInDb.error).toBeNull()
+    expect(legsInDb.data!.length).toBeGreaterThanOrEqual(1)
+    expect(legsInDb.data!.every(l => l.source === 'auto')).toBe(true)
   }
 
   expect(mapsErrors).toEqual([])

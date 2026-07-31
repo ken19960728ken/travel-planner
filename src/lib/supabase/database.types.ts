@@ -316,6 +316,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      cascade_shift_stops: {
+        Args: {
+          p_changed_stop_id: string
+          p_delta_seconds: number
+          p_trip_id: string
+        }
+        Returns: undefined
+      }
       is_trip_editor: { Args: { p_trip_id: string }; Returns: boolean }
       is_trip_member: { Args: { p_trip_id: string }; Returns: boolean }
       is_trip_owner: { Args: { p_trip_id: string }; Returns: boolean }

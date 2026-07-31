@@ -146,6 +146,31 @@ export default function TripView({
     }
   }
 
+  // 時間軸拖曳平移提交：呼叫連鎖順延 RPC，後續未鎖定停留點原子化跟著移動（spec §6）
+  async function moveStop(stopId: string, deltaMs: number) {
+    if (busyRef.current || stopsError) return
+    busyRef.current = true
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase.rpc('cascade_shift_stops', {
+        p_trip_id: trip.id,
+        p_changed_stop_id: stopId,
+        // RPC 的單位契約是秒；deltaMs 為毫秒，四捨五入換算（spec §8 記錄此單位差異）
+        p_delta_seconds: Math.round(deltaMs / 1000),
+      })
+      if (error) {
+        setNotice({ kind: 'error', text: '時間調整失敗，請稍後再試' })
+        return
+      }
+      setNotice(null)
+      router.refresh()
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+
   // 切換 Day：連動重置播放頭與加點基準，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
   function changeDay(day: string) {
     setActiveDay(day)
@@ -306,6 +331,7 @@ export default function TripView({
         }}
         playheadMs={playheadMs}
         onPlayheadChange={setPlayheadMs}
+        onMove={moveStop}
       />
     </div>
   )

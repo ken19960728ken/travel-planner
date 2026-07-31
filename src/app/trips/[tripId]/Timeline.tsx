@@ -1,11 +1,13 @@
 'use client'
 
+import { useRef, useState } from 'react'
 import type { Stop } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
 import { detectConflicts } from '@/lib/domain/conflicts'
 
 const HOUR_MS = 60 * 60 * 1000
+const SNAP_MS = 5 * 60 * 1000 // 拖曳吸附至 5 分鐘；位移小於此視為點擊
 
 export type TimelineProps = {
   stops: Stop[]
@@ -28,12 +30,35 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 }
 
 export default function Timeline({
-  stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange,
+  stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
   const span = win ? win.end - win.start : 1
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100
+
+  // 拖曳平移色塊：位移 < SNAP_MS 視為點擊（→ onSelect），否則放開時提交平移（→ onMove）
+  const [drag, setDrag] = useState<{ id: string; startX: number; deltaMs: number } | null>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
+
+  function beginDrag(e: React.PointerEvent, stopId: string) {
+    if (!win) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setDrag({ id: stopId, startX: e.clientX, deltaMs: 0 })
+  }
+  function moveDrag(e: React.PointerEvent) {
+    if (!drag || !trackRef.current || !win) return
+    const pxPerMs = trackRef.current.clientWidth / span
+    const rawDelta = (e.clientX - drag.startX) / pxPerMs
+    setDrag({ ...drag, deltaMs: Math.round(rawDelta / SNAP_MS) * SNAP_MS })
+  }
+  function endDrag() {
+    if (!drag) return
+    const { id, deltaMs } = drag
+    setDrag(null)
+    if (Math.abs(deltaMs) >= SNAP_MS && onMove) onMove(id, deltaMs)
+    else onSelect(id) // 位移過小視為點擊，交由統一的 pointer 流程處理選取
+  }
 
   const warnings = detectConflicts(
     dayStops.map(s => ({
@@ -67,21 +92,32 @@ export default function Timeline({
 
       {win ? (
         <>
-          <div className="relative h-12 rounded border">
+          {drag && (
+            <div className="text-xs text-orange-500">
+              {drag.deltaMs > 0 ? '+' : ''}
+              {Math.round(drag.deltaMs / 60000)} 分鐘（放開套用，之後行程自動順延）
+            </div>
+          )}
+          <div ref={trackRef} className="relative h-12 rounded border">
             {dayStops.map(stop => {
               const s = new Date(stop.starts_at).getTime()
               const e = new Date(stop.ends_at).getTime()
+              // 拖曳中的色塊用偏移後的時間預覽位置，放開才真正提交
+              const offset = drag?.id === stop.id ? drag.deltaMs : 0
               return (
                 <button
                   key={stop.id}
                   type="button"
                   data-stop-block={stop.id}
-                  onClick={() => onSelect(stop.id)}
+                  onPointerDown={ev => beginDrag(ev, stop.id)}
+                  onPointerMove={moveDrag}
+                  onPointerUp={endDrag}
+                  onPointerCancel={endDrag}
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
-                  className={`absolute top-1 bottom-1 overflow-hidden rounded px-1 text-left text-xs text-white ${
+                  className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'
                   }`}
-                  style={{ left: `${pct(s)}%`, width: `${Math.max(pct(e) - pct(s), 1.5)}%` }}
+                  style={{ left: `${pct(s + offset)}%`, width: `${Math.max(pct(e + offset) - pct(s + offset), 1.5)}%` }}
                 >
                   {stop.locked && '🔒'}
                   {stop.name}

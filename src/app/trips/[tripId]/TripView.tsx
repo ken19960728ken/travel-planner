@@ -74,6 +74,124 @@ function CameraFollow({ target }: { target: { lat: number; lng: number } | null 
   return null
 }
 
+/** 「改回自動計算」鈕（審查 M-1：轉存/手動段沒有自動復原路徑，堵死路）——以 UPDATE 轉回 auto 空殼（不是
+ *  DELETE）：相鄰時 legSync 判 neverComputed 原地重算，不相鄰時 estimatedCost 已清為 null 走 removeAuto
+ *  自然收斂，兩態皆閉環。同一顆元件用在脫離段區塊與正常交通列的 manual 段兩處，行為單一來源保持一致。 */
+function RevertToAutoButton({ legId, onChanged }: { legId: string; onChanged: () => void }) {
+  const router = useRouter()
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function revert() {
+    if (busy) return
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase
+        .from('legs')
+        .update({
+          source: 'auto', stale: false, estimated_cost: null,
+          duration_minutes: null, computed_at: null, departs_at: null, arrives_at: null,
+        })
+        .eq('id', legId)
+        .eq('source', 'manual')
+      if (!error) {
+        onChanged()
+        router.refresh()
+      }
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  if (confirming) {
+    return (
+      <span className="inline-flex items-center gap-1 text-amber-700">
+        會清除此段的手動內容與花費
+        <button type="button" className="rounded bg-amber-600 px-1 text-white disabled:opacity-50" disabled={busy} onClick={revert}>
+          確認
+        </button>
+        <button type="button" className="rounded border px-1 disabled:opacity-50" disabled={busy} onClick={() => setConfirming(false)}>
+          取消
+        </button>
+      </span>
+    )
+  }
+  return (
+    <button type="button" className="rounded border px-1 text-amber-700 disabled:opacity-50" disabled={busy} onClick={() => setConfirming(true)}>
+      改回自動計算
+    </button>
+  )
+}
+
+/** 側欄「已脫離順序的交通段」區塊的一列（Important-2 根治）：配對脫離後仍保留資料，
+ *  不提供編輯（脫離段沒有時間基準，編輯無意義），只給刪除與改回自動計算兩個出口。 */
+function DetachedLegRow({
+  leg, fromStop, toStop, currency, onChanged,
+}: {
+  leg: Leg
+  fromStop: Stop
+  toStop: Stop
+  currency: string
+  onChanged: () => void
+}) {
+  const router = useRouter()
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  async function remove() {
+    if (busy) return
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase.from('legs').delete().eq('id', leg.id)
+      if (!error) {
+        onChanged()
+        router.refresh()
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className="rounded border border-dashed p-2 text-xs">
+      <p>
+        {MODE_ICON[leg.mode]} {fromStop.name} → {toStop.name}
+      </p>
+      <p className="text-gray-500">
+        {leg.departs_at && leg.arrives_at && (
+          <>
+            {formatLocalTime(new Date(leg.departs_at).getTime(), fromStop.timezone)}
+            –{formatLocalTime(new Date(leg.arrives_at).getTime(), toStop.timezone)}{' '}
+          </>
+        )}
+        {legDurationText(leg)}
+        {leg.estimated_cost !== null && ` · ${currency} ${leg.estimated_cost}`}
+      </p>
+      <p className="text-amber-700">⚠️ 已脫離行程順序，資料保留</p>
+      <div className="mt-1 flex items-center gap-2">
+        {confirmDelete ? (
+          <>
+            <button type="button" className="rounded bg-red-600 px-2 text-white disabled:opacity-50" disabled={busy} onClick={remove}>
+              確認刪除
+            </button>
+            <button type="button" className="rounded border px-2 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(false)}>
+              取消
+            </button>
+          </>
+        ) : (
+          <button type="button" className="rounded border px-2 text-red-600 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(true)}>
+            刪除
+          </button>
+        )}
+        <RevertToAutoButton legId={leg.id} onChanged={onChanged} />
+      </div>
+    </li>
+  )
+}
+
 export default function TripView({
   trip,
   stops,
@@ -340,6 +458,12 @@ export default function TripView({
   const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
   const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
 
+  // Important-2 根治：配對脫離（插入停留點/調整順序）的 legs 不再出現在上面的正常交通列（legByPair
+  // 命中不到），過去因此從畫面消失；改收進側欄專屬區塊，過濾出 from 停留點屬 activeDay 者（歸屬規則同 M-4）
+  const detachedLegs = legs
+    .filter(l => nextByStopId.get(l.from_stop_id) !== l.to_stop_id)
+    .filter(l => activeDayStops.some(s => s.id === l.from_stop_id))
+
   // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
   // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件
   // 「Adjusting state when a prop changes」的 useState 追蹤前一輪值＋render 期間比對樣式——
@@ -442,6 +566,11 @@ export default function TripView({
                         {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
                       </button>
+                      {leg.source === 'manual' && (
+                        <span className="ml-1">
+                          <RevertToAutoButton legId={leg.id} onChanged={() => void syncLegs()} />
+                        </span>
+                      )}
                       {selectedLegId === leg.id && (
                         <LegEditor
                           key={leg.id}
@@ -463,6 +592,30 @@ export default function TripView({
               </li>
             )}
           </ul>
+          {detachedLegs.length > 0 && (
+            <details className="mt-2 rounded border p-2" open>
+              <summary className="cursor-pointer text-sm font-medium">
+                已脫離順序的交通段（{detachedLegs.length}）
+              </summary>
+              <ul className="mt-2 flex flex-col gap-2">
+                {detachedLegs.map(l => {
+                  const from = stopById.get(l.from_stop_id)
+                  const to = stopById.get(l.to_stop_id)
+                  if (!from || !to) return null
+                  return (
+                    <DetachedLegRow
+                      key={l.id}
+                      leg={l}
+                      fromStop={from}
+                      toStop={to}
+                      currency={trip.currency}
+                      onChanged={() => void syncLegs()}
+                    />
+                  )
+                })}
+              </ul>
+            </details>
+          )}
         </aside>
         <div className="min-h-0 flex-1">
           {apiKey ? (

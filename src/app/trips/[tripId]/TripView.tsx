@@ -9,6 +9,7 @@ import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz
 import { tripDayKeys } from '@/lib/domain/days'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
+import Timeline from './Timeline'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -62,8 +63,9 @@ export default function TripView({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
-  // null = 全部；Timeline 上線後 Task 5 會給它 Day 分頁 UI，本 Task 先接資料流
-  const [activeDay, setActiveDay] = useState<string | null>(null)
+  // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
+  const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
+  const [playheadMs, setPlayheadMs] = useState<number | null>(null)
   const busyRef = useRef(false)
   const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
@@ -86,8 +88,7 @@ export default function TripView({
     setBusy(true)
     try {
       // Day-aware：只用當日既有停留點排定時段，避開「多日預設時段疊加」
-      const dayKeys = tripDayKeys(trip.start_date, trip.end_date)
-      const targetDay = activeDay ?? dayKeys[0]
+      const targetDay = activeDay
       // 該日的參考時區：當日已有停留點用其時區，否則沿用全行程最後一個停留點的時區，再不然用瀏覽器時區
       const dayStops = stops.filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === targetDay)
       const refTz =
@@ -145,130 +146,163 @@ export default function TripView({
     }
   }
 
+  // 切換 Day：連動重置播放頭與加點基準，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
+  function changeDay(day: string) {
+    setActiveDay(day)
+    setSelectedId(null)
+    setPlayheadMs(null)
+    lastInsertedEndRef.current = 0
+  }
+
+  // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
+  const activeDayStops = stops
+    .filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === activeDay)
+    .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime())
+
   const content = (
-    <div className="flex min-h-0 flex-1">
-      <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
-        {apiKey && !stopsError && (
-          <PlaceSearch
-            onPick={p => addStop({ ...p, isCustom: false })}
-            onError={text => setNotice({ kind: 'error', text })}
-            disabled={busy}
-          />
-        )}
-        {draftPin && (
-          <form
-            className="flex gap-1 rounded border p-2"
-            onSubmit={async e => {
-              e.preventDefault()
-              const name = draftName.trim()
-              if (!name) return
-              const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
-              if (ok) {
-                setDraftPin(null)
-                setDraftName('')
-              }
-            }}
-          >
-            <input
-              className="min-w-0 flex-1 rounded border p-1 text-sm"
-              placeholder="自訂地點名稱"
-              value={draftName}
-              onChange={e => setDraftName(e.target.value)}
-              autoFocus
-              maxLength={200}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
+          {apiKey && !stopsError && (
+            <PlaceSearch
+              onPick={p => addStop({ ...p, isCustom: false })}
+              onError={text => setNotice({ kind: 'error', text })}
+              disabled={busy}
             />
-            <button className="rounded bg-foreground px-2 text-sm text-background" type="submit" disabled={busy}>
-              加入
-            </button>
-            <button className="rounded border px-2 text-sm" type="button" onClick={() => setDraftPin(null)}>
-              取消
-            </button>
-          </form>
-        )}
-        {notice && (
-          <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
-        )}
-        <ul className="flex flex-col gap-2">
-          {stops.map((stop, i) => (
-            <li
-              key={stop.id}
-              className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
-            >
-              <button
-                type="button"
-                className="block w-full cursor-pointer text-left"
-                onClick={() => {
-                  const selecting = selectedId !== stop.id
-                  setSelectedId(selecting ? stop.id : null)
-                  if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
-                }}
-              >
-                <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
-                <span className="mr-1 text-xs text-gray-400">
-                  {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
-                </span>
-                <span className="font-medium">{stop.name}</span>
-              </button>
-              {selectedId === stop.id && (
-                <StopEditor
-                  key={stop.id}
-                  stop={stop}
-                  currency={trip.currency}
-                  onDeleted={() => setSelectedId(null)}
-                />
-              )}
-            </li>
-          ))}
-          {stops.length === 0 && (
-            <li className="text-sm text-gray-500">
-              {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
-            </li>
           )}
-        </ul>
-      </aside>
-      <div className="min-h-0 flex-1">
-        {apiKey ? (
-          <Map
-            defaultCenter={center}
-            defaultZoom={12}
-            mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
-            gestureHandling="greedy"
-            disableDefaultUI={false}
-            onContextmenu={e => {
-              if (stopsError) return
-              const latLng = e.detail.latLng
-              if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
-            }}
-          >
-            {stops.map((stop, i) => (
-              <AdvancedMarker
+          {draftPin && (
+            <form
+              className="flex gap-1 rounded border p-2"
+              onSubmit={async e => {
+                e.preventDefault()
+                const name = draftName.trim()
+                if (!name) return
+                const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
+                if (ok) {
+                  setDraftPin(null)
+                  setDraftName('')
+                }
+              }}
+            >
+              <input
+                className="min-w-0 flex-1 rounded border p-1 text-sm"
+                placeholder="自訂地點名稱"
+                value={draftName}
+                onChange={e => setDraftName(e.target.value)}
+                autoFocus
+                maxLength={200}
+              />
+              <button className="rounded bg-foreground px-2 text-sm text-background" type="submit" disabled={busy}>
+                加入
+              </button>
+              <button className="rounded border px-2 text-sm" type="button" onClick={() => setDraftPin(null)}>
+                取消
+              </button>
+            </form>
+          )}
+          {notice && (
+            <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+          )}
+          <ul className="flex flex-col gap-2">
+            {activeDayStops.map((stop, i) => (
+              <li
                 key={stop.id}
-                position={{ lat: stop.lat, lng: stop.lng }}
-                onClick={() => setSelectedId(stop.id)}
-                title={stop.name}
+                className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
               >
-                <Pin
-                  background={selectedId === stop.id ? '#2563eb' : '#ef4444'}
-                  glyphColor="#fff"
-                  borderColor="#fff"
+                <button
+                  type="button"
+                  className="block w-full cursor-pointer text-left"
+                  onClick={() => {
+                    const selecting = selectedId !== stop.id
+                    setSelectedId(selecting ? stop.id : null)
+                    if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
+                  }}
                 >
-                  <span className="text-xs font-bold">{i + 1}</span>
-                </Pin>
-              </AdvancedMarker>
+                  <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
+                  <span className="mr-1 text-xs text-gray-400">
+                    {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
+                  </span>
+                  <span className="font-medium">{stop.name}</span>
+                </button>
+                {selectedId === stop.id && (
+                  <StopEditor
+                    key={stop.id}
+                    stop={stop}
+                    currency={trip.currency}
+                    onDeleted={() => setSelectedId(null)}
+                  />
+                )}
+              </li>
             ))}
-            {draftPin && (
-              <AdvancedMarker position={draftPin}>
-                <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
-              </AdvancedMarker>
+            {activeDayStops.length === 0 && (
+              <li className="text-sm text-gray-500">
+                {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
+              </li>
             )}
-            <CameraFollow target={cameraTarget} />
-          </Map>
-        ) : (
-          <div className="flex h-full items-center justify-center text-gray-500">
-            尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示
-          </div>
-        )}
+          </ul>
+        </aside>
+        <div className="min-h-0 flex-1">
+          {apiKey ? (
+            <Map
+              defaultCenter={center}
+              defaultZoom={12}
+              mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
+              gestureHandling="greedy"
+              disableDefaultUI={false}
+              onContextmenu={e => {
+                if (stopsError) return
+                const latLng = e.detail.latLng
+                if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+              }}
+            >
+              {stops.map((stop, i) => (
+                <AdvancedMarker
+                  key={stop.id}
+                  position={{ lat: stop.lat, lng: stop.lng }}
+                  onClick={() => {
+                    // 地圖上的停留點可能不在目前的 Day：先切到它所屬的那天，側欄才顯示得出編輯器
+                    changeDay(localDateKey(new Date(stop.starts_at).getTime(), stop.timezone))
+                    setSelectedId(stop.id)
+                  }}
+                  title={stop.name}
+                >
+                  <Pin
+                    background={selectedId === stop.id ? '#2563eb' : '#ef4444'}
+                    glyphColor="#fff"
+                    borderColor="#fff"
+                  >
+                    <span className="text-xs font-bold">{i + 1}</span>
+                  </Pin>
+                </AdvancedMarker>
+              ))}
+              {draftPin && (
+                <AdvancedMarker position={draftPin}>
+                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
+                </AdvancedMarker>
+              )}
+              <CameraFollow target={cameraTarget} />
+            </Map>
+          ) : (
+            <div className="flex h-full items-center justify-center text-gray-500">
+              尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示
+            </div>
+          )}
+        </div>
       </div>
+      <Timeline
+        stops={stops}
+        dayKeys={tripDayKeys(trip.start_date, trip.end_date)}
+        activeDay={activeDay}
+        onDayChange={changeDay}
+        selectedId={selectedId}
+        onSelect={id => {
+          setSelectedId(id)
+          const s = stops.find(x => x.id === id)
+          if (s) setCameraTarget({ lat: s.lat, lng: s.lng })
+        }}
+        playheadMs={playheadMs}
+        onPlayheadChange={setPlayheadMs}
+      />
     </div>
   )
 

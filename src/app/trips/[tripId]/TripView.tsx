@@ -43,8 +43,8 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
-  async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }) {
-    if (busy) return
+  async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
+    if (busy) return false
     setBusy(true)
     try {
       const schedule = stops.map(s => ({
@@ -78,10 +78,11 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
       })
       if (error) {
         setErrorMsg('加入停留點失敗，請稍後再試')
-        return
+        return false
       }
       setErrorMsg('')
       router.refresh()
+      return true
     } finally {
       setBusy(false)
     }
@@ -100,9 +101,11 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
               e.preventDefault()
               const name = draftName.trim()
               if (!name) return
-              await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
-              setDraftPin(null)
-              setDraftName('')
+              const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
+              if (ok) {
+                setDraftPin(null)
+                setDraftName('')
+              }
             }}
           >
             <input

@@ -924,6 +924,8 @@ export default function StopEditor({ stop, currency }: { stop: Stop; currency: s
 
 - [ ] **Step 2: TripView 掛入** — 側欄 `<li>` 內，`selectedId === stop.id` 時渲染 `<StopEditor key={stop.id} stop={stop} currency={trip.currency} />`（key 用 stop.id 讓切換選取時表單狀態重置；`onClick` 移到名稱那行避免點表單觸發收合——名稱行包一層 `<div onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}>`）。
 
+> **Task 7 品質審查前瞻提醒**：(1) 刪除當前選中的停留點成功後，需將 TripView 的 `selectedId` 重置為 null（可透過 StopEditor 接受 `onDeleted` callback 實現），避免懸空選取。(2) StopEditor 的 save/remove 錯誤處理沿用「失敗時保留表單狀態、僅顯示訊息」模式（其現有設計已符合，實作時勿改成失敗也清空）。
+
 - [ ] **Step 3: 驗證** — `tsc`/`build`/`npm test` 綠；手動：改名/改時間/加備註/花費 → 儲存 → 重新整理仍在；locked 勾選後 Studio 中該列 `locked = true`；刪除兩段式確認正常。
 
 - [ ] **Step 4: Commit**
@@ -1009,7 +1011,7 @@ git commit -m "test: E2E 補詳情頁空狀態斷言"
 
 **Files:** Modify: `README.md`
 
-- [ ] **Step 1:** README「核心功能」下補一段目前進度、開發段補 `npm run test:e2e` 與 Maps 金鑰需求說明（`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`、GCP 需啟用 Maps JavaScript API + Places API (New)、`mapId` 部署前需換正式值）。
+- [ ] **Step 1:** README「核心功能」下補一段目前進度、開發段補 `npm run test:e2e` 與 Maps 金鑰需求說明（`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`、GCP 需啟用 Maps JavaScript API + Places API (New)、`mapId` 部署前需換正式值）。已知限制一併記入：新增停留點後地圖鏡頭不會自動跟隨（defaultCenter 僅初始生效，Plan 3 時間軸的鏡頭跟隨機制屆時一併處理）、多日行程預設時段沿時間線尾端疊加（Task 6 註記）。
 
 - [ ] **Step 2:** 全量驗證：
 

@@ -6,6 +6,7 @@ import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
 import PlaceSearch from './PlaceSearch'
+import StopEditor from './StopEditor'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -128,11 +129,23 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
           {stops.map((stop, i) => (
             <li
               key={stop.id}
-              onClick={() => setSelectedId(stop.id)}
-              className={`cursor-pointer rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
+              className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
             >
-              <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
-              <span className="font-medium">{stop.name}</span>
+              <div
+                className="cursor-pointer"
+                onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}
+              >
+                <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
+                <span className="font-medium">{stop.name}</span>
+              </div>
+              {selectedId === stop.id && (
+                <StopEditor
+                  key={stop.id}
+                  stop={stop}
+                  currency={trip.currency}
+                  onDeleted={() => setSelectedId(null)}
+                />
+              )}
             </li>
           ))}
           {stops.length === 0 && <li className="text-sm text-gray-500">還沒有停留點，用上方搜尋加入第一個景點</li>}

@@ -109,6 +109,8 @@ export default function TripView({
 
   const syncedRef = useRef(false)
   const syncInFlightRef = useRef(false) // I-2：同時只跑一個 in-flight sync 請求
+  const legsRef = useRef(legs)
+  legsRef.current = legs // 續跑鏈的 setTimeout 閉包會捕捉舊 render 的 legs，比對一律讀 ref 取當下值
   const syncQueuedRef = useRef(false) // I-2：in-flight 期間又有新觸發，併成一次補跑（不逐一排隊）
   const syncRoundRef = useRef(0) // I-3：續跑回合數，使用者觸發的全新 sync 會歸零，只有續跑本身遞增
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // I-3：續跑計時器
@@ -148,7 +150,7 @@ export default function TripView({
       const j: { changed?: boolean; legCount?: number; pending?: number; incomplete?: boolean } = await res.json()
       // C-1：legCount 對不上目前 props 拿到的 legs 筆數，即使這次 sync 自己沒有結構異動
       // （changed=false）也代表 client 的快照落後於 DB（例如併發 sync 已建立該 leg），一樣要 refresh
-      if (j.changed || j.legCount !== legs.length) router.refresh()
+      if (j.changed || j.legCount !== legsRef.current.length) router.refresh()
       if ((j.pending ?? 0) > 0 || j.incomplete) {
         if (syncRoundRef.current < MAX_SYNC_ROUNDS) {
           syncRoundRef.current += 1

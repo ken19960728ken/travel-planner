@@ -38,7 +38,7 @@ function LoginForm() {
     const { data, error } = await supabase.auth.signUp({ email, password })
     setBusy(false)
     if (error) {
-      const alreadyRegistered = (error as { status?: number }).status === 422
+      const alreadyRegistered = error.code === 'user_already_exists'
       setNotice(
         alreadyRegistered
           ? { kind: 'error', text: '這個 Email 已註冊過，請直接登入' }

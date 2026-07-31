@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
@@ -47,11 +47,21 @@ function CameraFollow({ target }: { target: { lat: number; lng: number } | null 
   return null
 }
 
-export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] }) {
+export default function TripView({
+  trip,
+  stops,
+  stopsError,
+}: {
+  trip: Trip
+  stops: Stop[]
+  stopsError?: boolean
+}) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
+  const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
   const [draftName, setDraftName] = useState('')
   const [cameraTarget, setCameraTarget] = useState<{ lat: number; lng: number } | null>(null)
@@ -59,7 +69,8 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
   async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
-    if (busy) return false
+    if (busyRef.current) return false
+    busyRef.current = true
     setBusy(true)
     try {
       const schedule = stops.map(s => ({
@@ -70,6 +81,10 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
       }))
       // 空行程的預設開場：出發日早上九點（瀏覽器時區推定，Plan 3 隨時間軸精算為當地時區）
       const fallback = new Date(`${trip.start_date}T09:00:00`).getTime()
+      if (lastInsertedEndRef.current > 0) {
+        // router.refresh() 尚未把新列帶回 props 前，用上次成功寫入的結束時間墊底，避免連續加入算出相同時段
+        schedule.push({ id: '__pending__', startsAt: lastInsertedEndRef.current - 1, endsAt: lastInsertedEndRef.current, locked: false })
+      }
       const slot = nextDefaultSlot(schedule, fallback)
 
       let timezone = 'UTC'
@@ -92,14 +107,19 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
         ends_at: new Date(slot.endsAt).toISOString(),
       })
       if (error) {
-        setNotice({ kind: 'error', text: '加入停留點失敗，請稍後再試' })
+        setNotice({
+          kind: 'error',
+          text: error.code === '23514' ? '加入失敗：名稱長度或數值不符限制' : '加入停留點失敗，請稍後再試',
+        })
         return false
       }
+      lastInsertedEndRef.current = slot.endsAt
       setNotice(null)
       setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
       router.refresh()
       return true
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
@@ -107,8 +127,12 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
   const content = (
     <div className="flex min-h-0 flex-1">
       <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
-        {apiKey && (
-          <PlaceSearch onPick={p => addStop({ ...p, isCustom: false })} disabled={busy} />
+        {apiKey && !stopsError && (
+          <PlaceSearch
+            onPick={p => addStop({ ...p, isCustom: false })}
+            onError={text => setNotice({ kind: 'error', text })}
+            disabled={busy}
+          />
         )}
         {draftPin && (
           <form
@@ -171,7 +195,11 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
               )}
             </li>
           ))}
-          {stops.length === 0 && <li className="text-sm text-gray-500">還沒有停留點，用上方搜尋加入第一個景點</li>}
+          {stops.length === 0 && (
+            <li className="text-sm text-gray-500">
+              {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
+            </li>
+          )}
         </ul>
       </aside>
       <div className="min-h-0 flex-1">
@@ -183,6 +211,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
             gestureHandling="greedy"
             disableDefaultUI={false}
             onContextmenu={e => {
+              if (stopsError) return
               const latLng = e.detail.latLng
               if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
             }}
@@ -221,5 +250,14 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
 
   // APIProvider 需包住整個側欄 + 地圖：PlaceSearch（側欄）與 Map 都要用 useMapsLibrary/APIProviderContext，
   // 若只包地圖那一側，PlaceSearch 會拿不到 context（React context 不會跨兄弟節點），gmp-select 永遠不會註冊。
-  return apiKey ? <APIProvider apiKey={apiKey}>{content}</APIProvider> : content
+  return apiKey ? (
+    <APIProvider
+      apiKey={apiKey}
+      onError={() => setNotice({ kind: 'error', text: 'Google 地圖載入失敗，請檢查金鑰設定與網路' })}
+    >
+      {content}
+    </APIProvider>
+  ) : (
+    content
+  )
 }

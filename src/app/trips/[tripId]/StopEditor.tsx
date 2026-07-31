@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { toDatetimeLocalValue, fromDatetimeLocalValue } from '@/lib/domain/datetime'
@@ -27,15 +27,17 @@ export default function StopEditor({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
 
   async function save() {
-    if (busy) return
+    if (busyRef.current) return
     const trimmed = name.trim()
     const startMs = fromDatetimeLocalValue(startsAt)
     const endMs = fromDatetimeLocalValue(endsAt)
     if (!trimmed) return setNotice({ kind: 'error', text: '名稱不能為空' })
     if (!(endMs > startMs)) return setNotice({ kind: 'error', text: '結束時間必須晚於開始時間' })
     if (cost !== '' && Number(cost) < 0) return setNotice({ kind: 'error', text: '花費不能是負數' })
+    busyRef.current = true
     setBusy(true)
     try {
       const supabase = createClient()
@@ -61,12 +63,14 @@ export default function StopEditor({
       setNotice({ kind: 'success', text: '已儲存 ✓' })
       router.refresh()
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
 
   async function remove() {
-    if (busy) return
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       const supabase = createClient()
@@ -78,6 +82,7 @@ export default function StopEditor({
       onDeleted?.()
       router.refresh()
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }

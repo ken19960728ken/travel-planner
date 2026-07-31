@@ -34,6 +34,8 @@ export default async function TripDetailPage({
     .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost')
     .eq('trip_id', tripId)
     .order('starts_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(500)
 
   return (
     <main className="flex h-screen flex-col">
@@ -45,7 +47,7 @@ export default async function TripDetailPage({
       {stopsError && (
         <p className="border-b p-2 text-sm text-red-600">停留點讀取失敗，請重新整理再試</p>
       )}
-      <TripView trip={trip} stops={stops ?? []} />
+      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} />
     </main>
   )
 }

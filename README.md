@@ -44,10 +44,12 @@ supabase start                 # 啟動本地 Supabase（首次會拉 Docker 映
 cp .env.example .env.local     # 填入 supabase status 顯示的 URL 與 anon key
 npm run dev                    # http://localhost:3000
 npm test                       # 單元測試 + RLS 整合測試（需本地 Supabase）
-npm run test:e2e               # Playwright E2E（需本地 Supabase 與 dev server 可用埠）
+npm run test:e2e               # Playwright E2E（需本地 Supabase 與 dev server 可用埠；缺 .env.test.local 時測試仍會跑，但資料清理會靜默跳過）
 ```
 
 地圖功能需要 `.env.local` 補上 `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`；GCP 專案需啟用 Maps JavaScript API 與 Places API (New)，金鑰建議加上 referrer 與 API 限制。
+
+本地 Google 登入需要專案根目錄 `.env`（`SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET`，見 `supabase/config.toml`），啟動 Supabase 前先 `set -a && source .env && set +a`。
 
 節能提示：日常開發只需要四個核心容器，其餘可停——
 

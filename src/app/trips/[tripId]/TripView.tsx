@@ -91,7 +91,8 @@ function RevertToAutoButton({ legId, onChanged }: { legId: string; onChanged: ()
       const { error } = await supabase
         .from('legs')
         .update({
-          source: 'auto', stale: false, estimated_cost: null,
+          // mode 一併重設：flight/custom 不在 sync 的 AUTO_MODES，留著會變成永遠算不出的殭屍段
+          source: 'auto', mode: 'transit', stale: false, estimated_cost: null,
           duration_minutes: null, computed_at: null, departs_at: null, arrives_at: null,
         })
         .eq('id', legId)
@@ -109,7 +110,7 @@ function RevertToAutoButton({ legId, onChanged }: { legId: string; onChanged: ()
   if (confirming) {
     return (
       <span className="inline-flex items-center gap-1 text-amber-700">
-        會清除此段的手動內容與花費
+        會清除此段的手動內容與花費，並改用大眾運輸自動計算
         <button type="button" className="rounded bg-amber-600 px-1 text-white disabled:opacity-50" disabled={busy} onClick={revert}>
           確認
         </button>

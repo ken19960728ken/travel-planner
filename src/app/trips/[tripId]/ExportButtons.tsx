@@ -34,11 +34,14 @@ export default function ExportButtons({
   trip,
   stops,
   legs,
+  disabled = false,
 }: {
   tripId: string
   trip: SnapshotTrip
   stops: SnapshotStop[]
   legs: SnapshotLeg[]
+  /** stops/legs 讀取失敗時停用快照與 JSON——空資料定稿會以「已定稿 ✓」覆蓋掉不可重來的出發基準線 */
+  disabled?: boolean
 }) {
   const router = useRouter()
   const [confirming, setConfirming] = useState(false)
@@ -89,7 +92,7 @@ export default function ExportButtons({
       >
         下載 Excel
       </a>
-      <button type="button" className="rounded border px-2 py-1 text-sm" onClick={exportJson}>
+      <button type="button" className="rounded border px-2 py-1 text-sm disabled:opacity-50" disabled={disabled} onClick={exportJson}>
         匯出 JSON
       </button>
       {confirming ? (
@@ -114,7 +117,8 @@ export default function ExportButtons({
       ) : (
         <button
           type="button"
-          className="rounded border px-2 py-1 text-sm font-semibold"
+          className="rounded border px-2 py-1 text-sm font-semibold disabled:opacity-50"
+          disabled={disabled}
           onClick={() => {
             setNotice(null)
             setConfirming(true)
@@ -122,6 +126,9 @@ export default function ExportButtons({
         >
           出發！定稿
         </button>
+      )}
+      {disabled && (
+        <span className="text-sm text-red-600">資料讀取失敗，暫時無法定稿</span>
       )}
     </div>
   )

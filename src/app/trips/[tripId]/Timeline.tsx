@@ -58,9 +58,13 @@ export default function Timeline({
     const { id, deltaMs } = drag
     if (Math.abs(deltaMs) >= SNAP_MS && onMove) {
       // 保留 drag 狀態讓色塊停在預覽位置，等 RPC + refresh 把新時間帶回 props 才清掉，
-      // 避免「先彈回原位、新資料一到又跳一次」的兩段式動畫
-      await onMove(id, deltaMs)
-      setDrag(null)
+      // 避免「先彈回原位、新資料一到又跳一次」的兩段式動畫。
+      // finally 保證任何例外都不會讓 drag 卡死（否則 beginDrag 會永久擋住後續拖曳）
+      try {
+        await onMove(id, deltaMs)
+      } finally {
+        setDrag(null)
+      }
     } else {
       setDrag(null)
       onSelect(id) // 位移過小視為點擊，交由統一的 pointer 流程處理選取

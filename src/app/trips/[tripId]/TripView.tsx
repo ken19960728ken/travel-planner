@@ -11,6 +11,7 @@ import { interpolatePosition } from '@/lib/domain/interpolate'
 import { adjacentPairs } from '@/lib/domain/legSync'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
+import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
 import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
@@ -431,7 +432,14 @@ export default function TripView({
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
                       </button>
                       {selectedLegId === leg.id && (
-                        <p className="text-gray-400">編輯器 Task 6 接入</p>
+                        <LegEditor
+                          key={leg.id}
+                          leg={leg}
+                          fromStop={stop}
+                          toStop={next}
+                          currency={trip.currency}
+                          onChanged={() => void syncLegs()}
+                        />
                       )}
                     </li>
                   )}

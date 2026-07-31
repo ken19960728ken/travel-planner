@@ -3,6 +3,7 @@ import { notFound, redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import TripView from './TripView'
 import type { Leg } from './TripView'
+import ExportButtons from './ExportButtons'
 
 export default async function TripDetailPage({
   params,
@@ -51,6 +52,7 @@ export default async function TripDetailPage({
         <Link href="/trips" className="text-sm text-gray-500">← 我的行程</Link>
         <h1 className="text-lg font-bold">{trip.title}</h1>
         <span className="text-sm text-gray-500">{trip.start_date} ~ {trip.end_date}</span>
+        <ExportButtons tripId={tripId} />
       </header>
       {stopsError && (
         <p className="border-b p-2 text-sm text-red-600">停留點讀取失敗，請重新整理再試</p>

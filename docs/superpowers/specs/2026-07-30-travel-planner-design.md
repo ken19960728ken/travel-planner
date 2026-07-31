@@ -128,6 +128,7 @@ erDiagram
         text timezone "IANA 時區，如 Asia/Tokyo，由座標自動判定"
         timestamptz starts_at
         timestamptz ends_at
+        bool locked "鎖定時間（航班、訂位），連鎖順延不移動"
         text notes
         numeric estimated_cost "可空"
         uuid updated_by
@@ -153,6 +154,7 @@ erDiagram
         uuid trip_id FK
         text label "如「出發前定稿」"
         jsonb snapshot "使用者計畫資料的凍結副本（不含 Google 衍生資料）"
+        int snapshot_version "快照格式版本，供未來格式演進"
     }
     route_cache {
         text cache_key PK "起點+終點+交通方式+出發時段(30分桶)"
@@ -315,3 +317,8 @@ flowchart LR
 | TRANSIT 涵蓋缺口 | 官方無全球保證，新興地區二三線城市可能查無路線 | 已由手動修正設計接住；上線前對目標市場抽樣實測 |
 | API 費用隨規模成長 | 三個 SKU 各 10,000 次/月免費，超額 $2.8–$7/千次 | 快取 + 限流已設計；成長期監控帳單 |
 | 產品命名 | 已定 travel-planner（GitHub repo 名）；對外品牌名可再議 | 上線前 |
+| 帳號刪除語義 | trips.owner_id 為 on delete set null：owner 刪帳號後行程保留給其他成員，無 owner 的行程暫無人可管理（轉移擁有權功能屬後續迭代） | 共編功能上線前 |
+| updated_by / created_by 無 FK | 使用者刪除後這些欄位殘留孤兒 uuid，UI 需 fallback 顯示「已離開的成員」 | Plan 3 UI 實作時 |
+| Realtime DELETE 事件不套 RLS | Supabase 官方行為：DELETE 廣播給所有訂閱者（payload 僅剩 PK），client 須以「本地有此 id 才移除」冪等處理，且不可依賴 payload 中的 trip_id | Plan 5 共編實作時 |
+| 本機 supabase db reset 故障 | CLI 2.110.0 報 LegacyDbBootstrapError；本機重建 schema 的替代指令：drop schema public cascade 後以 psql 重跑 migration | CLI 修復後移除 workaround |
+| Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |

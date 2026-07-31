@@ -30,6 +30,31 @@
 
 ## 開發
 
+前置需求：nvm（Node 22+）、Docker Desktop、Supabase CLI（`brew install supabase/tap/supabase`）。
+
 ```bash
-# 尚未建立程式碼骨架，實作開始後補充開發指引
+nvm use --lts
+npm install
+supabase start                 # 啟動本地 Supabase（首次會拉 Docker 映像）
+cp .env.example .env.local     # 填入 supabase status 顯示的 URL 與 anon key
+npm run dev                    # http://localhost:3000
+npm test                       # 單元測試 + RLS 整合測試（需本地 Supabase）
+```
+
+節能提示：日常開發只需要四個核心容器，其餘可停——
+
+```bash
+docker stop supabase_studio_traval supabase_pg_meta_traval supabase_inbucket_traval \
+  supabase_edge_runtime_traval supabase_analytics_traval supabase_vector_traval \
+  supabase_storage_traval supabase_realtime_traval
+# 收工時全部停掉：supabase stop
+```
+
+已知問題：本機 CLI 2.110.0 的 `supabase db reset` 會報 `LegacyDbBootstrapError`。替代做法（等效重建 schema）：
+
+```bash
+docker exec supabase_db_traval psql -U postgres -c \
+  "drop schema public cascade; create schema public; grant usage on schema public to postgres, anon, authenticated, service_role; grant all on schema public to postgres;"
+docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
+  < supabase/migrations/20260730000000_init.sql
 ```

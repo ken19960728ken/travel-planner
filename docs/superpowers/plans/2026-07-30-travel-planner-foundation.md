@@ -615,6 +615,8 @@ Expected: 輸出本地各服務 URL 與 anon / service_role key。第一次啟�
 
 - [ ] **Step 3: 撰寫初始 migration**
 
+> ⚠️ **本區塊已過時**：實作後 schema 經 db-expert 審查大幅硬化（複合 FK、成員管理 policies、my_trip_ids semi-join、check constraints、GRANT、NULL guard 等），**權威版本是 repo 中的 `supabase/migrations/20260730000000_init.sql`**。重建 schema 請以該檔為準，不要複製下方 SQL。
+
 Create `supabase/migrations/20260730000000_init.sql`:
 
 ```sql
@@ -692,8 +694,12 @@ language sql security definer stable set search_path = public as $$
 $$;
 
 alter table public.trips enable row level security;
+-- owner 條件除了語義上合理（owner 永遠可見自己的行程），也是必要的：
+-- INSERT ... RETURNING 的可見性檢查發生在 AFTER trigger 寫入 trip_members 之前，
+-- 只靠 is_trip_member 會讓「建立行程並取回 id」的標準流程被 RLS 拒絕
 create policy "成員可讀行程"
-  on public.trips for select to authenticated using (public.is_trip_member(id));
+  on public.trips for select to authenticated
+  using (public.is_trip_member(id) or owner_id = auth.uid());
 create policy "登入者可建行程（owner 是自己）"
   on public.trips for insert to authenticated with check (owner_id = auth.uid());
 create policy "editor 以上可改行程"
@@ -735,6 +741,7 @@ create table public.stops (
   timezone text not null,
   starts_at timestamptz not null,
   ends_at timestamptz not null,
+  locked boolean not null default false,
   notes text,
   estimated_cost numeric,
   updated_by uuid default auth.uid(),
@@ -827,6 +834,16 @@ create trigger legs_touch before update on public.legs
 alter publication supabase_realtime add table public.trips, public.stops, public.legs;
 alter table public.stops replica identity full;
 alter table public.legs replica identity full;
+
+-- ============ 表級權限（RLS 的前置門檻：沒有 GRANT，policy 根本不會被評估） ============
+-- CLI migration 以 postgres 角色執行，不套用 supabase_admin 的 default ACL，必須顯式 GRANT
+grant usage on schema public to anon, authenticated, service_role;
+grant select, insert, update, delete
+  on public.profiles, public.trips, public.trip_members,
+     public.stops, public.legs, public.trip_snapshots
+  to authenticated;
+-- route_cache 刻意不 grant 給 authenticated/anon（用戶端全拒）；service_role 全表可用
+grant select, insert, update, delete on all tables in schema public to service_role;
 ```
 
 - [ ] **Step 4: 套用 migration 並驗證**
@@ -1469,7 +1486,7 @@ git push
 ## 完成定義（Definition of Done）
 
 - [ ] `npm run build` 成功
-- [ ] `npm test` 全綠（本地 Supabase 啟動時 22 tests，含 RLS 5）
+- [ ] `npm test` 全綠（本地 Supabase 啟動時 26 tests，含 RLS 5；比原計畫多 4 個係審查過程追加的邊界測試）
 - [ ] 手動流程通過：註冊 → 登入 → 建立行程 → 清單顯示；未登入訪問 `/trips` 被導向 `/login`
 - [ ] 非成員無法讀寫他人行程（RLS 測試證明）
 - [ ] 全部改動已 commit 並 push

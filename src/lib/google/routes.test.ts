@@ -60,7 +60,7 @@ describe('parseComputeRoutesResponse', () => {
     expect(parseComputeRoutesResponse({ routes: [{ duration: 'oops' }] })).toEqual({ ok: false, reason: 'bad_response' })
     expect(parseComputeRoutesResponse(null)).toEqual({ ok: false, reason: 'bad_response' })
   })
-  it('duration 超過 30 天上限（43200 分鐘）回報 bad_response（R-2：防禦異常大數值污染 30 天快取）', () => {
-    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'bad_response' })
+  it('duration 超過 30 天上限（43200 分鐘）視為查無路線（M-4：穩定結論可快取，避免每次重打 Google）', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'no_route' })
   })
 })

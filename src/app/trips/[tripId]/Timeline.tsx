@@ -185,6 +185,12 @@ export default function Timeline({
               const ge = Math.min(new Date(to.starts_at).getTime(), win.end) // 跨夜段夾到視窗尾（M-4）
               if (ge <= gs) return null
               const tight = tightPairs.has(`${from.id}→${to.id}`)
+              const leftPct = pct(gs)
+              const rawWidthPct = pct(ge) - leftPct
+              // I-1：視覺最小寬度撐寬到 2%，但右緣不可超過軌道（100%），空檔越接近視窗尾越明顯
+              const widthPct = Math.min(Math.max(rawWidthPct, 2), 100 - leftPct)
+              // I-1：被撐寬出來的死區不該搶走點擊——選取一律走側欄交通列，連接條在此僅供顯示
+              const isDeadZone = rawWidthPct < 2
               return (
                 <button
                   key={leg.id}
@@ -194,9 +200,11 @@ export default function Timeline({
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
                   title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
                   className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden whitespace-nowrap rounded text-center text-[10px] leading-tight ${
-                    tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'
-                  } ${selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''}`}
-                  style={{ left: `${pct(gs)}%`, width: `${Math.max(pct(ge) - pct(gs), 2)}%` }}
+                    isDeadZone ? 'pointer-events-none' : ''
+                  } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
+                    selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
+                  }`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
                 >
                   {MODE_ICON[leg.mode]}
                   {leg.stale && '⚠️'}
@@ -206,7 +214,7 @@ export default function Timeline({
             })}
             {ph !== null && (
               <div
-                className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-orange-500"
+                className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-orange-500"
                 style={{ left: `${pct(ph)}%` }}
               />
             )}

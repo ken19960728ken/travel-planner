@@ -91,20 +91,26 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const computeQueue: ComputeItem[] = []
   let changed = false
   let pending = 0
+  // incomplete（I-3）：任一迴圈因牆鐘預算中斷即 true，client 據此判斷是否該排下一輪續跑
+  let incomplete = false
+  // legCount（C-1）：sync 後該 trip 的 leg 數，用結構同步已知的異動量算，不多打一次 DB。
+  // 初始值＝client 讀到的舊快照筆數，removeAuto 成功才減、create 成功「或」23505（列已存在）才加。
+  let removedCount = 0
+  let createdCount = 0
 
   // R-1：三個結構同步迴圈各自逐項檢查牆鐘預算，段數多時不讓結構同步本身撞穿 maxDuration。
   // markStale/removeAuto 中斷時剩餘項單純留給下次 sync 的結構同步重新判定（它們是「還沒改」，
   // 不是「還沒算」，語義上不算 pending——與這兩迴圈個別寫入失敗時只記 log 不記 pending 一致）。
   for (const id of plan.markStale) {
-    if (budgetExceeded()) break
+    if (budgetExceeded()) { incomplete = true; break }
     const { error } = await supabase.from('legs').update({ stale: true }).eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] markStale failed', { tripId, code: error.code, message: error.message })
   }
   for (const id of plan.removeAuto) {
-    if (budgetExceeded()) break
+    if (budgetExceeded()) { incomplete = true; break }
     const { error } = await supabase.from('legs').delete().eq('id', id)
-    if (!error) changed = true
+    if (!error) { changed = true; removedCount++ }
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (let i = 0; i < plan.create.length; i++) {
@@ -113,6 +119,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       // 仍計入 pending——這些配對遲早要建 leg 並算 duration，牆鐘用盡而「還沒建」跟計算迴圈
       // 牆鐘用盡而「還沒算」是同一種「還沒完成」，語義上都算未完工作，pending 才如實反映總量。
       pending += plan.create.length - i
+      incomplete = true
       break
     }
     const c = plan.create[i]
@@ -123,9 +130,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       .single()
     if (!error && data) {
       changed = true
+      createdCount++
       computeQueue.push({ legId: data.id, fromStopId: c.fromStopId, toStopId: c.toStopId, mode: 'transit' })
-    } else if (error && error.code !== '23505') {
-      // 23505：併發同開時撞 unique，視為他人已建，靜默略過且不入列——其餘錯誤才記錄（審查 I-3）
+    } else if (error && error.code === '23505') {
+      // C-1：併發同開時撞 unique，列已存在但不在這個 client 的快照裡——對 client 仍是一筆變化，
+      // 需回報 changed 才會 refresh；該列目前狀態未知（可能已算完也可能還沒），保守計入 pending，
+      // 但不入 computeQueue（不知道它的 from/to/mode 是否與本地 plan 假設一致，交還下次 sync 判定）
+      changed = true
+      createdCount++
+      pending++
+    } else if (error) {
       console.error('[legs/sync] create leg failed', { tripId, code: error.code, message: error.message })
     }
   }
@@ -134,6 +148,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     const meta = legMetaById.get(legId)
     if (meta) computeQueue.push({ legId, fromStopId: meta.from_stop_id, toStopId: meta.to_stop_id, mode: meta.mode })
   }
+  const legCount = (legRows?.length ?? 0) - removedCount + createdCount
 
   const stopById = new Map(stops.map(s => [s.id, s]))
   const service = createServiceClient()
@@ -158,6 +173,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     if (budgetExceeded()) {
       // 牆鐘預算耗盡（審查 I-1）：剩餘段一律留 pending，絕不讓迴圈把 maxDuration 撞穿
       pending += computeQueue.length - i
+      incomplete = true
       break
     }
     const item = computeQueue[i]
@@ -255,11 +271,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         computed_at: new Date(now).toISOString(), stale: false,
       }).eq('id', item.legId)
       if (!error) changed = true
-      else console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
+      else {
+        pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
+        console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
+      }
     } else {
       pending++
     }
   }
 
-  return NextResponse.json({ ok: true, changed, computed, pending })
+  return NextResponse.json({ ok: true, changed, computed, pending, legCount, incomplete })
 }

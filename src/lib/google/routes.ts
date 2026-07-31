@@ -61,7 +61,9 @@ export function parseComputeRoutesResponse(json: unknown): ComputedRoute {
   const m = typeof route.duration === 'string' ? /^(\d+(?:\.\d+)?)s$/.exec(route.duration) : null
   if (!m) return { ok: false, reason: 'bad_response' }
   const durationMinutes = Math.max(1, Math.round(Number(m[1]) / 60))
-  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'bad_response' } // R-2：超過 30 天份鐘數視為異常
+  // M-4：改回 no_route（穩定結論可快取）——bad_response 在 sync 端點被視為暫時性異常不進 route_cache，
+  // 會讓這種畸形回應每次 sync 都重打 Google；異常值本身是穩定的（同一段路線不會忽大忽小），值得快取
+  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'no_route' }
   return {
     ok: true,
     durationMinutes,

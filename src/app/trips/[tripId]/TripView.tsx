@@ -56,6 +56,8 @@ export type Leg = {
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
+const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
+const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
@@ -106,22 +108,66 @@ export default function TripView({
   }, [stops])
 
   const syncedRef = useRef(false)
+  const syncInFlightRef = useRef(false) // I-2：同時只跑一個 in-flight sync 請求
+  const syncQueuedRef = useRef(false) // I-2：in-flight 期間又有新觸發，併成一次補跑（不逐一排隊）
+  const syncRoundRef = useRef(0) // I-3：續跑回合數，使用者觸發的全新 sync 會歸零，只有續跑本身遞增
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // I-3：續跑計時器
+  const syncNoticeShownRef = useRef(false) // S-1：連線失敗提示只跳一次，避免每輪續跑都打擾使用者
   useEffect(() => {
     if (syncedRef.current) return
     syncedRef.current = true
     void syncLegs()
+    return () => {
+      // I-3：unmount 時清掉排隊中的續跑計時器，避免對已卸載的元件觸發後續 setState
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
+    }
+    // 只在掛載時觸發一次；syncLegs 透過 closure 讀最新 props/state，不需要讓這個 effect
+    // 隨依賴重跑（M-5）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 交通段同步：結構比對 + 自動計算都在 server（金鑰不落 client）。
-  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試。
-  async function syncLegs() {
+  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試（HTTP 非 2xx 例外，S-1 跳一次提示）。
+  // isRetry=true 代表這是 I-3 排程的續跑，不重置回合額度；使用者操作觸發的呼叫一律 isRetry=false（全新額度）。
+  async function syncLegs(isRetry = false) {
+    if (syncInFlightRef.current) {
+      syncQueuedRef.current = true // I-2：coalescing——已有請求在跑，這次觸發併入下一次補跑
+      return
+    }
+    if (!isRetry) syncRoundRef.current = 0
+    syncInFlightRef.current = true
     try {
       const res = await fetch(`/api/trips/${trip.id}/legs/sync`, { method: 'POST' })
-      if (!res.ok) return
-      const j: { changed?: boolean } = await res.json()
-      if (j.changed) router.refresh()
+      if (!res.ok) {
+        if (!syncNoticeShownRef.current) {
+          syncNoticeShownRef.current = true
+          setNotice({ kind: 'error', text: '交通段暫時無法計算' }) // S-1
+        }
+        return
+      }
+      const j: { changed?: boolean; legCount?: number; pending?: number; incomplete?: boolean } = await res.json()
+      // C-1：legCount 對不上目前 props 拿到的 legs 筆數，即使這次 sync 自己沒有結構異動
+      // （changed=false）也代表 client 的快照落後於 DB（例如併發 sync 已建立該 leg），一樣要 refresh
+      if (j.changed || j.legCount !== legs.length) router.refresh()
+      if ((j.pending ?? 0) > 0 || j.incomplete) {
+        if (syncRoundRef.current < MAX_SYNC_ROUNDS) {
+          syncRoundRef.current += 1
+          syncTimerRef.current = setTimeout(() => void syncLegs(true), SYNC_RETRY_MS) // I-3：續跑
+        }
+      }
     } catch {
       // 網路失敗：交通段維持現狀，不打擾使用者
+    } finally {
+      syncInFlightRef.current = false
+      if (syncQueuedRef.current) {
+        syncQueuedRef.current = false
+        // 補跑取代任何已排的續跑計時器，避免同時有兩條路徑各自觸發下一次 syncLegs
+        if (syncTimerRef.current) {
+          clearTimeout(syncTimerRef.current)
+          syncTimerRef.current = null
+        }
+        void syncLegs() // 視為新一輪使用者觸發，回合額度重置
+      }
     }
   }
 
@@ -373,12 +419,13 @@ export default function TripView({
                     <li className="pl-5 text-xs">
                       <button
                         type="button"
+                        aria-pressed={selectedLegId === leg.id}
                         className={`cursor-pointer ${selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'}`}
                         onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
                       >
                         {MODE_ICON[leg.mode]} {legDurationText(leg)}
                         {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
-                        {crossDay && ` → 隔日 ${next.name}`}
+                        {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
                       </button>
                       {selectedLegId === leg.id && (

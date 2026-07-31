@@ -553,8 +553,8 @@ describe('parseComputeRoutesResponse', () => {
     expect(parseComputeRoutesResponse({ routes: [{ duration: 'oops' }] })).toEqual({ ok: false, reason: 'bad_response' })
     expect(parseComputeRoutesResponse(null)).toEqual({ ok: false, reason: 'bad_response' })
   })
-  it('duration 超過 30 天上限（43200 分鐘）回報 bad_response（R-2：防禦異常大數值污染 30 天快取）', () => {
-    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'bad_response' })
+  it('duration 超過 30 天上限（43200 分鐘）視為查無路線（M-4：穩定結論可快取，避免每次重打 Google）', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'no_route' })
   })
 })
 ```
@@ -625,7 +625,9 @@ export function parseComputeRoutesResponse(json: unknown): ComputedRoute {
   const m = typeof route.duration === 'string' ? /^(\d+(?:\.\d+)?)s$/.exec(route.duration) : null
   if (!m) return { ok: false, reason: 'bad_response' }
   const durationMinutes = Math.max(1, Math.round(Number(m[1]) / 60))
-  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'bad_response' } // R-2：超過 30 天份鐘數視為異常
+  // M-4：改回 no_route（穩定結論可快取）——bad_response 在 sync 端點被視為暫時性異常不進 route_cache，
+  // 會讓這種畸形回應每次 sync 都重打 Google；異常值本身是穩定的（同一段路線不會忽大忽小），值得快取
+  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'no_route' }
   return {
     ok: true,
     durationMinutes,
@@ -635,7 +637,7 @@ export function parseComputeRoutesResponse(json: unknown): ComputedRoute {
 }
 ```
 
-- [ ] **Step 4: 跑綠（9 tests，含 R-2 durationMinutes 上限案例）→ 全套綠 → Commit** `feat: Routes API 請求組裝與回應解析（官方 v2 格式查證）`
+- [ ] **Step 4: 跑綠（9 tests，含 durationMinutes 上限案例：R-2 加入、M-4 改判為 no_route）→ 全套綠 → Commit** `feat: Routes API 請求組裝與回應解析（官方 v2 格式查證）`
 
 ---
 
@@ -762,20 +764,26 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const computeQueue: ComputeItem[] = []
   let changed = false
   let pending = 0
+  // incomplete（I-3）：任一迴圈因牆鐘預算中斷即 true，client 據此判斷是否該排下一輪續跑
+  let incomplete = false
+  // legCount（C-1）：sync 後該 trip 的 leg 數，用結構同步已知的異動量算，不多打一次 DB。
+  // 初始值＝client 讀到的舊快照筆數，removeAuto 成功才減、create 成功「或」23505（列已存在）才加。
+  let removedCount = 0
+  let createdCount = 0
 
   // R-1：三個結構同步迴圈各自逐項檢查牆鐘預算，段數多時不讓結構同步本身撞穿 maxDuration。
   // markStale/removeAuto 中斷時剩餘項單純留給下次 sync 的結構同步重新判定（它們是「還沒改」，
   // 不是「還沒算」，語義上不算 pending——與這兩迴圈個別寫入失敗時只記 log 不記 pending 一致）。
   for (const id of plan.markStale) {
-    if (budgetExceeded()) break
+    if (budgetExceeded()) { incomplete = true; break }
     const { error } = await supabase.from('legs').update({ stale: true }).eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] markStale failed', { tripId, code: error.code, message: error.message })
   }
   for (const id of plan.removeAuto) {
-    if (budgetExceeded()) break
+    if (budgetExceeded()) { incomplete = true; break }
     const { error } = await supabase.from('legs').delete().eq('id', id)
-    if (!error) changed = true
+    if (!error) { changed = true; removedCount++ }
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (let i = 0; i < plan.create.length; i++) {
@@ -784,6 +792,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       // 仍計入 pending——這些配對遲早要建 leg 並算 duration，牆鐘用盡而「還沒建」跟計算迴圈
       // 牆鐘用盡而「還沒算」是同一種「還沒完成」，語義上都算未完工作，pending 才如實反映總量。
       pending += plan.create.length - i
+      incomplete = true
       break
     }
     const c = plan.create[i]
@@ -794,9 +803,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       .single()
     if (!error && data) {
       changed = true
+      createdCount++
       computeQueue.push({ legId: data.id, fromStopId: c.fromStopId, toStopId: c.toStopId, mode: 'transit' })
-    } else if (error && error.code !== '23505') {
-      // 23505：併發同開時撞 unique，視為他人已建，靜默略過且不入列——其餘錯誤才記錄（審查 I-3）
+    } else if (error && error.code === '23505') {
+      // C-1：併發同開時撞 unique，列已存在但不在這個 client 的快照裡——對 client 仍是一筆變化，
+      // 需回報 changed 才會 refresh；該列目前狀態未知（可能已算完也可能還沒），保守計入 pending，
+      // 但不入 computeQueue（不知道它的 from/to/mode 是否與本地 plan 假設一致，交還下次 sync 判定）
+      changed = true
+      createdCount++
+      pending++
+    } else if (error) {
       console.error('[legs/sync] create leg failed', { tripId, code: error.code, message: error.message })
     }
   }
@@ -805,6 +821,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     const meta = legMetaById.get(legId)
     if (meta) computeQueue.push({ legId, fromStopId: meta.from_stop_id, toStopId: meta.to_stop_id, mode: meta.mode })
   }
+  const legCount = (legRows?.length ?? 0) - removedCount + createdCount
 
   const stopById = new Map(stops.map(s => [s.id, s]))
   const service = createServiceClient()
@@ -829,6 +846,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     if (budgetExceeded()) {
       // 牆鐘預算耗盡（審查 I-1）：剩餘段一律留 pending，絕不讓迴圈把 maxDuration 撞穿
       pending += computeQueue.length - i
+      incomplete = true
       break
     }
     const item = computeQueue[i]
@@ -926,17 +944,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         computed_at: new Date(now).toISOString(), stale: false,
       }).eq('id', item.legId)
       if (!error) changed = true
-      else console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
+      else {
+        pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
+        console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
+      }
     } else {
       pending++
     }
   }
 
-  return NextResponse.json({ ok: true, changed, computed, pending })
+  return NextResponse.json({ ok: true, changed, computed, pending, legCount, incomplete })
 }
 ```
 
-- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）` + 複審遺留 `fix: sync 牆鐘涵蓋結構同步、duration 上限、寫回失敗計數`
+- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）` + 複審遺留 `fix: sync 牆鐘涵蓋結構同步、duration 上限、寫回失敗計數` + Task 5 審查 `fix: 前端接線加固（併發可見性、連接條死區、sync 去重與續跑）`（route.ts 部分：23505 分支改回報 changed/pending、回應加 legCount/incomplete、no_route 寫回失敗補 pending++）
 
 ---
 
@@ -951,8 +972,11 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     .from('legs')
     .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost')
     .eq('trip_id', tripId)
+    .order('id', { ascending: true })
     .limit(500)
 ```
+
+（M-3：`.order('id')` 與 stops 查詢的排序慣例對齊；曾一度誤用 `.limit(501)` 比照 sync route.ts 的哨兵慣例，經複審指出這裡是單純分頁讀取非結構同步護欄，501 那套語義不適用，M-3 回退為 500。）
 
 `<TripView ... legs={(legs ?? []) as Leg[]} />`（page.tsx 補 `import type { Leg } from './TripView'`）。**M-3 定案**：DB 的 `mode`/`source` 是 text 欄位，聯集型別的收斂就在這個邊界以 `as Leg[]` 做一次——值域由 DB check constraint 保證，不引 zod、不逐欄位轉換，其他地方一律不再 cast。legsError 併入現有 stopsError 橫幅語義（讀取失敗提示 + 寫入入口不關閉——legs 讀失敗不影響 stops 編輯，僅交通列缺席，如實顯示「交通段讀取失敗」）。
 
@@ -1006,25 +1030,71 @@ props 增 `legs: Leg[]`；狀態增 `const [selectedLegId, setSelectedLegId] = u
 
 ```tsx
   const syncedRef = useRef(false)
+  const syncInFlightRef = useRef(false) // I-2：同時只跑一個 in-flight sync 請求
+  const syncQueuedRef = useRef(false) // I-2：in-flight 期間又有新觸發，併成一次補跑（不逐一排隊）
+  const syncRoundRef = useRef(0) // I-3：續跑回合數，使用者觸發的全新 sync 會歸零，只有續跑本身遞增
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // I-3：續跑計時器
+  const syncNoticeShownRef = useRef(false) // S-1：連線失敗提示只跳一次，避免每輪續跑都打擾使用者
   useEffect(() => {
     if (syncedRef.current) return
     syncedRef.current = true
     void syncLegs()
+    return () => {
+      // I-3：unmount 時清掉排隊中的續跑計時器，避免對已卸載的元件觸發後續 setState
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
+    }
+    // 只在掛載時觸發一次；syncLegs 透過 closure 讀最新 props/state，不需要讓這個 effect
+    // 隨依賴重跑（M-5）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 交通段同步：結構比對 + 自動計算都在 server（金鑰不落 client）。
-  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試。
-  async function syncLegs() {
+  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試（HTTP 非 2xx 例外，S-1 跳一次提示）。
+  // isRetry=true 代表這是 I-3 排程的續跑，不重置回合額度；使用者操作觸發的呼叫一律 isRetry=false（全新額度）。
+  async function syncLegs(isRetry = false) {
+    if (syncInFlightRef.current) {
+      syncQueuedRef.current = true // I-2：coalescing——已有請求在跑，這次觸發併入下一次補跑
+      return
+    }
+    if (!isRetry) syncRoundRef.current = 0
+    syncInFlightRef.current = true
     try {
       const res = await fetch(`/api/trips/${trip.id}/legs/sync`, { method: 'POST' })
-      if (!res.ok) return
-      const j: { changed?: boolean } = await res.json()
-      if (j.changed) router.refresh()
+      if (!res.ok) {
+        if (!syncNoticeShownRef.current) {
+          syncNoticeShownRef.current = true
+          setNotice({ kind: 'error', text: '交通段暫時無法計算' }) // S-1
+        }
+        return
+      }
+      const j: { changed?: boolean; legCount?: number; pending?: number; incomplete?: boolean } = await res.json()
+      // C-1：legCount 對不上目前 props 拿到的 legs 筆數，即使這次 sync 自己沒有結構異動
+      // （changed=false）也代表 client 的快照落後於 DB（例如併發 sync 已建立該 leg），一樣要 refresh
+      if (j.changed || j.legCount !== legs.length) router.refresh()
+      if ((j.pending ?? 0) > 0 || j.incomplete) {
+        if (syncRoundRef.current < MAX_SYNC_ROUNDS) {
+          syncRoundRef.current += 1
+          syncTimerRef.current = setTimeout(() => void syncLegs(true), SYNC_RETRY_MS) // I-3：續跑
+        }
+      }
     } catch {
       // 網路失敗：交通段維持現狀，不打擾使用者
+    } finally {
+      syncInFlightRef.current = false
+      if (syncQueuedRef.current) {
+        syncQueuedRef.current = false
+        // 補跑取代任何已排的續跑計時器，避免同時有兩條路徑各自觸發下一次 syncLegs
+        if (syncTimerRef.current) {
+          clearTimeout(syncTimerRef.current)
+          syncTimerRef.current = null
+        }
+        void syncLegs() // 視為新一輪使用者觸發，回合額度重置
+      }
     }
   }
 ```
+
+`SYNC_RETRY_MS = 1_500`、`MAX_SYNC_ROUNDS = 6` 定義在模組層（與 `FALLBACK_CENTER`/`PLAY_STEP_MS` 同層）。
 
 `addStop` 成功（`router.refresh()` 前）、`moveStop` 成功、StopEditor 儲存/刪除後各補 `void syncLegs()`。StopEditor 增可選 prop `onChanged?: () => void`（save 與 remove 成功後呼叫），TripView 傳 `onChanged={() => void syncLegs()}`。
 
@@ -1040,13 +1110,16 @@ import { adjacentPairs } from '@/lib/domain/legSync'
 
 ```tsx
   // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
-  const nextByStopId = new Map(
+  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
+  const nextByStopId = new globalThis.Map(
     adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
       .map(([f, t]) => [f.id, t.id]),
   )
-  const stopById = new Map(stops.map(s => [s.id, s]))
-  const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+  const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
+  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
 ```
+
+（實作時發現：TripView.tsx 已從 `@vis.gl/react-google-maps` import 元件 `Map` 用於渲染地圖，會遮蔽內建 `Map` 建構子，`new Map(...)` 會被 tsc 判為呼叫該 React 元件而非建構子（TS7009/TS2559）。改用 `new globalThis.Map(...)`；Timeline.tsx 無此 import 衝突，維持 `new Map(...)` 不變。）
 
 5. 側欄交通列——`activeDayStops.map` 的 li 改用 `<Fragment>` 包裹：**既有停留點卡片（TripView.tsx:286-313）整段原樣搬入，唯一改動是 `key={stop.id}` 從 `<li>` 移到 `<Fragment>`（React 的 list key 必須在最外層元素），li 本身不再帶 key**；卡片之後渲染交通列 li：
 
@@ -1062,12 +1135,13 @@ import { adjacentPairs } from '@/lib/domain/legSync'
                     <li className="pl-5 text-xs">
                       <button
                         type="button"
+                        aria-pressed={selectedLegId === leg.id}
                         className={`cursor-pointer ${selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'}`}
                         onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
                       >
                         {MODE_ICON[leg.mode]} {legDurationText(leg)}
                         {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
-                        {crossDay && ` → 隔日 ${next.name}`}
+                        {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
                       </button>
                       {selectedLegId === leg.id && (
@@ -1080,7 +1154,7 @@ import { adjacentPairs } from '@/lib/domain/legSync'
             })}
 ```
 
-（本 Task 只渲染交通列與選取，占位 `<p>` 在 Task 6 換成 `<LegEditor>`——本 Task 不引用尚不存在的元件。）
+（本 Task 只渲染交通列與選取，占位 `<p>` 在 Task 6 換成 `<LegEditor>`——本 Task 不引用尚不存在的元件。`aria-pressed`＝S-5；跨日文案原示「→ 隔日 名稱」經複審 M-1 改為實際日期「→ MM-DD 名稱」，可讀性更高。）
 
 6. Timeline 掛載處補 `legs={legs}`、`selectedLegId={selectedLegId}`、`onSelectLeg={setSelectedLegId}`。
 
@@ -1134,6 +1208,12 @@ props 增 `legs: Leg[]; selectedLegId: string | null; onSelectLeg: (id: string |
               const ge = Math.min(new Date(to.starts_at).getTime(), win.end) // 跨夜段夾到視窗尾（M-4）
               if (ge <= gs) return null
               const tight = tightPairs.has(`${from.id}→${to.id}`)
+              const leftPct = pct(gs)
+              const rawWidthPct = pct(ge) - leftPct
+              // I-1：視覺最小寬度撐寬到 2%，但右緣不可超過軌道（100%），空檔越接近視窗尾越明顯
+              const widthPct = Math.min(Math.max(rawWidthPct, 2), 100 - leftPct)
+              // I-1：被撐寬出來的死區不該搶走點擊——選取一律走側欄交通列，連接條在此僅供顯示
+              const isDeadZone = rawWidthPct < 2
               return (
                 <button
                   key={leg.id}
@@ -1143,9 +1223,11 @@ props 增 `legs: Leg[]; selectedLegId: string | null; onSelectLeg: (id: string |
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
                   title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
                   className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden whitespace-nowrap rounded text-center text-[10px] leading-tight ${
-                    tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'
-                  } ${selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''}`}
-                  style={{ left: `${pct(gs)}%`, width: `${Math.max(pct(ge) - pct(gs), 2)}%` }}
+                    isDeadZone ? 'pointer-events-none' : ''
+                  } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
+                    selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
+                  }`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
                 >
                   {MODE_ICON[leg.mode]}
                   {leg.stale && '⚠️'}
@@ -1155,7 +1237,9 @@ props 增 `legs: Leg[]; selectedLegId: string | null; onSelectLeg: (id: string |
             })}
 ```
 
-- [ ] **Step 5: 驗證** — lint/tsc/build/vitest/playwright 全綠；手動（dev server、有伺服器金鑰）：開有兩顆以上停留點的行程 → 數秒後 refresh 出現交通列與連接條、時長合理；拖曳停留點縮短空檔到小於交通時間 → 連接條與色塊變紅（趕不上警示）；無伺服器金鑰環境顯示「待計算」。→ **Commit** `feat: 交通段自動計算接線與時間軸/側欄呈現（趕不上警示接真 legs）`
+（審查 I-1：視覺最小寬度 `Math.max(..., 2)` 撐寬出來的死區會蓋住相鄰色塊搶走點擊，改為 `pointer-events-none`——選取一律走側欄交通列；同時右緣夾到 `100 - leftPct` 避免在視窗尾端溢出軌道。播放頭 `<div>` 順手補 `z-20`（M-7），確保疊在連接條的 `z-10` 之上維持可見。）
+
+- [ ] **Step 5: 驗證** — lint/tsc/build/vitest/playwright 全綠；手動（dev server、有伺服器金鑰）：開有兩顆以上停留點的行程 → 數秒後 refresh 出現交通列與連接條、時長合理；拖曳停留點縮短空檔到小於交通時間 → 連接條與色塊變紅（趕不上警示）；無伺服器金鑰環境顯示「待計算」。→ **Commit** `feat: 前端接線（legs 讀取、sync 觸發、時間軸連接條、側欄交通列）` + 審查加固 `fix: 前端接線加固（併發可見性、連接條死區、sync 去重與續跑）`（C-1 legCount/23505 語義、I-1 連接條死區與溢出、I-2 sync in-flight coalescing、I-3 pending/incomplete 續跑上限 6、M-1 跨日文案改實際日期、M-2 route.ts no_route 寫回失敗補 pending++、M-4 routes.ts 超限判定改 no_route、M-5 mount-once effect lint 歸零、M-7 播放頭 z-20、S-1 sync 失敗一次性提示、S-5 側欄交通列 aria-pressed）
 
 ---
 
@@ -1514,7 +1598,7 @@ export default function RoutePolylines({
 
 ## 完成定義（Definition of Done）
 
-- [ ] lint / tsc / build 乾淨；vitest 全綠（基線 51 + legs 整合 6 + legSync 11 + rateLimit 3 + google routes 9（含 R-2）≈ **80**，以實跑為準）；Playwright 綠且雙跑零殘留
+- [ ] lint / tsc / build 乾淨；vitest 全綠（基線 51 + legs 整合 6 + legSync 11 + rateLimit 3 + google routes 9（含 R-2/M-4 duration 上限案例）≈ **80**，以實跑為準）；Playwright 綠且雙跑零殘留
 - [ ] 手動（需雙金鑰）：開行程自動出現交通段與時長 → 拖曳停留點後 auto 段重算、manual 段標 ⚠️ 且數值不變 → 空檔不足時連接條與色塊變紅（警示不阻擋）→ flight 段跨時區起訖換算正確 → 交還自動計算可逆 →（Task 7 完成時）選中日路線與 flight 虛線正確
 - [ ] ToS 分層可驗證：manual 段的 polyline/detail 為 null（DB 抽查）；route_cache 逾期列被覆寫（可改 fetched_at 倒推驗證）
 - [ ] 正式環境：migration 已套用、Vercel 雙環境變數已設、線上冒煙通過；**回滾路徑已記載於 README（Instant Rollback、trigger 應急停用），migration 確認為純新增免 down**

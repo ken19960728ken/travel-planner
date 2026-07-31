@@ -42,7 +42,8 @@ export default async function TripDetailPage({
     .from('legs')
     .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost')
     .eq('trip_id', tripId)
-    .limit(501)
+    .order('id', { ascending: true })
+    .limit(500)
 
   return (
     <main className="flex h-screen flex-col">

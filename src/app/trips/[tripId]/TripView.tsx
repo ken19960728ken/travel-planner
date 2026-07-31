@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps'
+import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
 import PlaceSearch from './PlaceSearch'
@@ -36,6 +36,17 @@ const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
+/** 鏡頭跟隨：target 變更時平移過去；視野太遠時拉近（需在 APIProvider 內才能拿到 map 實例） */
+function CameraFollow({ target }: { target: { lat: number; lng: number } | null }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!map || !target) return
+    map.panTo(target)
+    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
+  }, [map, target])
+  return null
+}
+
 export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -43,6 +54,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
   const [busy, setBusy] = useState(false)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
   const [draftName, setDraftName] = useState('')
+  const [cameraTarget, setCameraTarget] = useState<{ lat: number; lng: number } | null>(null)
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
@@ -84,6 +96,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
         return false
       }
       setNotice(null)
+      setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
       router.refresh()
       return true
     } finally {
@@ -139,7 +152,11 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
               <button
                 type="button"
                 className="block w-full cursor-pointer text-left"
-                onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}
+                onClick={() => {
+                  const selecting = selectedId !== stop.id
+                  setSelectedId(selecting ? stop.id : null)
+                  if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
+                }}
               >
                 <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
                 <span className="font-medium">{stop.name}</span>
@@ -191,6 +208,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
                 <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
               </AdvancedMarker>
             )}
+            <CameraFollow target={cameraTarget} />
           </Map>
         ) : (
           <div className="flex h-full items-center justify-center text-gray-500">

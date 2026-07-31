@@ -536,7 +536,7 @@ export default function Timeline({
 
 **Files:** Modify `Timeline.tsx`、`TripView.tsx`
 
-- [ ] **Step 1: Timeline 拖曳** — 色塊 button 加 Pointer Events（拖曳與點擊區分：位移 < 5px 視為點擊）：
+- [ ] **Step 1: Timeline 拖曳** — 色塊 button 加 Pointer Events（拖曳與點擊區分：位移 < SNAP_MS（5 分鐘）視為點擊）：
 
 ```tsx
 // Timeline 元件內新增狀態與處理器

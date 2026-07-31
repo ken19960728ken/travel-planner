@@ -17,6 +17,8 @@
 
 Plan 2 已完成——行程詳情頁（Google 地圖）、地點搜尋加入停留點（搜尋偏好綁定地圖視野）、地圖標記聯動與鏡頭跟隨、右鍵自訂停留點、停留點編輯（時間/備註/花費/時間鎖定）與刪除。
 
+Plan 3 已完成——時間軸（Day 分頁、色塊拖曳含自動連鎖順延／🔒 鎖定不動／5 分鐘吸附）、播放頭與地圖「我」標記（每秒推進 10 分鐘）、停留點時間全面改用當地時區顯示。
+
 ## 技術架構
 
 | 層 | 選型 |
@@ -32,6 +34,7 @@ Plan 2 已完成——行程詳情頁（Google 地圖）、地點搜尋加入停
 
 - ✅ Plan 1 地基：帳號系統（Email + Google）、資料庫 schema + RLS、行程 CRUD、26 項測試
 - ✅ Plan 2 完成：地圖與停留點編輯
+- ✅ Plan 3 完成：時間軸（Day 分頁、拖曳連鎖順延、播放頭與地圖「我」標記、當地時區顯示）
 
 ## 開發
 
@@ -47,7 +50,7 @@ npm test                       # 單元測試 + RLS 整合測試（需本地 Sup
 npm run test:e2e               # Playwright E2E（需本地 Supabase 與 dev server 可用埠；缺 .env.test.local 時測試仍會跑，但資料清理會靜默跳過）
 ```
 
-地圖功能需要 `.env.local` 補上 `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`；GCP 專案需啟用 Maps JavaScript API 與 Places API (New)，金鑰建議加上 referrer 與 API 限制。
+地圖功能需要 `.env.local` 補上 `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`；GCP 專案需啟用 Maps JavaScript API 與 Places API (New)，金鑰建議加上 referrer 與 API 限制。本地開發與 E2E 需把 `http://localhost:3000/*` 加入 Maps 金鑰的 HTTP referrer 允許清單，否則地圖會出現 RefererNotAllowedMapError，且 E2E 會紅在 `mapsErrors` 斷言（非程式碼問題）。
 
 本地 Google 登入需要專案根目錄 `.env`（`SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET`，見 `supabase/config.toml`），啟動 Supabase 前先 `set -a && source .env && set +a`。
 
@@ -72,6 +75,7 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 ## 已知限制
 
 - 地圖 `mapId` 目前為開發用 `DEMO_MAP_ID`，部署前需在 GCP 建立正式 Map ID 並替換
-- 多日行程連續新增停留點時，預設時間沿時間線尾端疊加，不會自動落到隔天早上（Plan 3 時間軸處理）
-- 停留點時間以瀏覽器時區顯示：跨時區開啟同一行程時，顯示的鐘面時間會不同（資料正確、顯示語義 Plan 3 精算）
-- 鏡頭跟隨目前涵蓋「加入停留點」與「點選側欄」；播放動畫式的完整鏡頭運動屬 Plan 3
+- 鏡頭跟隨目前涵蓋「加入停留點」與「點選側欄」；播放動畫式的完整鏡頭運動屬 Plan 5
+- 時間軸拖曳僅支援整塊平移（時長調整請透過停留點編輯器）
+- 跨午夜停留點僅顯示於開始日
+- 播放頭的鏡頭跟隨與預覽動畫完整版屬 Plan 5

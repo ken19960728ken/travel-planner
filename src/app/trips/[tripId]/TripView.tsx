@@ -68,8 +68,16 @@ export default function TripView({
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
+  // refresh 落地（真實列已涵蓋墊底基準）後歸零，讓後續預設時段計算回歸 props 真相
+  useEffect(() => {
+    if (stops.some(s => new Date(s.ends_at).getTime() >= lastInsertedEndRef.current)) {
+      lastInsertedEndRef.current = 0
+    }
+  }, [stops])
+
   async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
     if (busyRef.current) return false
+    if (stopsError) return false // 讀取失敗時基準不可信，關閉所有寫入入口（含草稿表單）
     busyRef.current = true
     setBusy(true)
     try {

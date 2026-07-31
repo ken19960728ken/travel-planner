@@ -33,7 +33,11 @@ export default function CreateTripForm() {
       .insert({ title: trimmed, start_date: startDate, end_date: endDate, currency })
     setSubmitting(false)
     if (error) {
-      setNotice({ kind: 'error', text: '建立失敗，請稍後再試' })
+      setNotice(
+        error.code === '23514'
+          ? { kind: 'error', text: '標題長度需在 1–200 字之間' }
+          : { kind: 'error', text: '建立失敗，請稍後再試' },
+      )
       return
     }
     setTitle('')
@@ -48,6 +52,7 @@ export default function CreateTripForm() {
         placeholder="行程標題（例如：東京五日遊）"
         value={title}
         onChange={e => setTitle(e.target.value)}
+        maxLength={200}
       />
       <div className="flex gap-2">
         <input

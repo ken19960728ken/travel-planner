@@ -51,8 +51,10 @@ export default function StopEditor({
           estimated_cost: cost === '' ? null : Number(cost),
           locked,
         })
-        // 樂觀鎖：starts_at/ends_at 帶著開啟編輯器當下讀到的舊值一起比對，
-        // 若期間被拖曳連鎖等操作改動過，這裡會比對不到列（data 為空陣列且無 error），不可再靜默覆寫
+        // 樂觀鎖：以「當下 props 值」比對 starts_at/ends_at，防的是本分頁尚未觀察到的
+        // 外部改動（跨分頁／協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫。
+        // 同分頁的舊表單覆寫（拖曳連鎖）由 TripView 的 moveStop 成功後關閉編輯器負責；
+        // 若未來新增「同分頁改時間但不關編輯器」的寫入路徑，此守衛擋不住，需改為掛載時快照
         .eq('id', stop.id)
         .eq('starts_at', stop.starts_at)
         .eq('ends_at', stop.ends_at)

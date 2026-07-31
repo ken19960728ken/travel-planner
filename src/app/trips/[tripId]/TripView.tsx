@@ -7,9 +7,10 @@ import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
+import { interpolatePosition } from '@/lib/domain/interpolate'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
-import Timeline from './Timeline'
+import Timeline, { dayWindow } from './Timeline'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -36,6 +37,7 @@ export type Stop = {
 }
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
+const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
@@ -66,6 +68,7 @@ export default function TripView({
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
   const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
   const [playheadMs, setPlayheadMs] = useState<number | null>(null)
+  const [playing, setPlaying] = useState(false)
   const busyRef = useRef(false)
   const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
@@ -171,16 +174,67 @@ export default function TripView({
     }
   }
 
-  // 切換 Day：連動重置播放頭與加點基準，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
+  // 切換 Day：連動重置播放頭、播放狀態與加點基準，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
   function changeDay(day: string) {
     setActiveDay(day)
     setSelectedId(null)
     setPlayheadMs(null)
+    setPlaying(false)
     lastInsertedEndRef.current = 0
   }
 
   // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
   const activeDayStops = filterDayStops(stops, activeDay)
+  const win = dayWindow(activeDayStops)
+  // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
+  // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
+  const clampedPlayheadMs = playheadMs === null || !win ? null : Math.min(Math.max(playheadMs, win.start), win.end)
+
+  // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
+  const playheadMsRef = useRef(playheadMs)
+  useEffect(() => {
+    playheadMsRef.current = playheadMs
+  }, [playheadMs])
+
+  // 播放中：每秒將播放頭推進 10 分鐘；超出當日視窗尾端、或當日視窗已不存在（停留點被刪除/移走）即自動停止。
+  // 滑桿本身以 min/max 限制在視窗內（見 Timeline），只有這裡的自動推進會超出，故一併在此判斷，
+  // 避免另開一個「監看 playheadMs 變化」的 effect 在其函式體內直接呼叫 setState（觸發連鎖渲染的 lint 錯誤）。
+  // tick 前先把 playheadMs 夾回當下視窗再推進：若播放中途視窗變動（拖曳/刪除當日停留點）導致舊值落在視窗外，
+  // 也能自行收斂回視窗內，不必等使用者手動介入。
+  useEffect(() => {
+    if (!playing) return
+    const timer = setInterval(() => {
+      const prev = playheadMsRef.current
+      const tickWin = dayWindow(filterDayStops(stops, activeDay))
+      if (prev === null || !tickWin) {
+        setPlaying(false)
+        return
+      }
+      const clamped = Math.min(Math.max(prev, tickWin.start), tickWin.end)
+      const next = clamped + PLAY_STEP_MS
+      if (next > tickWin.end) {
+        setPlaying(false)
+        return
+      }
+      playheadMsRef.current = next
+      setPlayheadMs(next)
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [playing, stops, activeDay])
+
+  // 播放/暫停切換：暫停中按下才可能開始播放。起播時一律把播放頭夾回目前視窗內，
+  // 已在（或超過）視窗尾端則歸零到視窗起點——不論播放頭是初次設定、還是資料變動後落在視窗外，
+  // 畫面都立刻對齊即將播放的位置，不必等下一次 tick 才收斂。
+  function togglePlay() {
+    if (playing) {
+      setPlaying(false)
+      return
+    }
+    if (!win) return
+    const clamped = playheadMs === null ? win.start : Math.min(Math.max(playheadMs, win.start), win.end)
+    setPlayheadMs(clamped + PLAY_STEP_MS > win.end ? win.start : clamped)
+    setPlaying(true)
+  }
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -309,6 +363,27 @@ export default function TripView({
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>
               )}
+              {clampedPlayheadMs !== null && (() => {
+                const pos = interpolatePosition(
+                  activeDayStops.map(s => ({
+                    id: s.id,
+                    lat: s.lat,
+                    lng: s.lng,
+                    startsAt: new Date(s.starts_at).getTime(),
+                    endsAt: new Date(s.ends_at).getTime(),
+                  })),
+                  clampedPlayheadMs,
+                )
+                return pos ? (
+                  // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
+                  // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
+                  // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
+                  // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
+                  <AdvancedMarker position={pos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                  </AdvancedMarker>
+                ) : null
+              })()}
               <CameraFollow target={cameraTarget} />
             </Map>
           ) : (
@@ -333,6 +408,8 @@ export default function TripView({
         onPlayheadChange={setPlayheadMs}
         onMove={moveStop}
         busy={busy}
+        playing={playing}
+        onTogglePlay={togglePlay}
       />
     </div>
   )

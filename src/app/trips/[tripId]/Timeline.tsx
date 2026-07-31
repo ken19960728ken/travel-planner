@@ -20,6 +20,8 @@ export type TimelineProps = {
   onPlayheadChange: (ms: number | null) => void
   onMove?: (stopId: string, deltaMs: number) => Promise<void> // 拖曳提交：await 完成後才清空預覽偏移，避免回彈
   busy?: boolean // 上層寫入中：擋新拖曳、軌道降低透明度提示
+  playing: boolean
+  onTogglePlay: () => void
 }
 
 /** 當日視窗：停留點最早前 1h ~ 最晚後 1h；空日 fallback 當地 08:00–20:00 概念上以 UTC 對齊隱藏 */
@@ -32,11 +34,14 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
+  playing, onTogglePlay,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
   const span = win ? win.end - win.start : 1
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100
+  // playheadMs 可能因資料變動（拖曳/刪除後 win 縮小）落在視窗外；畫線/滑桿/文字一律用夾回視窗內的值，避免互相矛盾
+  const ph = win && playheadMs !== null ? Math.min(Math.max(playheadMs, win.start), win.end) : null
 
   // 拖曳平移色塊：位移 < SNAP_MS 視為點擊（→ onSelect），否則放開時提交平移（→ onMove）
   const [drag, setDrag] = useState<{ id: string; startX: number; deltaMs: number; pointerId: number } | null>(null)
@@ -90,19 +95,29 @@ export default function Timeline({
 
   return (
     <div className="border-t bg-background p-2">
-      <div className="mb-2 flex items-center gap-1 overflow-x-auto">
-        {dayKeys.map((key, i) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => onDayChange(key)}
-            className={`shrink-0 rounded px-2 py-1 text-xs ${
-              activeDay === key ? 'bg-foreground text-background' : 'border'
-            }`}
-          >
-            D{i + 1} {key.slice(5)}
-          </button>
-        ))}
+      <div className="mb-2 flex items-center gap-1">
+        <div className="flex flex-1 items-center gap-1 overflow-x-auto">
+          {dayKeys.map((key, i) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onDayChange(key)}
+              className={`shrink-0 rounded px-2 py-1 text-xs ${
+                activeDay === key ? 'bg-foreground text-background' : 'border'
+              }`}
+            >
+              D{i + 1} {key.slice(5)}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={onTogglePlay}
+          disabled={!win && !playing}
+          className="shrink-0 rounded border px-2 py-1 text-xs disabled:opacity-40"
+        >
+          {playing ? '⏸ 暫停' : '▶ 播放'}
+        </button>
       </div>
 
       {win ? (
@@ -140,10 +155,10 @@ export default function Timeline({
                 </button>
               )
             })}
-            {playheadMs !== null && playheadMs >= win.start && playheadMs <= win.end && (
+            {ph !== null && (
               <div
                 className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-orange-500"
-                style={{ left: `${pct(playheadMs)}%` }}
+                style={{ left: `${pct(ph)}%` }}
               />
             )}
           </div>
@@ -153,15 +168,15 @@ export default function Timeline({
             min={win.start}
             max={win.end}
             step={5 * 60 * 1000}
-            value={playheadMs ?? win.start}
+            value={ph ?? win.start}
             onChange={e => onPlayheadChange(Number(e.target.value))}
             aria-label="時間軸播放頭"
           />
           <div className="flex justify-between text-xs text-gray-400">
             <span>{dayStops[0] && formatLocalTime(win.start, dayStops[0].timezone)}</span>
             <span>
-              {playheadMs !== null && dayStops[0]
-                ? `▶ ${formatLocalTime(playheadMs, dayStops[0].timezone)}`
+              {ph !== null && dayStops[0]
+                ? `▶ ${formatLocalTime(ph, dayStops[0].timezone)}`
                 : ''}
             </span>
             <span>{dayStops[0] && formatLocalTime(win.end, dayStops[0].timezone)}</span>

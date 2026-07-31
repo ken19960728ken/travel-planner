@@ -341,11 +341,12 @@ export default function TripView({
   const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
 
   // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
-  // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方
-  // 建議的「記錄前一輪 legs 參照＋render 期間比對」樣式——只在 legs 參照真的變動那一輪才比對一次
-  const prevLegsRef = useRef(legs)
-  if (prevLegsRef.current !== legs) {
-    prevLegsRef.current = legs
+  // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件
+  // 「Adjusting state when a prop changes」的 useState 追蹤前一輪值＋render 期間比對樣式——
+  // 只在 legs 參照真的變動那一輪才比對一次
+  const [prevLegs, setPrevLegs] = useState(legs)
+  if (prevLegs !== legs) {
+    setPrevLegs(legs)
     if (selectedLegId !== null && !legs.some(l => l.id === selectedLegId)) setSelectedLegId(null)
   }
 

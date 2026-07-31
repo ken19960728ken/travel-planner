@@ -1275,7 +1275,7 @@ import { MODE_LABEL, isNoRoute } from './legUi'
 import type { TablesUpdate } from '@/lib/supabase/database.types'
 import type { Leg, Stop } from './TripView'
 
-type Notice = { kind: 'error' | 'success'; text: string } | null
+type Notice = { kind: 'error' | 'success' | 'warn'; text: string } | null
 const AUTO_MODES = ['transit', 'walking', 'driving'] as const
 type Mode = Leg['mode']
 
@@ -1310,23 +1310,37 @@ export default function LegEditor({
   const isTimed = mode === 'flight' || mode === 'custom'
   const isAutoMode = (AUTO_MODES as ReadonlyArray<string>).includes(mode)
 
+  // 樂觀鎖令牌（審查 Important-A；審查原提案是 ref 版，但本專案 eslint-plugin-react-hooks 的
+  // react-hooks/refs 規則禁止 render 期間存取 ref——實測會噴 error，故改用與 Minor-B 同款的
+  // useState 追蹤前一輪值＋render 期間比對樣式，語義不變）：lockToken 是「目前已知安全可
+  // 覆寫」的 updated_at 版本，write() 每次成功寫入後直接推進到伺服器回傳的最新值，不等
+  // router.refresh() 往返，消除「同分頁連續儲存」誤判成「已被其他操作變更」的假警報；
+  // propToken 追蹤上一輪觀察到的 leg.updated_at，props 追上時（外部改動落地）於 render
+  // 期間同步 lockToken。
+  const [lockToken, setLockToken] = useState(leg.updated_at)
+  const [propToken, setPropToken] = useState(leg.updated_at)
+  if (propToken !== leg.updated_at) {
+    setPropToken(leg.updated_at)
+    setLockToken(leg.updated_at)
+  }
+
   // patch 型別用生成的 TablesUpdate<'legs'>（審查 M-3：Record<string, unknown> 過不了
   // supabase-js 的 update 泛型，tsc 實測編譯失敗）
-  async function write(patch: TablesUpdate<'legs'>, successText: string) {
+  async function write(patch: TablesUpdate<'legs'>, successNotice: { kind: 'success' | 'warn'; text: string }) {
     if (busyRef.current) return
     busyRef.current = true
     setBusy(true)
     try {
       const supabase = createClient()
-      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以「當下 props 值」比對
-      // updated_at，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/協作者）——
-      // 比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
+      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以 lockToken（目前已知安全可
+      // 覆寫的 updated_at）比對，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/
+      // 協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
       const { data, error } = await supabase
         .from('legs')
         .update(patch)
         .eq('id', leg.id)
-        .eq('updated_at', leg.updated_at)
-        .select('id')
+        .eq('updated_at', lockToken)
+        .select('id, updated_at')
       if (error) {
         setNotice(
           error.code === '23514' || error.code === '22003'
@@ -1340,7 +1354,8 @@ export default function LegEditor({
         router.refresh()
         return
       }
-      setNotice({ kind: 'success', text: successText })
+      setLockToken(data[0].updated_at) // Important-A：令牌前進，不等 router.refresh() 往返
+      setNotice(successNotice)
       onChanged?.()
       router.refresh()
     } finally {
@@ -1374,7 +1389,9 @@ export default function LegEditor({
         duration_minutes: Math.max(1, Math.round((arr - dep) / 60_000)),
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         stale: false, estimated_cost: costNum,
-      }, outOfWindow ? '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' : '已儲存 ✓')
+      }, outOfWindow
+        ? { kind: 'warn', text: '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' }
+        : { kind: 'success', text: '已儲存 ✓' })
     }
     if (duration.trim() !== '') {
       const n = Number(duration)
@@ -1385,14 +1402,14 @@ export default function LegEditor({
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         departs_at: null, arrives_at: null,
         stale: false, estimated_cost: costNum,
-      }, '已儲存（手動時長不會被自動計算覆蓋）✓')
+      }, { kind: 'success', text: '已儲存（手動時長不會被自動計算覆蓋）✓' })
     }
     return write({
       mode, source: 'auto', duration_minutes: null,
       distance_meters: null, polyline: null, detail: null, computed_at: null,
       departs_at: null, arrives_at: null,
       stale: false, estimated_cost: costNum,
-    }, '已交還自動計算，稍候更新 ✓')
+    }, { kind: 'success', text: '已交還自動計算，稍候更新 ✓' })
   }
 
   return (
@@ -1401,7 +1418,7 @@ export default function LegEditor({
         <div className="flex items-center justify-between rounded bg-amber-50 p-1 text-xs text-amber-700">
           ⚠️ 前後行程變動過，此交通資訊可能過期
           <button type="button" className="rounded border px-1 disabled:opacity-50" disabled={busy}
-            onClick={() => write({ stale: false }, '已確認 ✓')}>已重新確認</button>
+            onClick={() => write({ stale: false }, { kind: 'success', text: '已確認 ✓' })}>已重新確認</button>
         </div>
       )}
       {isNoRoute(leg) && (
@@ -1444,7 +1461,9 @@ export default function LegEditor({
         儲存
       </button>
       {notice && (
-        <p className={`text-xs ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+        <p className={`text-xs ${
+          notice.kind === 'error' ? 'text-red-600' : notice.kind === 'warn' ? 'text-amber-700' : 'text-green-600'
+        }`}>{notice.text}</p>
       )}
     </div>
   )
@@ -1478,18 +1497,18 @@ export default function LegEditor({
 
   1. **`page.tsx`** 的 legs 查詢 `.select(...)` 補一個欄位 `updated_at`（其餘欄位不動）；`TripView.tsx` 的 `Leg` type 對應補 `updated_at: string`。
 
-  2. **`LegEditor.tsx` 樂觀鎖（Important-2/3）**：`write()` 的 `.eq('id', leg.id)` 後加 `.eq('updated_at', leg.updated_at).select('id')`，`data.length === 0` 視為「已被其他操作變更或刪除」，走與 StopEditor.tsx:56-76 相同模式（設 error notice + `router.refresh()`，不可靜默覆寫或假裝成功）。完整程式碼見上方 Step 1 程式碼區塊（已回寫最終版）。
+  2. **`LegEditor.tsx` 樂觀鎖（Important-2/3）**：`write()` 的 `.eq('id', leg.id)` 後加 `.eq('updated_at', leg.updated_at).select('id')`，`data.length === 0` 視為「已被其他操作變更或刪除」，走與 StopEditor.tsx:56-76 相同模式（設 error notice + `router.refresh()`，不可靜默覆寫或假裝成功）。（此欄位比對值後續 Step 5 的 Important-A 改為可推進的 `lockToken`，取代直接讀 `leg.updated_at`。）
 
-  3. **flight 軟警示（Important-4）**：`save()` 的 `isTimed` 分支算出 `dep`/`arr` 後，若 `dep < fromStop.ends_at` 或 `arr > toStop.starts_at`（班機時刻落在停留點時段之外）——**仍允許儲存**（spec §5：警示不阻擋），只是 `successText` 換成提示文案。
+  3. **flight 軟警示（Important-4）**：`save()` 的 `isTimed` 分支算出 `dep`/`arr` 後，若 `dep < fromStop.ends_at` 或 `arr > toStop.starts_at`（班機時刻落在停留點時段之外）——**仍允許儲存**（spec §5：警示不阻擋），只是 `write()` 的第二參數換成提示文案。（第二參數型別後續 Step 5 的 Minor-C 從純字串改為 `{ kind, text }`。）
 
   4. **M-5**：手動時長輸入補上界 `n > 43200`（30 天）擋下；`write()` 的錯誤分支把 `22003`（numeric 溢位，主要來自 `estimated_cost`）併入 `23514` 的「輸入內容不符限制」文案。
 
-  5. **M-7**：`TripView.tsx` 補一段 render-phase 比對（**不是** `useEffect`——line 296 已有「避免另開 effect 直接 setState 觸發連鎖渲染 lint 錯誤」的前例）：用 `useRef` 記錄前一輪 `legs` 參照，`legs` 參照變動的那一輪，若 `selectedLegId` 指向的段已不在新的 `legs` 裡就 `setSelectedLegId(null)`，避免結構同步移除/重建該段後選取殘留成 dangling id。程式碼緊接在 `legByPair` 之後、`content = (` 之前：
+  5. **M-7**：`TripView.tsx` 補一段 render-phase 比對（**不是** `useEffect`——line 296 已有「避免另開 effect 直接 setState 觸發連鎖渲染 lint 錯誤」的前例）：用 `useState` 記錄前一輪 `legs` 參照（React 官方文件「Adjusting state when a prop changes」的建議樣式），`legs` 參照變動的那一輪，若 `selectedLegId` 指向的段已不在新的 `legs` 裡就 `setSelectedLegId(null)`，避免結構同步移除/重建該段後選取殘留成 dangling id。程式碼緊接在 `legByPair` 之後、`content = (` 之前（初版誤用 `useRef` 記參照，Step 5 的 Minor-B 改為現在這版 `useState`）：
 
 ```tsx
-  const prevLegsRef = useRef(legs)
-  if (prevLegsRef.current !== legs) {
-    prevLegsRef.current = legs
+  const [prevLegs, setPrevLegs] = useState(legs)
+  if (prevLegs !== legs) {
+    setPrevLegs(legs)
     if (selectedLegId !== null && !legs.some(l => l.id === selectedLegId)) setSelectedLegId(null)
   }
 ```
@@ -1499,6 +1518,29 @@ export default function LegEditor({
   **遺留（不在本輪範圍，記入 spec §8 / Plan 5）**：M-6（跨 DST 邊界的 flight 起訖換算，`date-fns-tz` 已處理但無專屬測試案例覆蓋）、S-8（custom 模式目前與 flight 共用「必填起訖」表單，未來若要支援「custom 也能只填時長」需要拆兩種子表單）。
 
   **驗證**：lint/tsc/build/vitest（維持 80，本輪不新增常駐案例）/smoke 全綠；PoC 重測 Critical-1（見 Task 4 Step 2 後的說明）+ 用 Playwright 臨時腳本重跑一次跨午夜案例確認樂觀鎖與軟警示不誤傷正常流程（在邊界值 dep=fromStop.ends_at/arr=toStop.starts_at 恰好不觸發 Important-4 警示文案；`updated_at` 刷新後仍可正常再次儲存；外部併發改動時正確擋下並提示重新整理）。→ **Commit** `fix: 交通段寫回 source 守衛與編輯器樂觀鎖（manual 覆寫保護）`
+
+- [ ] **Step 5: 複審 Conditionally Approved 補完（令牌前進 + render-phase 正規化 + warn 樣式）** — Step 4 的 LegEditor 過稿本身 byte-identical、多時區驗算全過，複審再補三項即結案：
+
+  1. **Important-A（樂觀鎖令牌前進）**：Step 4 的樂觀鎖直接讀 `leg.updated_at` 當比對值，同分頁連續儲存時第二次儲存會誤判成「已被其他操作變更」——因為 `router.refresh()` 帶回新 props 前，`leg.updated_at` 仍是舊值。修法：令牌與 props 分離追蹤，`write()` 每次成功寫入直接把令牌推進到伺服器回傳的 `updated_at`，不等 `router.refresh()` 往返；props 追上時（外部改動真的落地）於 render 期間把令牌同步成新 props 值。
+
+     **審查原提案是 `useRef` 版**（`lockRef`/`propRef`，render 期間直接讀寫 `.current`）。實作時發現：本專案 `eslint-config-next` 附帶的 `eslint-plugin-react-hooks` 啟用了 `react-hooks/refs` 規則，明確禁止 render 期間存取 ref（讀或寫皆算），`npx eslint` 實測噴 3 個 error。改用與 Minor-B 同款的 `useState` 追蹤前一輪 props 值＋render 期間比對樣式，語義完全等價（`write()` 內用 `setLockToken(...)` 推進，屬事件處理器內呼叫，非 render 期間，不受此規則限制）：
+
+```ts
+  const [lockToken, setLockToken] = useState(leg.updated_at)
+  const [propToken, setPropToken] = useState(leg.updated_at)
+  if (propToken !== leg.updated_at) {
+    setPropToken(leg.updated_at)
+    setLockToken(leg.updated_at)
+  }
+```
+
+     `write()` 內 `.eq('updated_at', lockToken)`、`.select('id, updated_at')`，成功後 `setLockToken(data[0].updated_at)` 才 `setNotice`/`onChanged`/`router.refresh()`。完整程式碼見上方 Step 1 程式碼區塊（已回寫最終版）。
+
+  2. **Minor-B（TripView render-phase 正規化）**：見上方 Step 4 第 5 項——已直接更新為 `useState` 版並回寫程式碼區塊，註解同步移除「React 官方建議 ref 樣式」的錯誤宣稱。
+
+  3. **Minor-C（軟警示視覺區分）**：`Notice` type 的 `kind` 加 `'warn'`；`write()` 簽名的第二參數從 `successText: string` 改為 `successNotice: { kind: 'success' | 'warn'; text: string }`，所有呼叫點對應改傳物件。Important-4 的軟警示分支傳 `{ kind: 'warn', text: '...' }`，其餘維持 `{ kind: 'success', text: '...' }`。notice 渲染的樣式三分派：`error` 紅、`warn` 琥珀（`text-amber-700`，與 stale 橫幅一致）、`success` 綠。
+
+  **驗證**：本輪審查員明示只需 lint 0 warning / tsc / vitest 80 綠即可結案，不再要求全套回歸（build 仍順手跑過確認無誤）。→ **Commit** `fix: 樂觀鎖令牌前進與 render-phase 比對正規化`
 
 ---
 

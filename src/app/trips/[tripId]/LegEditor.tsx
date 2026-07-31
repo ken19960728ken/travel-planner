@@ -8,7 +8,7 @@ import { MODE_LABEL, isNoRoute } from './legUi'
 import type { TablesUpdate } from '@/lib/supabase/database.types'
 import type { Leg, Stop } from './TripView'
 
-type Notice = { kind: 'error' | 'success'; text: string } | null
+type Notice = { kind: 'error' | 'success' | 'warn'; text: string } | null
 const AUTO_MODES = ['transit', 'walking', 'driving'] as const
 type Mode = Leg['mode']
 
@@ -43,23 +43,37 @@ export default function LegEditor({
   const isTimed = mode === 'flight' || mode === 'custom'
   const isAutoMode = (AUTO_MODES as ReadonlyArray<string>).includes(mode)
 
+  // 樂觀鎖令牌（審查 Important-A；審查原提案是 ref 版，但本專案 eslint-plugin-react-hooks 的
+  // react-hooks/refs 規則禁止 render 期間存取 ref——實測會噴 error，故改用與 Minor-B 同款的
+  // useState 追蹤前一輪值＋render 期間比對樣式，語義不變）：lockToken 是「目前已知安全可
+  // 覆寫」的 updated_at 版本，write() 每次成功寫入後直接推進到伺服器回傳的最新值，不等
+  // router.refresh() 往返，消除「同分頁連續儲存」誤判成「已被其他操作變更」的假警報；
+  // propToken 追蹤上一輪觀察到的 leg.updated_at，props 追上時（外部改動落地）於 render
+  // 期間同步 lockToken。
+  const [lockToken, setLockToken] = useState(leg.updated_at)
+  const [propToken, setPropToken] = useState(leg.updated_at)
+  if (propToken !== leg.updated_at) {
+    setPropToken(leg.updated_at)
+    setLockToken(leg.updated_at)
+  }
+
   // patch 型別用生成的 TablesUpdate<'legs'>（審查 M-3：Record<string, unknown> 過不了
   // supabase-js 的 update 泛型，tsc 實測編譯失敗）
-  async function write(patch: TablesUpdate<'legs'>, successText: string) {
+  async function write(patch: TablesUpdate<'legs'>, successNotice: { kind: 'success' | 'warn'; text: string }) {
     if (busyRef.current) return
     busyRef.current = true
     setBusy(true)
     try {
       const supabase = createClient()
-      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以「當下 props 值」比對
-      // updated_at，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/協作者）——
-      // 比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
+      // 樂觀鎖（審查 Important-2/3，比照 StopEditor.tsx:56-76）：以 lockToken（目前已知安全可
+      // 覆寫的 updated_at）比對，防的是本分頁尚未觀察到的外部改動（sync 併發寫回、其他分頁/
+      // 協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫或假裝成功。
       const { data, error } = await supabase
         .from('legs')
         .update(patch)
         .eq('id', leg.id)
-        .eq('updated_at', leg.updated_at)
-        .select('id')
+        .eq('updated_at', lockToken)
+        .select('id, updated_at')
       if (error) {
         setNotice(
           error.code === '23514' || error.code === '22003'
@@ -73,7 +87,8 @@ export default function LegEditor({
         router.refresh()
         return
       }
-      setNotice({ kind: 'success', text: successText })
+      setLockToken(data[0].updated_at) // Important-A：令牌前進，不等 router.refresh() 往返
+      setNotice(successNotice)
       onChanged?.()
       router.refresh()
     } finally {
@@ -107,7 +122,9 @@ export default function LegEditor({
         duration_minutes: Math.max(1, Math.round((arr - dep) / 60_000)),
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         stale: false, estimated_cost: costNum,
-      }, outOfWindow ? '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' : '已儲存 ✓')
+      }, outOfWindow
+        ? { kind: 'warn', text: '已儲存，但班機時間落在停留點時段之外，請確認行程銜接' }
+        : { kind: 'success', text: '已儲存 ✓' })
     }
     if (duration.trim() !== '') {
       const n = Number(duration)
@@ -118,14 +135,14 @@ export default function LegEditor({
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         departs_at: null, arrives_at: null,
         stale: false, estimated_cost: costNum,
-      }, '已儲存（手動時長不會被自動計算覆蓋）✓')
+      }, { kind: 'success', text: '已儲存（手動時長不會被自動計算覆蓋）✓' })
     }
     return write({
       mode, source: 'auto', duration_minutes: null,
       distance_meters: null, polyline: null, detail: null, computed_at: null,
       departs_at: null, arrives_at: null,
       stale: false, estimated_cost: costNum,
-    }, '已交還自動計算，稍候更新 ✓')
+    }, { kind: 'success', text: '已交還自動計算，稍候更新 ✓' })
   }
 
   return (
@@ -134,7 +151,7 @@ export default function LegEditor({
         <div className="flex items-center justify-between rounded bg-amber-50 p-1 text-xs text-amber-700">
           ⚠️ 前後行程變動過，此交通資訊可能過期
           <button type="button" className="rounded border px-1 disabled:opacity-50" disabled={busy}
-            onClick={() => write({ stale: false }, '已確認 ✓')}>已重新確認</button>
+            onClick={() => write({ stale: false }, { kind: 'success', text: '已確認 ✓' })}>已重新確認</button>
         </div>
       )}
       {isNoRoute(leg) && (
@@ -177,7 +194,9 @@ export default function LegEditor({
         儲存
       </button>
       {notice && (
-        <p className={`text-xs ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+        <p className={`text-xs ${
+          notice.kind === 'error' ? 'text-red-600' : notice.kind === 'warn' ? 'text-amber-700' : 'text-green-600'
+        }`}>{notice.text}</p>
       )}
     </div>
   )

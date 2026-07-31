@@ -553,6 +553,9 @@ describe('parseComputeRoutesResponse', () => {
     expect(parseComputeRoutesResponse({ routes: [{ duration: 'oops' }] })).toEqual({ ok: false, reason: 'bad_response' })
     expect(parseComputeRoutesResponse(null)).toEqual({ ok: false, reason: 'bad_response' })
   })
+  it('duration 超過 30 天上限（43200 分鐘）回報 bad_response（R-2：防禦異常大數值污染 30 天快取）', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'bad_response' })
+  })
 })
 ```
 
@@ -575,6 +578,8 @@ const TRAVEL_MODE: Record<RouteQuery['mode'], string> = {
   driving: 'DRIVE',
 }
 const DAY_MS = 24 * 60 * 60 * 1000
+// 30 天份鐘數（R-2）：正常交通時長不可能這麼長，超過視為 Google 回應格式異常（防禦畸形/惡意資料寫進 duration_minutes）
+const MAX_DURATION_MINUTES = 30 * 24 * 60
 
 /** TRANSIT 的 departureTime 夾限到官方允許區間（各留 1 天餘裕避開邊界）。
  *  呼叫端以夾限後的值同時組請求與 cache key，兩者永遠一致。 */
@@ -619,16 +624,18 @@ export function parseComputeRoutesResponse(json: unknown): ComputedRoute {
   const route = routes[0] as { duration?: unknown; distanceMeters?: unknown; polyline?: { encodedPolyline?: unknown } }
   const m = typeof route.duration === 'string' ? /^(\d+(?:\.\d+)?)s$/.exec(route.duration) : null
   if (!m) return { ok: false, reason: 'bad_response' }
+  const durationMinutes = Math.max(1, Math.round(Number(m[1]) / 60))
+  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'bad_response' } // R-2：超過 30 天份鐘數視為異常
   return {
     ok: true,
-    durationMinutes: Math.max(1, Math.round(Number(m[1]) / 60)),
+    durationMinutes,
     distanceMeters: typeof route.distanceMeters === 'number' ? route.distanceMeters : null,
     polyline: typeof route.polyline?.encodedPolyline === 'string' ? route.polyline.encodedPolyline : null,
   }
 }
 ```
 
-- [ ] **Step 4: 跑綠（8 tests）→ 全套綠 → Commit** `feat: Routes API 請求組裝與回應解析（官方 v2 格式查證）`
+- [ ] **Step 4: 跑綠（9 tests，含 R-2 durationMinutes 上限案例）→ 全套綠 → Commit** `feat: Routes API 請求組裝與回應解析（官方 v2 格式查證）`
 
 ---
 
@@ -725,6 +732,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     return NextResponse.json({ error: 'trip too large to sync' }, { status: 413 })
   }
 
+  // 牆鐘預算（審查 I-1，R-1 前移）：從 413 閘門之後就起算，讓預算涵蓋下面的結構同步
+  // （markStale/removeAuto/create）與計算迴圈——結構同步同樣是逐列 DB 往返，段數多時
+  // 一樣可能撞穿 maxDuration=30s；與 maxDuration 留 6s 餘裕給收尾往返與回應序列化。
+  const startedAt = Date.now()
+  const WALL_CLOCK_BUDGET_MS = 24_000
+  const budgetExceeded = () => Date.now() - startedAt > WALL_CLOCK_BUDGET_MS
+
   const now = Date.now()
   const stops: SyncStop[] = (stopRows ?? []).map(s => ({
     id: s.id, lat: s.lat, lng: s.lng,
@@ -747,18 +761,32 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   type ComputeItem = { legId: string; fromStopId: string; toStopId: string; mode: string }
   const computeQueue: ComputeItem[] = []
   let changed = false
+  let pending = 0
 
+  // R-1：三個結構同步迴圈各自逐項檢查牆鐘預算，段數多時不讓結構同步本身撞穿 maxDuration。
+  // markStale/removeAuto 中斷時剩餘項單純留給下次 sync 的結構同步重新判定（它們是「還沒改」，
+  // 不是「還沒算」，語義上不算 pending——與這兩迴圈個別寫入失敗時只記 log 不記 pending 一致）。
   for (const id of plan.markStale) {
+    if (budgetExceeded()) break
     const { error } = await supabase.from('legs').update({ stale: true }).eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] markStale failed', { tripId, code: error.code, message: error.message })
   }
   for (const id of plan.removeAuto) {
+    if (budgetExceeded()) break
     const { error } = await supabase.from('legs').delete().eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
-  for (const c of plan.create) {
+  for (let i = 0; i < plan.create.length; i++) {
+    if (budgetExceeded()) {
+      // R-1：剩餘配對不建列、不入 computeQueue（下次 sync 的結構同步會重新判定為 create）。
+      // 仍計入 pending——這些配對遲早要建 leg 並算 duration，牆鐘用盡而「還沒建」跟計算迴圈
+      // 牆鐘用盡而「還沒算」是同一種「還沒完成」，語義上都算未完工作，pending 才如實反映總量。
+      pending += plan.create.length - i
+      break
+    }
+    const c = plan.create[i]
     const { data, error } = await supabase
       .from('legs')
       .insert({ trip_id: tripId, from_stop_id: c.fromStopId, to_stop_id: c.toStopId, mode: 'transit', source: 'auto' })
@@ -782,11 +810,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const service = createServiceClient()
   const apiKey = process.env.GOOGLE_MAPS_SERVER_API_KEY
   let computed = 0
-  let pending = 0
   let googleCalls = 0
-  const startedAt = Date.now()
-  // 牆鐘預算（審查 I-1）：真正的逾時防線——與 maxDuration=30s 留 6s 餘裕給結構同步後續的 DB 往返與回應序列化
-  const WALL_CLOCK_BUDGET_MS = 24_000
 
   // 有界過期清理（審查 M-7）：每次 sync 順手刪最多 50 列逾期快取（fetched_at 已建索引），表不無限成長
   if (service) {
@@ -802,7 +826,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   }
 
   for (let i = 0; i < computeQueue.length; i++) {
-    if (Date.now() - startedAt > WALL_CLOCK_BUDGET_MS) {
+    if (budgetExceeded()) {
       // 牆鐘預算耗盡（審查 I-1）：剩餘段一律留 pending，絕不讓迴圈把 maxDuration 撞穿
       pending += computeQueue.length - i
       break
@@ -891,6 +915,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         computed++
         changed = true
       } else {
+        pending++ // R-3：寫回失敗，leg 仍未真正算完，須計入 pending 才可重試（原本漏記，此段會悄悄消失於統計外）
         console.error('[legs/sync] update computed leg failed', { tripId, code: error.code, message: error.message })
       }
     } else if (result.reason === 'no_route') {
@@ -911,7 +936,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
 }
 ```
 
-- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）`
+- [ ] **Step 3: 驗證** — lint / tsc / build 綠；Playwright 走真實登入取得 session cookie，curl 打端點驗證 401（無 cookie）/400（無效 UUID）/403（非成員）/200 降級（無 `GOOGLE_MAPS_SERVER_API_KEY` 時回 `{ ok: true, pending: N }` 不報錯，且冪等）/413（超過 500 筆哨兵）五條路徑；DB 直查確認 leg 結構性建立但 `computed_at` 為 null（未產生假資料）。真 Google 呼叫（`computed>0`、快取命中、`no_route`/`bad_response`、rate-limit 觸發）留待金鑰就位後驗證。→ **Commit** `feat: 交通段同步端點（Routes 代理、route_cache、限流、ToS TTL）` + 審查加固 `fix: sync 端點加固（牆鐘預算、limit 哨兵、吞錯日誌、快取驗形）` + 複審遺留 `fix: sync 牆鐘涵蓋結構同步、duration 上限、寫回失敗計數`
 
 ---
 
@@ -1489,7 +1514,7 @@ export default function RoutePolylines({
 
 ## 完成定義（Definition of Done）
 
-- [ ] lint / tsc / build 乾淨；vitest 全綠（基線 51 + legs 整合 6 + legSync 11 + rateLimit 3 + google routes 8 ≈ **79**，以實跑為準）；Playwright 綠且雙跑零殘留
+- [ ] lint / tsc / build 乾淨；vitest 全綠（基線 51 + legs 整合 6 + legSync 11 + rateLimit 3 + google routes 9（含 R-2）≈ **80**，以實跑為準）；Playwright 綠且雙跑零殘留
 - [ ] 手動（需雙金鑰）：開行程自動出現交通段與時長 → 拖曳停留點後 auto 段重算、manual 段標 ⚠️ 且數值不變 → 空檔不足時連接條與色塊變紅（警示不阻擋）→ flight 段跨時區起訖換算正確 → 交還自動計算可逆 →（Task 7 完成時）選中日路線與 flight 虛線正確
 - [ ] ToS 分層可驗證：manual 段的 polyline/detail 為 null（DB 抽查）；route_cache 逾期列被覆寫（可改 fetched_at 倒推驗證）
 - [ ] 正式環境：migration 已套用、Vercel 雙環境變數已設、線上冒煙通過；**回滾路徑已記載於 README（Instant Rollback、trigger 應急停用），migration 確認為純新增免 down**

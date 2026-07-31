@@ -61,6 +61,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     return NextResponse.json({ error: 'trip too large to sync' }, { status: 413 })
   }
 
+  // 牆鐘預算（審查 I-1，R-1 前移）：從 413 閘門之後就起算，讓預算涵蓋下面的結構同步
+  // （markStale/removeAuto/create）與計算迴圈——結構同步同樣是逐列 DB 往返，段數多時
+  // 一樣可能撞穿 maxDuration=30s；與 maxDuration 留 6s 餘裕給收尾往返與回應序列化。
+  const startedAt = Date.now()
+  const WALL_CLOCK_BUDGET_MS = 24_000
+  const budgetExceeded = () => Date.now() - startedAt > WALL_CLOCK_BUDGET_MS
+
   const now = Date.now()
   const stops: SyncStop[] = (stopRows ?? []).map(s => ({
     id: s.id, lat: s.lat, lng: s.lng,
@@ -83,18 +90,32 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   type ComputeItem = { legId: string; fromStopId: string; toStopId: string; mode: string }
   const computeQueue: ComputeItem[] = []
   let changed = false
+  let pending = 0
 
+  // R-1：三個結構同步迴圈各自逐項檢查牆鐘預算，段數多時不讓結構同步本身撞穿 maxDuration。
+  // markStale/removeAuto 中斷時剩餘項單純留給下次 sync 的結構同步重新判定（它們是「還沒改」，
+  // 不是「還沒算」，語義上不算 pending——與這兩迴圈個別寫入失敗時只記 log 不記 pending 一致）。
   for (const id of plan.markStale) {
+    if (budgetExceeded()) break
     const { error } = await supabase.from('legs').update({ stale: true }).eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] markStale failed', { tripId, code: error.code, message: error.message })
   }
   for (const id of plan.removeAuto) {
+    if (budgetExceeded()) break
     const { error } = await supabase.from('legs').delete().eq('id', id)
     if (!error) changed = true
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
-  for (const c of plan.create) {
+  for (let i = 0; i < plan.create.length; i++) {
+    if (budgetExceeded()) {
+      // R-1：剩餘配對不建列、不入 computeQueue（下次 sync 的結構同步會重新判定為 create）。
+      // 仍計入 pending——這些配對遲早要建 leg 並算 duration，牆鐘用盡而「還沒建」跟計算迴圈
+      // 牆鐘用盡而「還沒算」是同一種「還沒完成」，語義上都算未完工作，pending 才如實反映總量。
+      pending += plan.create.length - i
+      break
+    }
+    const c = plan.create[i]
     const { data, error } = await supabase
       .from('legs')
       .insert({ trip_id: tripId, from_stop_id: c.fromStopId, to_stop_id: c.toStopId, mode: 'transit', source: 'auto' })
@@ -118,11 +139,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const service = createServiceClient()
   const apiKey = process.env.GOOGLE_MAPS_SERVER_API_KEY
   let computed = 0
-  let pending = 0
   let googleCalls = 0
-  const startedAt = Date.now()
-  // 牆鐘預算（審查 I-1）：真正的逾時防線——與 maxDuration=30s 留 6s 餘裕給結構同步後續的 DB 往返與回應序列化
-  const WALL_CLOCK_BUDGET_MS = 24_000
 
   // 有界過期清理（審查 M-7）：每次 sync 順手刪最多 50 列逾期快取（fetched_at 已建索引），表不無限成長
   if (service) {
@@ -138,7 +155,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   }
 
   for (let i = 0; i < computeQueue.length; i++) {
-    if (Date.now() - startedAt > WALL_CLOCK_BUDGET_MS) {
+    if (budgetExceeded()) {
       // 牆鐘預算耗盡（審查 I-1）：剩餘段一律留 pending，絕不讓迴圈把 maxDuration 撞穿
       pending += computeQueue.length - i
       break
@@ -227,6 +244,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         computed++
         changed = true
       } else {
+        pending++ // R-3：寫回失敗，leg 仍未真正算完，須計入 pending 才可重試（原本漏記，此段會悄悄消失於統計外）
         console.error('[legs/sync] update computed leg failed', { tripId, code: error.code, message: error.message })
       }
     } else if (result.reason === 'no_route') {

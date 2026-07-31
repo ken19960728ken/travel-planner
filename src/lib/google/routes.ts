@@ -14,6 +14,8 @@ const TRAVEL_MODE: Record<RouteQuery['mode'], string> = {
   driving: 'DRIVE',
 }
 const DAY_MS = 24 * 60 * 60 * 1000
+// 30 天份鐘數（R-2）：正常交通時長不可能這麼長，超過視為 Google 回應格式異常（防禦畸形/惡意資料寫進 duration_minutes）
+const MAX_DURATION_MINUTES = 30 * 24 * 60
 
 /** TRANSIT 的 departureTime 夾限到官方允許區間（各留 1 天餘裕避開邊界）。
  *  呼叫端以夾限後的值同時組請求與 cache key，兩者永遠一致。 */
@@ -58,9 +60,11 @@ export function parseComputeRoutesResponse(json: unknown): ComputedRoute {
   const route = routes[0] as { duration?: unknown; distanceMeters?: unknown; polyline?: { encodedPolyline?: unknown } }
   const m = typeof route.duration === 'string' ? /^(\d+(?:\.\d+)?)s$/.exec(route.duration) : null
   if (!m) return { ok: false, reason: 'bad_response' }
+  const durationMinutes = Math.max(1, Math.round(Number(m[1]) / 60))
+  if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'bad_response' } // R-2：超過 30 天份鐘數視為異常
   return {
     ok: true,
-    durationMinutes: Math.max(1, Math.round(Number(m[1]) / 60)),
+    durationMinutes,
     distanceMeters: typeof route.distanceMeters === 'number' ? route.distanceMeters : null,
     polyline: typeof route.polyline?.encodedPolyline === 'string' ? route.polyline.encodedPolyline : null,
   }

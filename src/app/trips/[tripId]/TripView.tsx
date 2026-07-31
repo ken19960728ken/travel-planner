@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
@@ -8,9 +8,11 @@ import { nextDefaultSlot } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
+import { adjacentPairs } from '@/lib/domain/legSync'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
 import Timeline, { dayWindow } from './Timeline'
+import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -36,6 +38,22 @@ export type Stop = {
   estimated_cost: number | null
 }
 
+export type Leg = {
+  id: string
+  from_stop_id: string
+  to_stop_id: string
+  mode: 'transit' | 'walking' | 'driving' | 'flight' | 'custom'
+  duration_minutes: number | null
+  distance_meters: number | null
+  polyline: string | null
+  detail: unknown
+  source: 'auto' | 'manual'
+  stale: boolean
+  departs_at: string | null
+  arrives_at: string | null
+  estimated_cost: number | null
+}
+
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
 
@@ -56,13 +74,16 @@ export default function TripView({
   trip,
   stops,
   stopsError,
+  legs,
 }: {
   trip: Trip
   stops: Stop[]
   stopsError?: boolean
+  legs: Leg[]
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
@@ -83,6 +104,26 @@ export default function TripView({
       lastInsertedEndRef.current = 0
     }
   }, [stops])
+
+  const syncedRef = useRef(false)
+  useEffect(() => {
+    if (syncedRef.current) return
+    syncedRef.current = true
+    void syncLegs()
+  }, [])
+
+  // 交通段同步：結構比對 + 自動計算都在 server（金鑰不落 client）。
+  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試。
+  async function syncLegs() {
+    try {
+      const res = await fetch(`/api/trips/${trip.id}/legs/sync`, { method: 'POST' })
+      if (!res.ok) return
+      const j: { changed?: boolean } = await res.json()
+      if (j.changed) router.refresh()
+    } catch {
+      // 網路失敗：交通段維持現狀，不打擾使用者
+    }
+  }
 
   async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
     if (busyRef.current) return false
@@ -141,6 +182,7 @@ export default function TripView({
       lastInsertedEndRef.current = slot.endsAt
       setNotice(null)
       setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
+      void syncLegs()
       router.refresh()
       return true
     } finally {
@@ -168,6 +210,7 @@ export default function TripView({
       }
       setNotice(null)
       setSelectedId(null) // 拖曳連鎖成功：關閉編輯器，避免舊值（starts_at/ends_at）殘留在表單裡被誤存回去覆寫連鎖結果
+      void syncLegs()
       router.refresh()
     } finally {
       busyRef.current = false
@@ -179,6 +222,7 @@ export default function TripView({
   function changeDay(day: string) {
     setActiveDay(day)
     setSelectedId(null)
+    setSelectedLegId(null)
     setPlayheadMs(null)
     setPlaying(false)
     lastInsertedEndRef.current = 0
@@ -237,6 +281,15 @@ export default function TripView({
     setPlaying(true)
   }
 
+  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
+  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
+  const nextByStopId = new globalThis.Map(
+    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+      .map(([f, t]) => [f.id, t.id]),
+  )
+  const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
+  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1">
@@ -282,36 +335,60 @@ export default function TripView({
             <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
           )}
           <ul className="flex flex-col gap-2">
-            {activeDayStops.map((stop, i) => (
-              <li
-                key={stop.id}
-                className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="block w-full cursor-pointer text-left"
-                  onClick={() => {
-                    const selecting = selectedId !== stop.id
-                    setSelectedId(selecting ? stop.id : null)
-                    if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
-                  }}
-                >
-                  <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
-                  <span className="mr-1 text-xs text-gray-400">
-                    {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
-                  </span>
-                  <span className="font-medium">{stop.name}</span>
-                </button>
-                {selectedId === stop.id && (
-                  <StopEditor
-                    key={stop.id}
-                    stop={stop}
-                    currency={trip.currency}
-                    onDeleted={() => setSelectedId(null)}
-                  />
-                )}
-              </li>
-            ))}
+            {activeDayStops.map((stop, i) => {
+              const next = stopById.get(nextByStopId.get(stop.id) ?? '')
+              const leg = next ? legByPair.get(`${stop.id}→${next.id}`) : undefined
+              const crossDay = Boolean(next && !activeDayStops.some(s => s.id === next.id))
+              return (
+                <Fragment key={stop.id}>
+                  <li
+                    className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="block w-full cursor-pointer text-left"
+                      onClick={() => {
+                        const selecting = selectedId !== stop.id
+                        setSelectedId(selecting ? stop.id : null)
+                        if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
+                      }}
+                    >
+                      <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
+                      <span className="mr-1 text-xs text-gray-400">
+                        {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
+                      </span>
+                      <span className="font-medium">{stop.name}</span>
+                    </button>
+                    {selectedId === stop.id && (
+                      <StopEditor
+                        key={stop.id}
+                        stop={stop}
+                        currency={trip.currency}
+                        onDeleted={() => setSelectedId(null)}
+                        onChanged={() => void syncLegs()}
+                      />
+                    )}
+                  </li>
+                  {leg && next && (
+                    <li className="pl-5 text-xs">
+                      <button
+                        type="button"
+                        className={`cursor-pointer ${selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'}`}
+                        onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
+                      >
+                        {MODE_ICON[leg.mode]} {legDurationText(leg)}
+                        {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
+                        {crossDay && ` → 隔日 ${next.name}`}
+                        {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
+                      </button>
+                      {selectedLegId === leg.id && (
+                        <p className="text-gray-400">編輯器 Task 6 接入</p>
+                      )}
+                    </li>
+                  )}
+                </Fragment>
+              )
+            })}
             {activeDayStops.length === 0 && (
               <li className="text-sm text-gray-500">
                 {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
@@ -412,6 +489,9 @@ export default function TripView({
         busy={busy}
         playing={playing}
         onTogglePlay={togglePlay}
+        legs={legs}
+        selectedLegId={selectedLegId}
+        onSelectLeg={setSelectedLegId}
       />
     </div>
   )

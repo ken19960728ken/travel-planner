@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { notFound, redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import TripView from './TripView'
+import type { Leg } from './TripView'
 
 export default async function TripDetailPage({
   params,
@@ -37,6 +38,12 @@ export default async function TripDetailPage({
     .order('id', { ascending: true })
     .limit(500)
 
+  const { data: legs, error: legsError } = await supabase
+    .from('legs')
+    .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost')
+    .eq('trip_id', tripId)
+    .limit(501)
+
   return (
     <main className="flex h-screen flex-col">
       <header className="flex items-baseline gap-3 border-b p-3">
@@ -47,7 +54,10 @@ export default async function TripDetailPage({
       {stopsError && (
         <p className="border-b p-2 text-sm text-red-600">停留點讀取失敗，請重新整理再試</p>
       )}
-      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} />
+      {legsError && (
+        <p className="border-b p-2 text-sm text-red-600">交通段讀取失敗，請重新整理再試</p>
+      )}
+      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} legs={(legs ?? []) as Leg[]} />
     </main>
   )
 }

@@ -12,10 +12,12 @@ export default function StopEditor({
   stop,
   currency,
   onDeleted,
+  onChanged,
 }: {
   stop: Stop
   currency: string
   onDeleted?: () => void
+  onChanged?: () => void
 }) {
   const router = useRouter()
   const [name, setName] = useState(stop.name)
@@ -73,6 +75,7 @@ export default function StopEditor({
         return
       }
       setNotice({ kind: 'success', text: '已儲存 ✓' })
+      onChanged?.()
       router.refresh()
     } finally {
       busyRef.current = false
@@ -92,6 +95,7 @@ export default function StopEditor({
         return
       }
       onDeleted?.()
+      onChanged?.()
       router.refresh()
     } finally {
       busyRef.current = false

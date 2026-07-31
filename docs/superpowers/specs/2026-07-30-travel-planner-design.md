@@ -325,3 +325,5 @@ flowchart LR
 | Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |
 | Playwright reuseExistingServer 寫死 true | 導入 CI 時需改為 !process.env.CI 並評估 retries/trace，否則 CI 可能對過期 server 跑出假綠燈 | 導入 CI 時 |
 | E2E 清理的 listUsers 未分頁 | 測試使用者清理只掃第一頁，規模大後可能漏清（不會誤刪，只會少清） | 測試量成長時 |
+| stops 批次寫入的 advisory lock 約束 | 任何對 stops 的多列批次 UPDATE 必須先取 pg_advisory_xact_lock(hashtextextended(trip_id::text,0))（已寫入表註解），否則與 cascade_shift_stops 併發會 deadlock；單列 UPDATE 不受限 | 每次新增 stops 批次寫入時 |
+| cascade RPC 的 delta 單位契約 | 參數為「秒」，client 呼叫端必須 Math.round(deltaMs/1000) 明確換算並註解——366 天上限只能攔千倍級災難值，分鐘級的 ms 誤傳仍會靜默造成 10-42 天跳動 | Plan 3 Task 6 接線與其後每個新 caller |

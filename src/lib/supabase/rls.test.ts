@@ -6,6 +6,10 @@ const anonKey = process.env.SUPABASE_ANON_KEY
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 const hasEnv = Boolean(url && anonKey && serviceKey)
 
+if (url && !/^https?:\/\/(127\.0\.0\.1|localhost)([:/]|$)/.test(url)) {
+  throw new Error('SUPABASE_URL 不是本地位址，拒絕執行整合測試（防止誤打正式環境）')
+}
+
 function newUserClient(): SupabaseClient {
   return createClient(url!, anonKey!, { auth: { persistSession: false } })
 }

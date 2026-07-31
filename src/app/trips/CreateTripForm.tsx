@@ -15,7 +15,8 @@ export default function CreateTripForm() {
 
   async function createTrip(e: React.FormEvent) {
     e.preventDefault()
-    if (!title || !startDate || !endDate) {
+    const trimmed = title.trim()
+    if (!trimmed || !startDate || !endDate) {
       setMessage('標題與起訖日期都要填')
       return
     }
@@ -27,14 +28,14 @@ export default function CreateTripForm() {
     const supabase = createClient()
     const { error } = await supabase
       .from('trips')
-      .insert({ title, start_date: startDate, end_date: endDate, currency })
+      .insert({ title: trimmed, start_date: startDate, end_date: endDate, currency })
     setSubmitting(false)
     if (error) {
-      setMessage(`建立失敗：${error.message}`)
+      setMessage('建立失敗，請稍後再試')
       return
     }
     setTitle('')
-    setMessage('')
+    setMessage('已建立 ✓')
     router.refresh()
   }
 
@@ -71,10 +72,12 @@ export default function CreateTripForm() {
           <option value="KRW">KRW</option>
         </select>
       </div>
-      <button className="rounded bg-black p-2 text-white disabled:opacity-50" type="submit" disabled={submitting}>
+      <button className="rounded bg-foreground p-2 text-background disabled:opacity-50" type="submit" disabled={submitting}>
         {submitting ? '建立中…' : '建立行程'}
       </button>
-      {message && <p className="text-sm text-red-600">{message}</p>}
+      {message && (
+        <p className={`text-sm ${message.startsWith('已建立') ? 'text-green-600' : 'text-red-600'}`}>{message}</p>
+      )}
     </form>
   )
 }

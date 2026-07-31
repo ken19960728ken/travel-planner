@@ -25,7 +25,7 @@ function LoginForm() {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setBusy(false)
     if (error) {
-      setNotice({ kind: 'error', text: `登入失敗：${error.message}` })
+      setNotice({ kind: 'error', text: '登入失敗，請確認 Email 與密碼' })
       return
     }
     router.push('/trips')
@@ -35,13 +35,22 @@ function LoginForm() {
   async function signUp() {
     setBusy(true)
     const supabase = createClient()
-    const { error } = await supabase.auth.signUp({ email, password })
+    const { data, error } = await supabase.auth.signUp({ email, password })
     setBusy(false)
     if (error) {
-      setNotice({ kind: 'error', text: `註冊失敗：${error.message}` })
+      setNotice({ kind: 'error', text: '註冊失敗，請稍後再試' })
       return
     }
-    setNotice({ kind: 'success', text: '註冊成功，請直接登入' })
+    if (data.user && data.user.identities?.length === 0) {
+      setNotice({ kind: 'error', text: '這個 Email 已註冊過，請直接登入' })
+      return
+    }
+    if (data.session) {
+      router.push('/trips')
+      router.refresh()
+      return
+    }
+    setNotice({ kind: 'success', text: '註冊成功，請到信箱點擊確認連結後登入' })
   }
 
   async function signInWithGoogle() {
@@ -79,7 +88,7 @@ function LoginForm() {
           required
           autoComplete="current-password"
         />
-        <button className="rounded bg-black p-2 text-white disabled:opacity-50" type="submit" disabled={busy}>
+        <button className="rounded bg-foreground p-2 text-background disabled:opacity-50" type="submit" disabled={busy}>
           {busy ? '處理中…' : '登入'}
         </button>
         <button className="rounded border p-2 disabled:opacity-50" type="button" onClick={signUp} disabled={busy}>

@@ -4,24 +4,26 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
+type Notice = { kind: 'error' | 'success'; text: string } | null
+
 export default function CreateTripForm() {
   const router = useRouter()
   const [title, setTitle] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [currency, setCurrency] = useState('TWD')
-  const [message, setMessage] = useState('')
+  const [notice, setNotice] = useState<Notice>(null)
   const [submitting, setSubmitting] = useState(false)
 
   async function createTrip(e: React.FormEvent) {
     e.preventDefault()
     const trimmed = title.trim()
     if (!trimmed || !startDate || !endDate) {
-      setMessage('標題與起訖日期都要填')
+      setNotice({ kind: 'error', text: '標題與起訖日期都要填' })
       return
     }
     if (endDate < startDate) {
-      setMessage('結束日期不能早於開始日期')
+      setNotice({ kind: 'error', text: '結束日期不能早於開始日期' })
       return
     }
     setSubmitting(true)
@@ -31,11 +33,11 @@ export default function CreateTripForm() {
       .insert({ title: trimmed, start_date: startDate, end_date: endDate, currency })
     setSubmitting(false)
     if (error) {
-      setMessage('建立失敗，請稍後再試')
+      setNotice({ kind: 'error', text: '建立失敗，請稍後再試' })
       return
     }
     setTitle('')
-    setMessage('已建立 ✓')
+    setNotice({ kind: 'success', text: '已建立 ✓' })
     router.refresh()
   }
 
@@ -75,8 +77,8 @@ export default function CreateTripForm() {
       <button className="rounded bg-foreground p-2 text-background disabled:opacity-50" type="submit" disabled={submitting}>
         {submitting ? '建立中…' : '建立行程'}
       </button>
-      {message && (
-        <p className={`text-sm ${message.startsWith('已建立') ? 'text-green-600' : 'text-red-600'}`}>{message}</p>
+      {notice && (
+        <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
       )}
     </form>
   )

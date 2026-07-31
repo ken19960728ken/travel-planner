@@ -38,7 +38,12 @@ function LoginForm() {
     const { data, error } = await supabase.auth.signUp({ email, password })
     setBusy(false)
     if (error) {
-      setNotice({ kind: 'error', text: '註冊失敗，請稍後再試' })
+      const alreadyRegistered = (error as { status?: number }).status === 422
+      setNotice(
+        alreadyRegistered
+          ? { kind: 'error', text: '這個 Email 已註冊過，請直接登入' }
+          : { kind: 'error', text: '註冊失敗，請稍後再試' },
+      )
       return
     }
     if (data.user && data.user.identities?.length === 0) {
@@ -62,7 +67,7 @@ function LoginForm() {
     })
     if (error) {
       setBusy(false)
-      setNotice({ kind: 'error', text: `Google 登入失敗：${error.message}` })
+      setNotice({ kind: 'error', text: 'Google 登入失敗，請稍後再試' })
     }
   }
 

@@ -55,7 +55,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
             <Map
               defaultCenter={center}
               defaultZoom={12}
-              mapId="DEMO_MAP_ID"
+              mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
               gestureHandling="greedy"
               disableDefaultUI={false}
             />

@@ -23,4 +23,5 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
 
   await tripLink.click()
   await expect(page).toHaveURL(/\/trips\/[0-9a-f-]{36}$/)
+  await expect(page.getByText('還沒有停留點')).toBeVisible({ timeout: 10_000 })
 })

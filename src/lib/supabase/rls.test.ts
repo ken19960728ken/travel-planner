@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 const url = process.env.SUPABASE_URL
@@ -13,10 +13,11 @@ function newUserClient(): SupabaseClient {
 describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
   let owner: SupabaseClient
   let stranger: SupabaseClient
+  let admin: SupabaseClient
   let tripId: string
 
   beforeAll(async () => {
-    const admin = createClient(url!, serviceKey!, { auth: { persistSession: false } })
+    admin = createClient(url!, serviceKey!, { auth: { persistSession: false } })
     const suffix = Math.random().toString(36).slice(2, 8)
     const password = 'test-password-1234'
     const ownerEmail = `owner-${suffix}@test.local`
@@ -75,5 +76,11 @@ describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
       cache_key: 'x', result: {},
     })
     expect(error).not.toBeNull()
+  })
+
+  afterAll(async () => {
+    if (tripId) {
+      await admin.from('trips').delete().eq('id', tripId)
+    }
   })
 })

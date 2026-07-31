@@ -1,7 +1,8 @@
 'use client'
 
 import type { Stop } from './TripView'
-import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
+import { formatLocalTime } from '@/lib/domain/tz'
+import { filterDayStops } from '@/lib/domain/days'
 import { detectConflicts } from '@/lib/domain/conflicts'
 
 const HOUR_MS = 60 * 60 * 1000
@@ -29,9 +30,7 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange,
 }: TimelineProps) {
-  const dayStops = stops
-    .filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === activeDay)
-    .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime())
+  const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
   const span = win ? win.end - win.start : 1
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100

@@ -6,7 +6,7 @@ import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-goo
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
-import { tripDayKeys } from '@/lib/domain/days'
+import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
 import Timeline from './Timeline'
@@ -155,9 +155,7 @@ export default function TripView({
   }
 
   // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
-  const activeDayStops = stops
-    .filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === activeDay)
-    .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime())
+  const activeDayStops = filterDayStops(stops, activeDay)
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -255,26 +253,32 @@ export default function TripView({
                 if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
               }}
             >
-              {stops.map((stop, i) => (
-                <AdvancedMarker
-                  key={stop.id}
-                  position={{ lat: stop.lat, lng: stop.lng }}
-                  onClick={() => {
-                    // 地圖上的停留點可能不在目前的 Day：先切到它所屬的那天，側欄才顯示得出編輯器
-                    changeDay(localDateKey(new Date(stop.starts_at).getTime(), stop.timezone))
-                    setSelectedId(stop.id)
-                  }}
-                  title={stop.name}
-                >
-                  <Pin
-                    background={selectedId === stop.id ? '#2563eb' : '#ef4444'}
-                    glyphColor="#fff"
-                    borderColor="#fff"
+              {stops.map(stop => {
+                // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
+                const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
+                const inActiveDay = dayIdx >= 0
+                return (
+                  <AdvancedMarker
+                    key={stop.id}
+                    position={{ lat: stop.lat, lng: stop.lng }}
+                    onClick={() => {
+                      // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
+                      const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
+                      if (day !== activeDay) changeDay(day)
+                      setSelectedId(stop.id)
+                    }}
+                    title={stop.name}
                   >
-                    <span className="text-xs font-bold">{i + 1}</span>
-                  </Pin>
-                </AdvancedMarker>
-              ))}
+                    <Pin
+                      background={selectedId === stop.id ? '#2563eb' : inActiveDay ? '#ef4444' : '#d1d5db'}
+                      glyphColor="#fff"
+                      borderColor="#fff"
+                    >
+                      {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
+                    </Pin>
+                  </AdvancedMarker>
+                )
+              })}
               {draftPin && (
                 <AdvancedMarker position={draftPin}>
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />

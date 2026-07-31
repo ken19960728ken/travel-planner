@@ -327,3 +327,4 @@ flowchart LR
 | E2E 清理的 listUsers 未分頁 | 測試使用者清理只掃第一頁，規模大後可能漏清（不會誤刪，只會少清） | 測試量成長時 |
 | stops 批次寫入的 advisory lock 約束 | 任何對 stops 的多列批次 UPDATE 必須先取 pg_advisory_xact_lock(hashtextextended(trip_id::text,0))（已寫入表註解），否則與 cascade_shift_stops 併發會 deadlock；單列 UPDATE 不受限 | 每次新增 stops 批次寫入時 |
 | cascade RPC 的 delta 單位契約 | 參數為「秒」，client 呼叫端必須 Math.round(deltaMs/1000) 明確換算並註解——366 天上限只能攔千倍級災難值，分鐘級的 ms 誤傳仍會靜默造成 10-42 天跳動 | Plan 3 Task 6 接線與其後每個新 caller |
+| 跨午夜停留點僅顯示於開始日 | 23:00–01:00 的停留點只出現在開始日的側欄/時間軸，結束日無延續視覺、當日衝突偵測亦不涵蓋其尾段 | 時間軸後續迭代 |

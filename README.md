@@ -13,6 +13,10 @@
 - **預估花費**：景點與交通的可留空花費欄位，含總覽統計
 - **定稿快照 + JSON 匯出**：出發前凍結計畫，為未來的「計畫 vs 實際」回憶功能預留資料
 
+### 目前進度
+
+Plan 2 已完成——行程詳情頁（Google 地圖）、地點搜尋加入停留點（搜尋偏好綁定地圖視野）、地圖標記聯動與鏡頭跟隨、右鍵自訂停留點、停留點編輯（時間/備註/花費/時間鎖定）與刪除。
+
 ## 技術架構
 
 | 層 | 選型 |
@@ -27,7 +31,7 @@
 ## 專案狀態
 
 - ✅ Plan 1 地基：帳號系統（Email + Google）、資料庫 schema + RLS、行程 CRUD、26 項測試
-- 🚧 Plan 2 進行中：地圖與停留點編輯
+- ✅ Plan 2 完成：地圖與停留點編輯
 
 ## 開發
 
@@ -40,7 +44,10 @@ supabase start                 # 啟動本地 Supabase（首次會拉 Docker 映
 cp .env.example .env.local     # 填入 supabase status 顯示的 URL 與 anon key
 npm run dev                    # http://localhost:3000
 npm test                       # 單元測試 + RLS 整合測試（需本地 Supabase）
+npm run test:e2e               # Playwright E2E（需本地 Supabase 與 dev server 可用埠）
 ```
+
+地圖功能需要 `.env.local` 補上 `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`；GCP 專案需啟用 Maps JavaScript API 與 Places API (New)，金鑰建議加上 referrer 與 API 限制。
 
 節能提示：日常開發只需要四個核心容器，其餘可停——
 
@@ -59,3 +66,10 @@ docker exec supabase_db_traval psql -U postgres -c \
 docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
   < supabase/migrations/20260730000000_init.sql
 ```
+
+## 已知限制
+
+- 地圖 `mapId` 目前為開發用 `DEMO_MAP_ID`，部署前需在 GCP 建立正式 Map ID 並替換
+- 多日行程連續新增停留點時，預設時間沿時間線尾端疊加，不會自動落到隔天早上（Plan 3 時間軸處理）
+- 停留點時間以瀏覽器時區顯示：跨時區開啟同一行程時，顯示的鐘面時間會不同（資料正確、顯示語義 Plan 3 精算）
+- 鏡頭跟隨目前涵蓋「加入停留點」與「點選側欄」；播放動畫式的完整鏡頭運動屬 Plan 3

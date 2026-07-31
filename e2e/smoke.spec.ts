@@ -34,6 +34,13 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
   const mapCanvas = page.locator('.gm-style').first()
   await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 10_000 })
 
+  // 時間軸：Day 分頁存在且可切換
+  await expect(page.getByRole('button', { name: /^D1 / })).toBeVisible()
+  const d2 = page.getByRole('button', { name: /^D2 / })
+  if (await d2.isVisible().catch(() => false)) {
+    await d2.click()
+  }
+
   // 時間軸拖曳（需 service key 直插測試停留點；無 key 環境跳過此段）
   const sbUrl = process.env.SUPABASE_URL
   const sbService = process.env.SUPABASE_SERVICE_ROLE_KEY

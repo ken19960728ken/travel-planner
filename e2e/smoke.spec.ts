@@ -33,6 +33,35 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
   const placeholder = page.getByText(/尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY/)
   const mapCanvas = page.locator('.gm-style').first()
   await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 10_000 })
+
+  // 時間軸拖曳（需 service key 直插測試停留點；無 key 環境跳過此段）
+  const sbUrl = process.env.SUPABASE_URL
+  const sbService = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (sbUrl && sbService && createdTripId) {
+    const admin = createClient(sbUrl, sbService, { auth: { persistSession: false } })
+    const mk = (h: number) => new Date(Date.UTC(2026, 9, 1, h)).toISOString()
+    await admin.from('stops').insert([
+      { trip_id: createdTripId, name: 'E2E拖曳A', lat: 33.59, lng: 130.4, timezone: 'Asia/Tokyo', starts_at: mk(1), ends_at: mk(2) },
+      { trip_id: createdTripId, name: 'E2E拖曳B', lat: 33.6, lng: 130.42, timezone: 'Asia/Tokyo', starts_at: mk(3), ends_at: mk(4) },
+    ])
+    await page.reload()
+    const blockA = page.locator('[data-stop-block]').first()
+    await expect(blockA).toBeVisible({ timeout: 10_000 })
+    const before = await admin.from('stops').select('name, starts_at').eq('trip_id', createdTripId).order('starts_at')
+    const box = (await blockA.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2, { steps: 8 })
+    await page.mouse.up()
+    await page.waitForTimeout(3000) // RPC + refresh
+    const after = await admin.from('stops').select('name, starts_at').eq('trip_id', createdTripId).order('name')
+    const beforeMap = Object.fromEntries(before.data!.map(r => [r.name, new Date(r.starts_at).getTime()]))
+    const afterMap = Object.fromEntries(after.data!.map(r => [r.name, new Date(r.starts_at).getTime()]))
+    const deltaA = afterMap['E2E拖曳A'] - beforeMap['E2E拖曳A']
+    const deltaB = afterMap['E2E拖曳B'] - beforeMap['E2E拖曳B']
+    expect(deltaA).toBeGreaterThanOrEqual(5 * 60 * 1000) // 至少一個 snap
+    expect(deltaB).toBe(deltaA) // 連鎖：B 跟 A 同步平移
+  }
 })
 
 test.afterAll(async () => {

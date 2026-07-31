@@ -332,6 +332,7 @@ export default function TripView({
         playheadMs={playheadMs}
         onPlayheadChange={setPlayheadMs}
         onMove={moveStop}
+        busy={busy}
       />
     </div>
   )

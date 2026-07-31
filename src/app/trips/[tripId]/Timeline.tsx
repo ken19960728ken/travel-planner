@@ -18,7 +18,8 @@ export type TimelineProps = {
   onSelect: (id: string) => void
   playheadMs: number | null
   onPlayheadChange: (ms: number | null) => void
-  onMove?: (stopId: string, deltaMs: number) => void // Task 6 接上拖曳提交
+  onMove?: (stopId: string, deltaMs: number) => Promise<void> // 拖曳提交：await 完成後才清空預覽偏移，避免回彈
+  busy?: boolean // 上層寫入中：擋新拖曳、軌道降低透明度提示
 }
 
 /** 當日視窗：停留點最早前 1h ~ 最晚後 1h；空日 fallback 當地 08:00–20:00 概念上以 UTC 對齊隱藏 */
@@ -30,7 +31,7 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 }
 
 export default function Timeline({
-  stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove,
+  stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
@@ -38,26 +39,36 @@ export default function Timeline({
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100
 
   // 拖曳平移色塊：位移 < SNAP_MS 視為點擊（→ onSelect），否則放開時提交平移（→ onMove）
-  const [drag, setDrag] = useState<{ id: string; startX: number; deltaMs: number } | null>(null)
+  const [drag, setDrag] = useState<{ id: string; startX: number; deltaMs: number; pointerId: number } | null>(null)
   const trackRef = useRef<HTMLDivElement>(null)
 
   function beginDrag(e: React.PointerEvent, stopId: string) {
-    if (!win) return
+    if (!win || busy || drag) return // 上層寫入中或已有拖曳進行中，不再開新的一場
     e.currentTarget.setPointerCapture(e.pointerId)
-    setDrag({ id: stopId, startX: e.clientX, deltaMs: 0 })
+    setDrag({ id: stopId, startX: e.clientX, deltaMs: 0, pointerId: e.pointerId })
   }
   function moveDrag(e: React.PointerEvent) {
-    if (!drag || !trackRef.current || !win) return
+    if (!drag || e.pointerId !== drag.pointerId || !trackRef.current || !win) return
     const pxPerMs = trackRef.current.clientWidth / span
     const rawDelta = (e.clientX - drag.startX) / pxPerMs
     setDrag({ ...drag, deltaMs: Math.round(rawDelta / SNAP_MS) * SNAP_MS })
   }
-  function endDrag() {
-    if (!drag) return
+  async function endDrag(e: React.PointerEvent) {
+    if (!drag || e.pointerId !== drag.pointerId) return
     const { id, deltaMs } = drag
-    setDrag(null)
-    if (Math.abs(deltaMs) >= SNAP_MS && onMove) onMove(id, deltaMs)
-    else onSelect(id) // 位移過小視為點擊，交由統一的 pointer 流程處理選取
+    if (Math.abs(deltaMs) >= SNAP_MS && onMove) {
+      // 保留 drag 狀態讓色塊停在預覽位置，等 RPC + refresh 把新時間帶回 props 才清掉，
+      // 避免「先彈回原位、新資料一到又跳一次」的兩段式動畫
+      await onMove(id, deltaMs)
+      setDrag(null)
+    } else {
+      setDrag(null)
+      onSelect(id) // 位移過小視為點擊，交由統一的 pointer 流程處理選取
+    }
+  }
+  function cancelDrag(e: React.PointerEvent) {
+    if (!drag || e.pointerId !== drag.pointerId) return
+    setDrag(null) // 拖曳被中斷（如瀏覽器手勢搶走指標）：只捨棄預覽，絕不提交 onMove
   }
 
   const warnings = detectConflicts(
@@ -98,7 +109,7 @@ export default function Timeline({
               {Math.round(drag.deltaMs / 60000)} 分鐘（放開套用，之後行程自動順延）
             </div>
           )}
-          <div ref={trackRef} className="relative h-12 rounded border">
+          <div ref={trackRef} className={`relative h-12 rounded border ${busy ? 'opacity-60' : ''}`}>
             {dayStops.map(stop => {
               const s = new Date(stop.starts_at).getTime()
               const e = new Date(stop.ends_at).getTime()
@@ -109,10 +120,11 @@ export default function Timeline({
                   key={stop.id}
                   type="button"
                   data-stop-block={stop.id}
+                  tabIndex={-1} // 鍵盤選取走側欄清單，時間軸色塊只認 pointer
                   onPointerDown={ev => beginDrag(ev, stop.id)}
                   onPointerMove={moveDrag}
                   onPointerUp={endDrag}
-                  onPointerCancel={endDrag}
+                  onPointerCancel={cancelDrag}
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
                   className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'

@@ -481,7 +481,15 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
 
 （`mapId="DEMO_MAP_ID"` 是 Google 提供的開發用 ID，AdvancedMarker 需要它；部署前換成正式 Map ID——記入 README。）
 
-- [ ] **Step 4: 驗證** — `npx tsc --noEmit`、`npm run build` 乾淨；`npx playwright test` **全綠**（Task 3 的紅燈在此轉綠）。有金鑰的話 `npm run dev` 手動確認地圖渲染；沒有金鑰則確認占位訊息顯示。
+- [ ] **Step 3.5: 先讓 E2E 紅燈生效（Task 3 執行時發現原設計失效：URL 斷言擋不住 App Router 的 404 導航）** — 在 `e2e/smoke.spec.ts` 的測試最後追加一行內容層級斷言：
+
+```ts
+  await expect(page.getByText('還沒有停留點')).toBeVisible({ timeout: 10_000 })
+```
+
+先跑 `npx playwright test` 確認**紅燈**（詳情頁尚不存在、404 頁上無此文字），再繼續 Step 4 的實作，完成後轉綠——這才是真正的紅綠循環。
+
+- [ ] **Step 4: 驗證** — `npx tsc --noEmit`、`npm run build` 乾淨；`npx playwright test` **全綠**（Step 3.5 的紅燈在此轉綠）。有金鑰的話 `npm run dev` 手動確認地圖渲染；沒有金鑰則確認占位訊息顯示。
 
 - [ ] **Step 5: Commit**
 
@@ -917,19 +925,64 @@ git commit -m "feat: 停留點編輯與刪除"
 
 ---
 
-### Task 9: E2E 補詳情頁空狀態斷言
+### Task 9: E2E 補強與測試債清理（品質審查 2026-07-31 裁定項）
 
-**Files:** Modify: `e2e/smoke.spec.ts`
+**Files:** Modify: `e2e/smoke.spec.ts`、`playwright.config.ts`、`src/lib/supabase/rls.test.ts`
 
-- [ ] **Step 1:** 測試最後追加兩個斷言（開詳情頁後）：
+- [ ] **Step 0: E2E 測試資料清理（還債）**
+
+1. `playwright.config.ts` 頂部加入（Node 22 內建，零依賴）：
 
 ```ts
-  await expect(page.getByText('還沒有停留點')).toBeVisible()
+try {
+  process.loadEnvFile('.env.test.local')
+} catch {
+  // 無此檔（如 CI 環境）時靜默跳過，測試內的清理邏輯會自行判斷
+}
+```
+
+2. `e2e/smoke.spec.ts`：email 改用 random suffix（與 rls.test.ts 一致）：
+
+```ts
+const email = `e2e-${Math.random().toString(36).slice(2, 8)}@test.local`
+```
+
+並在測試中把詳情頁 URL 的 trip id 存起來、檔尾加清理：
+
+```ts
+import { createClient } from '@supabase/supabase-js'
+
+let createdTripId: string | undefined
+
+// 測試內，點進詳情頁斷言 URL 之後：
+//   createdTripId = page.url().split('/').pop()
+
+test.afterAll(async () => {
+  const url = process.env.SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) return
+  const admin = createClient(url, serviceKey, { auth: { persistSession: false } })
+  if (createdTripId) await admin.from('trips').delete().eq('id', createdTripId)
+  const { data } = await admin.auth.admin.listUsers()
+  const testUsers = data?.users.filter(u => u.email?.endsWith('@test.local') && u.email.startsWith('e2e-')) ?? []
+  for (const u of testUsers) await admin.auth.admin.deleteUser(u.id)
+})
+```
+
+3. `src/lib/supabase/rls.test.ts` 的 afterAll 補刪兩個測試使用者（admin client 已在範疇內；把兩個 email 對應的 user id 於 beforeAll 記下，afterAll 逐一 `admin.auth.admin.deleteUser(id)`，順序：先刪 trip 再刪 users）。
+
+驗證：連跑兩次 `npx playwright test` + `npm test` 後，`auth.users` 中無 `e2e-*`/`owner-*`/`stranger-*` 殘留、trips 無測試行程殘留（psql 查證）。
+
+- [ ] **Step 1:** 測試追加地圖區斷言（空狀態斷言已於 Task 4 Step 3.5 加入）：
+
+```ts
   // 無金鑰環境顯示占位訊息；有金鑰環境顯示地圖——兩者擇一存在即可
   const placeholder = page.getByText(/尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY/)
   const mapCanvas = page.locator('div[aria-label="地圖"], div[role="region"]').first()
   await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 10_000 })
 ```
+
+（另一筆記債不在本計畫處理：導入 CI 時 `reuseExistingServer` 改為 `!process.env.CI` 並評估 retries/trace——記於 spec 殘留風險。）
 
 （地圖互動不進 E2E——Google Maps canvas 的自動化脆弱且消耗配額，互動部分維持手動驗證。）
 

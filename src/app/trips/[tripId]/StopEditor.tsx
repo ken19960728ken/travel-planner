@@ -93,7 +93,7 @@ export default function StopEditor({
         結束
         <input className="rounded border p-1" type="datetime-local" value={endsAt} onChange={e => setEndsAt(e.target.value)} />
       </label>
-      <textarea className="rounded border p-1" placeholder="備註" rows={2} value={notes} onChange={e => setNotes(e.target.value)} />
+      <textarea className="rounded border p-1" maxLength={10000} placeholder="備註" rows={2} value={notes} onChange={e => setNotes(e.target.value)} />
       <input
         className="rounded border p-1"
         type="number"
@@ -108,14 +108,14 @@ export default function StopEditor({
         🔒 鎖定時間（航班、訂位等不可順延的行程）
       </label>
       <div className="flex gap-2">
-        <button className="flex-1 rounded bg-foreground p-1 text-background" onClick={save} disabled={busy}>儲存</button>
+        <button className="flex-1 rounded bg-foreground p-1 text-background disabled:opacity-50" onClick={save} disabled={busy}>儲存</button>
         {confirmDelete ? (
           <>
-            <button className="rounded bg-red-600 px-2 text-white" onClick={remove} disabled={busy}>確認刪除</button>
-            <button className="rounded border px-2" onClick={() => setConfirmDelete(false)} disabled={busy}>取消</button>
+            <button className="rounded bg-red-600 px-2 text-white disabled:opacity-50" onClick={remove} disabled={busy}>確認刪除</button>
+            <button className="rounded border px-2 disabled:opacity-50" onClick={() => setConfirmDelete(false)} disabled={busy}>取消</button>
           </>
         ) : (
-          <button className="rounded border px-2 text-red-600" onClick={() => setConfirmDelete(true)} disabled={busy}>刪除</button>
+          <button className="rounded border px-2 text-red-600 disabled:opacity-50" onClick={() => setConfirmDelete(true)} disabled={busy}>刪除</button>
         )}
       </div>
       {notice && (

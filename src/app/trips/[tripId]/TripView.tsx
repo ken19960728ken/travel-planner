@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
+import { formatLocalTime } from '@/lib/domain/tz'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
 import tzlookup from '@photostructure/tz-lookup'
@@ -191,6 +192,9 @@ export default function TripView({
                 }}
               >
                 <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
+                <span className="mr-1 text-xs text-gray-400">
+                  {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
+                </span>
                 <span className="font-medium">{stop.name}</span>
               </button>
               {selectedId === stop.id && (

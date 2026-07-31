@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
@@ -8,9 +8,12 @@ import { nextDefaultSlot } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
+import { adjacentPairs } from '@/lib/domain/legSync'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
+import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
+import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -36,8 +39,27 @@ export type Stop = {
   estimated_cost: number | null
 }
 
+export type Leg = {
+  id: string
+  from_stop_id: string
+  to_stop_id: string
+  mode: 'transit' | 'walking' | 'driving' | 'flight' | 'custom'
+  duration_minutes: number | null
+  distance_meters: number | null
+  polyline: string | null
+  detail: unknown
+  source: 'auto' | 'manual'
+  stale: boolean
+  departs_at: string | null
+  arrives_at: string | null
+  estimated_cost: number | null
+  updated_at: string
+}
+
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
+const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
+const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
@@ -56,13 +78,16 @@ export default function TripView({
   trip,
   stops,
   stopsError,
+  legs,
 }: {
   trip: Trip
   stops: Stop[]
   stopsError?: boolean
+  legs: Leg[]
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
@@ -83,6 +108,72 @@ export default function TripView({
       lastInsertedEndRef.current = 0
     }
   }, [stops])
+
+  const syncedRef = useRef(false)
+  const syncInFlightRef = useRef(false) // I-2：同時只跑一個 in-flight sync 請求
+  const legsRef = useRef(legs)
+  legsRef.current = legs // 續跑鏈的 setTimeout 閉包會捕捉舊 render 的 legs，比對一律讀 ref 取當下值
+  const syncQueuedRef = useRef(false) // I-2：in-flight 期間又有新觸發，併成一次補跑（不逐一排隊）
+  const syncRoundRef = useRef(0) // I-3：續跑回合數，使用者觸發的全新 sync 會歸零，只有續跑本身遞增
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // I-3：續跑計時器
+  const syncNoticeShownRef = useRef(false) // S-1：連線失敗提示只跳一次，避免每輪續跑都打擾使用者
+  useEffect(() => {
+    if (syncedRef.current) return
+    syncedRef.current = true
+    void syncLegs()
+    return () => {
+      // I-3：unmount 時清掉排隊中的續跑計時器，避免對已卸載的元件觸發後續 setState
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
+    }
+    // 只在掛載時觸發一次；syncLegs 透過 closure 讀最新 props/state，不需要讓這個 effect
+    // 隨依賴重跑（M-5）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 交通段同步：結構比對 + 自動計算都在 server（金鑰不落 client）。
+  // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試（HTTP 非 2xx 例外，S-1 跳一次提示）。
+  // isRetry=true 代表這是 I-3 排程的續跑，不重置回合額度；使用者操作觸發的呼叫一律 isRetry=false（全新額度）。
+  async function syncLegs(isRetry = false) {
+    if (syncInFlightRef.current) {
+      syncQueuedRef.current = true // I-2：coalescing——已有請求在跑，這次觸發併入下一次補跑
+      return
+    }
+    if (!isRetry) syncRoundRef.current = 0
+    syncInFlightRef.current = true
+    try {
+      const res = await fetch(`/api/trips/${trip.id}/legs/sync`, { method: 'POST' })
+      if (!res.ok) {
+        if (!syncNoticeShownRef.current) {
+          syncNoticeShownRef.current = true
+          setNotice({ kind: 'error', text: '交通段暫時無法計算' }) // S-1
+        }
+        return
+      }
+      const j: { changed?: boolean; legCount?: number; pending?: number; incomplete?: boolean } = await res.json()
+      // C-1：legCount 對不上目前 props 拿到的 legs 筆數，即使這次 sync 自己沒有結構異動
+      // （changed=false）也代表 client 的快照落後於 DB（例如併發 sync 已建立該 leg），一樣要 refresh
+      if (j.changed || j.legCount !== legsRef.current.length) router.refresh()
+      if ((j.pending ?? 0) > 0 || j.incomplete) {
+        if (syncRoundRef.current < MAX_SYNC_ROUNDS) {
+          syncRoundRef.current += 1
+          syncTimerRef.current = setTimeout(() => void syncLegs(true), SYNC_RETRY_MS) // I-3：續跑
+        }
+      }
+    } catch {
+      // 網路失敗：交通段維持現狀，不打擾使用者
+    } finally {
+      syncInFlightRef.current = false
+      if (syncQueuedRef.current) {
+        syncQueuedRef.current = false
+        // 補跑取代任何已排的續跑計時器，避免同時有兩條路徑各自觸發下一次 syncLegs
+        if (syncTimerRef.current) {
+          clearTimeout(syncTimerRef.current)
+          syncTimerRef.current = null
+        }
+        void syncLegs() // 視為新一輪使用者觸發，回合額度重置
+      }
+    }
+  }
 
   async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
     if (busyRef.current) return false
@@ -141,6 +232,7 @@ export default function TripView({
       lastInsertedEndRef.current = slot.endsAt
       setNotice(null)
       setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
+      void syncLegs()
       router.refresh()
       return true
     } finally {
@@ -168,6 +260,7 @@ export default function TripView({
       }
       setNotice(null)
       setSelectedId(null) // 拖曳連鎖成功：關閉編輯器，避免舊值（starts_at/ends_at）殘留在表單裡被誤存回去覆寫連鎖結果
+      void syncLegs()
       router.refresh()
     } finally {
       busyRef.current = false
@@ -179,6 +272,7 @@ export default function TripView({
   function changeDay(day: string) {
     setActiveDay(day)
     setSelectedId(null)
+    setSelectedLegId(null)
     setPlayheadMs(null)
     setPlaying(false)
     lastInsertedEndRef.current = 0
@@ -237,6 +331,25 @@ export default function TripView({
     setPlaying(true)
   }
 
+  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
+  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
+  const nextByStopId = new globalThis.Map(
+    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+      .map(([f, t]) => [f.id, t.id]),
+  )
+  const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
+  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+
+  // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
+  // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件
+  // 「Adjusting state when a prop changes」的 useState 追蹤前一輪值＋render 期間比對樣式——
+  // 只在 legs 參照真的變動那一輪才比對一次
+  const [prevLegs, setPrevLegs] = useState(legs)
+  if (prevLegs !== legs) {
+    setPrevLegs(legs)
+    if (selectedLegId !== null && !legs.some(l => l.id === selectedLegId)) setSelectedLegId(null)
+  }
+
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1">
@@ -282,36 +395,68 @@ export default function TripView({
             <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
           )}
           <ul className="flex flex-col gap-2">
-            {activeDayStops.map((stop, i) => (
-              <li
-                key={stop.id}
-                className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="block w-full cursor-pointer text-left"
-                  onClick={() => {
-                    const selecting = selectedId !== stop.id
-                    setSelectedId(selecting ? stop.id : null)
-                    if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
-                  }}
-                >
-                  <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
-                  <span className="mr-1 text-xs text-gray-400">
-                    {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
-                  </span>
-                  <span className="font-medium">{stop.name}</span>
-                </button>
-                {selectedId === stop.id && (
-                  <StopEditor
-                    key={stop.id}
-                    stop={stop}
-                    currency={trip.currency}
-                    onDeleted={() => setSelectedId(null)}
-                  />
-                )}
-              </li>
-            ))}
+            {activeDayStops.map((stop, i) => {
+              const next = stopById.get(nextByStopId.get(stop.id) ?? '')
+              const leg = next ? legByPair.get(`${stop.id}→${next.id}`) : undefined
+              const crossDay = Boolean(next && !activeDayStops.some(s => s.id === next.id))
+              return (
+                <Fragment key={stop.id}>
+                  <li
+                    className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="block w-full cursor-pointer text-left"
+                      onClick={() => {
+                        const selecting = selectedId !== stop.id
+                        setSelectedId(selecting ? stop.id : null)
+                        if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
+                      }}
+                    >
+                      <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
+                      <span className="mr-1 text-xs text-gray-400">
+                        {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
+                      </span>
+                      <span className="font-medium">{stop.name}</span>
+                    </button>
+                    {selectedId === stop.id && (
+                      <StopEditor
+                        key={stop.id}
+                        stop={stop}
+                        currency={trip.currency}
+                        onDeleted={() => setSelectedId(null)}
+                        onChanged={() => void syncLegs()}
+                      />
+                    )}
+                  </li>
+                  {leg && next && (
+                    <li className="pl-5 text-xs">
+                      <button
+                        type="button"
+                        aria-pressed={selectedLegId === leg.id}
+                        className={`cursor-pointer ${selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'}`}
+                        onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
+                      >
+                        {MODE_ICON[leg.mode]} {legDurationText(leg)}
+                        {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
+                        {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
+                        {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
+                      </button>
+                      {selectedLegId === leg.id && (
+                        <LegEditor
+                          key={leg.id}
+                          leg={leg}
+                          fromStop={stop}
+                          toStop={next}
+                          currency={trip.currency}
+                          onChanged={() => void syncLegs()}
+                        />
+                      )}
+                    </li>
+                  )}
+                </Fragment>
+              )
+            })}
             {activeDayStops.length === 0 && (
               <li className="text-sm text-gray-500">
                 {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
@@ -412,6 +557,9 @@ export default function TripView({
         busy={busy}
         playing={playing}
         onTogglePlay={togglePlay}
+        legs={legs}
+        selectedLegId={selectedLegId}
+        onSelectLeg={setSelectedLegId}
       />
     </div>
   )

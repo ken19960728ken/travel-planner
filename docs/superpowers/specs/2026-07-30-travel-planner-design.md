@@ -329,3 +329,12 @@ flowchart LR
 | cascade RPC 的 delta 單位契約 | 參數為「秒」，client 呼叫端必須 Math.round(deltaMs/1000) 明確換算並註解——366 天上限只能攔千倍級災難值，分鐘級的 ms 誤傳仍會靜默造成 10-42 天跳動 | Plan 3 Task 6 接線與其後每個新 caller |
 | 跨午夜停留點僅顯示於開始日 | 23:00–01:00 的停留點只出現在開始日的側欄/時間軸，結束日無延續視覺、當日衝突偵測亦不涵蓋其尾段 | 時間軸後續迭代 |
 | cascade RPC 與 TS cascadeShift 的平手語義差異 | 同 starts_at 的停留點：TS 預覽版依輸入順序、SQL 版不移動平手者；5 分鐘吸附使同刻機率極低 | 記錄即可 |
+| 路線代理限流為實例級記憶體 | Vercel serverless 每實例獨立視窗，護欄弱化；成本主防線是 route_cache + 單次 sync 分批上限 | 商用前換集中式（Upstash/DB）限流 |
+| legs 鎖序不變量 | stale trigger 以 order by id for update 決定性鎖序；sync 刻意逐列寫入；未來單一交易內多列寫 legs 必須同樣按 id 排序取鎖（legs 表註解） | 每次新增 legs 批次寫入時 |
+| 跨夜配對交通段的顯示歸屬 | 跨夜配對照常建立與計算，UI 歸屬出發日（M-4 規則），隔日視角無延續視覺、當日衝突偵測不涵蓋跨日尾段 | 時間軸後續迭代 |
+| 多 editor 同開重複 sync | 每個 editor 開頁都觸發 sync；快取命中與 create 撞 unique 的靜默略過吸收大部分重複，但仍有重複 Google 呼叫的窗口 | Plan 5 Realtime 上線後指定單一觸發者（spec §6 原則） |
+| auto leg 冷資料逾期殘留 | 超過 30 天未被開啟的行程，其 auto 段的 polyline/duration 逾期後仍留在 legs 直到下次開啟才重算——ToS 曝險殘留 | 商用前補背景清理 job（與 spec §4「行程被開啟時重算」的既有語義一致） |
+| TRANSIT departureTime 夾限 | 出發時間離現在超過 100 天的行程，transit 以夾限後時間查詢，結果可能與實際班表有偏差 | 記錄即可（超前規劃 100 天以上屬邊緣） |
+| sync 每人每分鐘 30 次上限的實務含意 | GOOGLE_CALL_LIMIT=30／RATE_WINDOW_MS=60s 為每一 serverless 實例、每使用者的滑動視窗計數（快取命中不計）；單次開頁若一分鐘內連續觸發 sync，該實例內最多算出約 30 段新交通資訊，其餘留 pending 待下次 sync（單次 sync 另受 MAX_GOOGLE_CALLS_PER_SYNC=5 次要上限與 30 秒牆鐘預算約束，兩層護欄各自獨立生效） | 與「路線代理限流為實例級記憶體」同批商用前處理 |
+| M-6：跨 DST 邊界的 flight/custom 起訖換算 | wallInputToUtcMs（`date-fns-tz` fromZonedTime）遇到當地「不存在的時刻」（DST 春進時鐘跳過的那一小時）不會報錯，而是靜默位移到鄰近有效時刻；已由 date-fns-tz 底層處理但本專案無專屬測試案例覆蓋此邊界 | Plan 5：補跨 DST 邊界的單元測試案例，評估是否需改為顯式拒絕並提示使用者 |
+| 樂觀鎖比對「當下 props」的防護範圍 | StopEditor（updated_at）與 LegEditor（lockToken，令牌隨每次成功寫入前進、props 追上時於 render 期間同步）皆以「目前已知的伺服器值」比對寫入，防的是本分頁尚未觀察到的外部改動（跨分頁、其他協作者、sync 併發寫回）；不是悲觀鎖，比對相同即視為安全——若外部曾寫入又剛好復原成相同值，此極端情況不會被偵測到 | 記錄即可（現行防護已覆蓋實務上的併發場景） |

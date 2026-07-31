@@ -36,7 +36,9 @@ export type Database = {
     Tables: {
       legs: {
         Row: {
+          arrives_at: string | null
           computed_at: string | null
+          departs_at: string | null
           detail: Json | null
           distance_meters: number | null
           duration_minutes: number | null
@@ -53,7 +55,9 @@ export type Database = {
           updated_by: string | null
         }
         Insert: {
+          arrives_at?: string | null
           computed_at?: string | null
+          departs_at?: string | null
           detail?: Json | null
           distance_meters?: number | null
           duration_minutes?: number | null
@@ -70,7 +74,9 @@ export type Database = {
           updated_by?: string | null
         }
         Update: {
+          arrives_at?: string | null
           computed_at?: string | null
+          departs_at?: string | null
           detail?: Json | null
           distance_meters?: number | null
           duration_minutes?: number | null

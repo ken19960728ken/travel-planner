@@ -1,10 +1,12 @@
 'use client'
 
 import { useRef, useState } from 'react'
-import type { Stop } from './TripView'
+import type { Stop, Leg } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
 import { detectConflicts } from '@/lib/domain/conflicts'
+import { adjacentPairs } from '@/lib/domain/legSync'
+import { MODE_ICON, MODE_LABEL, legDurationText } from './legUi'
 
 const HOUR_MS = 60 * 60 * 1000
 const SNAP_MS = 5 * 60 * 1000 // 拖曳吸附至 5 分鐘；位移小於此視為點擊
@@ -22,6 +24,9 @@ export type TimelineProps = {
   busy?: boolean // 上層寫入中：擋新拖曳、軌道降低透明度提示
   playing: boolean
   onTogglePlay: () => void
+  legs: Leg[]
+  selectedLegId: string | null
+  onSelectLeg: (id: string | null) => void
 }
 
 /** 當日視窗：停留點最早前 1h ~ 最晚後 1h；空日 fallback 當地 08:00–20:00 概念上以 UTC 對齊隱藏 */
@@ -34,7 +39,7 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
-  playing, onTogglePlay,
+  playing, onTogglePlay, legs, selectedLegId, onSelectLeg,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
@@ -79,6 +84,21 @@ export default function Timeline({
     setDrag(null) // 拖曳被中斷（如瀏覽器手勢搶走指標）：只捨棄預覽，絕不提交 onMove
   }
 
+  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4，與 TripView 同規則）
+  const nextByStopId = new Map(
+    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+      .map(([f, t]) => [f.id, t.id]),
+  )
+  const stopById = new Map(stops.map(s => [s.id, s]))
+  const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+  const dayLegs = dayStops
+    .map(s => {
+      const next = stopById.get(nextByStopId.get(s.id) ?? '')
+      const leg = next ? legByPair.get(`${s.id}→${next.id}`) : undefined
+      return next && leg ? { from: s, to: next, leg } : null
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+
   const warnings = detectConflicts(
     dayStops.map(s => ({
       id: s.id,
@@ -86,10 +106,15 @@ export default function Timeline({
       endsAt: new Date(s.ends_at).getTime(),
       locked: s.locked,
     })),
-    [], // 交通段 Plan 4 接入
+    dayLegs
+      .filter(x => x.leg.duration_minutes !== null)
+      .map(x => ({ fromStopId: x.from.id, toStopId: x.to.id, durationMinutes: x.leg.duration_minutes! })),
   )
   const conflictIds = new Set(
     warnings.flatMap(w => (w.type === 'overlap' ? w.stopIds : [w.fromStopId, w.toStopId])),
+  )
+  const tightPairs = new Set(
+    warnings.filter(w => w.type === 'transit_too_tight').map(w => `${w.fromStopId}→${w.toStopId}`),
   )
 
   return (
@@ -155,9 +180,41 @@ export default function Timeline({
                 </button>
               )
             })}
+            {dayLegs.map(({ from, to, leg }) => {
+              const gs = new Date(from.ends_at).getTime()
+              const ge = Math.min(new Date(to.starts_at).getTime(), win.end) // 跨夜段夾到視窗尾（M-4）
+              if (ge <= gs) return null
+              const tight = tightPairs.has(`${from.id}→${to.id}`)
+              const leftPct = pct(gs)
+              const rawWidthPct = pct(ge) - leftPct
+              // I-1：視覺最小寬度撐寬到 2%，但右緣不可超過軌道（100%），空檔越接近視窗尾越明顯
+              const widthPct = Math.min(Math.max(rawWidthPct, 2), 100 - leftPct)
+              // I-1：被撐寬出來的死區不該搶走點擊——選取一律走側欄交通列，連接條在此僅供顯示
+              const isDeadZone = rawWidthPct < 2
+              return (
+                <button
+                  key={leg.id}
+                  type="button"
+                  data-leg-connector={leg.id}
+                  tabIndex={-1}
+                  onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
+                  title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
+                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden whitespace-nowrap rounded text-center text-[10px] leading-tight ${
+                    isDeadZone ? 'pointer-events-none' : ''
+                  } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
+                    selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
+                  }`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                >
+                  {MODE_ICON[leg.mode]}
+                  {leg.stale && '⚠️'}
+                  {legDurationText(leg)}
+                </button>
+              )
+            })}
             {ph !== null && (
               <div
-                className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-orange-500"
+                className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-orange-500"
                 style={{ left: `${pct(ph)}%` }}
               />
             )}

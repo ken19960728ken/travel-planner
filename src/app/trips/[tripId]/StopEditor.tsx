@@ -6,6 +6,8 @@ import { createClient } from '@/lib/supabase/client'
 import { toDatetimeLocalValue, fromDatetimeLocalValue } from '@/lib/domain/datetime'
 import type { Stop } from './TripView'
 
+type Notice = { kind: 'error' | 'success'; text: string } | null
+
 export default function StopEditor({
   stop,
   currency,
@@ -23,42 +25,66 @@ export default function StopEditor({
   const [cost, setCost] = useState(stop.estimated_cost?.toString() ?? '')
   const [locked, setLocked] = useState(stop.locked)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [msg, setMsg] = useState('')
+  const [notice, setNotice] = useState<Notice>(null)
+  const [busy, setBusy] = useState(false)
 
   async function save() {
+    if (busy) return
     const trimmed = name.trim()
     const startMs = fromDatetimeLocalValue(startsAt)
     const endMs = fromDatetimeLocalValue(endsAt)
-    if (!trimmed) return setMsg('名稱不能為空')
-    if (!(endMs > startMs)) return setMsg('結束時間必須晚於開始時間')
-    const supabase = createClient()
-    const { error } = await supabase
-      .from('stops')
-      .update({
-        name: trimmed,
-        starts_at: new Date(startMs).toISOString(),
-        ends_at: new Date(endMs).toISOString(),
-        notes: notes.trim() || null,
-        estimated_cost: cost === '' ? null : Number(cost),
-        locked,
-      })
-      .eq('id', stop.id)
-    if (error) return setMsg('儲存失敗，請稍後再試')
-    setMsg('已儲存 ✓')
-    router.refresh()
+    if (!trimmed) return setNotice({ kind: 'error', text: '名稱不能為空' })
+    if (!(endMs > startMs)) return setNotice({ kind: 'error', text: '結束時間必須晚於開始時間' })
+    if (cost !== '' && Number(cost) < 0) return setNotice({ kind: 'error', text: '花費不能是負數' })
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase
+        .from('stops')
+        .update({
+          name: trimmed,
+          starts_at: new Date(startMs).toISOString(),
+          ends_at: new Date(endMs).toISOString(),
+          notes: notes.trim() || null,
+          estimated_cost: cost === '' ? null : Number(cost),
+          locked,
+        })
+        .eq('id', stop.id)
+      if (error) {
+        setNotice(
+          error.code === '23514'
+            ? { kind: 'error', text: '輸入內容不符限制，請檢查名稱長度與數值' }
+            : { kind: 'error', text: '儲存失敗，請稍後再試' },
+        )
+        return
+      }
+      setNotice({ kind: 'success', text: '已儲存 ✓' })
+      router.refresh()
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function remove() {
-    const supabase = createClient()
-    const { error } = await supabase.from('stops').delete().eq('id', stop.id)
-    if (error) return setMsg('刪除失敗，請稍後再試')
-    onDeleted?.()
-    router.refresh()
+    if (busy) return
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      const { error } = await supabase.from('stops').delete().eq('id', stop.id)
+      if (error) {
+        setNotice({ kind: 'error', text: '刪除失敗，請稍後再試' })
+        return
+      }
+      onDeleted?.()
+      router.refresh()
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
     <div className="mt-2 flex flex-col gap-2 rounded border p-2 text-sm">
-      <input className="rounded border p-1" value={name} onChange={e => setName(e.target.value)} />
+      <input className="rounded border p-1" value={name} onChange={e => setName(e.target.value)} maxLength={200} />
       <label className="flex flex-col gap-1">
         開始
         <input className="rounded border p-1" type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)} />
@@ -82,17 +108,19 @@ export default function StopEditor({
         🔒 鎖定時間（航班、訂位等不可順延的行程）
       </label>
       <div className="flex gap-2">
-        <button className="flex-1 rounded bg-foreground p-1 text-background" onClick={save}>儲存</button>
+        <button className="flex-1 rounded bg-foreground p-1 text-background" onClick={save} disabled={busy}>儲存</button>
         {confirmDelete ? (
           <>
-            <button className="rounded bg-red-600 px-2 text-white" onClick={remove}>確認刪除</button>
-            <button className="rounded border px-2" onClick={() => setConfirmDelete(false)}>取消</button>
+            <button className="rounded bg-red-600 px-2 text-white" onClick={remove} disabled={busy}>確認刪除</button>
+            <button className="rounded border px-2" onClick={() => setConfirmDelete(false)} disabled={busy}>取消</button>
           </>
         ) : (
-          <button className="rounded border px-2 text-red-600" onClick={() => setConfirmDelete(true)}>刪除</button>
+          <button className="rounded border px-2 text-red-600" onClick={() => setConfirmDelete(true)} disabled={busy}>刪除</button>
         )}
       </div>
-      {msg && <p className={msg.startsWith('已儲存') ? 'text-green-600' : 'text-red-600'}>{msg}</p>}
+      {notice && (
+        <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+      )}
     </div>
   )
 }

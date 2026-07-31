@@ -34,10 +34,12 @@ export type Stop = {
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 
+type Notice = { kind: 'error' | 'success'; text: string } | null
+
 export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [errorMsg, setErrorMsg] = useState('')
+  const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
   const [draftName, setDraftName] = useState('')
@@ -78,10 +80,10 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
         ends_at: new Date(slot.endsAt).toISOString(),
       })
       if (error) {
-        setErrorMsg('加入停留點失敗，請稍後再試')
+        setNotice({ kind: 'error', text: '加入停留點失敗，請稍後再試' })
         return false
       }
-      setErrorMsg('')
+      setNotice(null)
       router.refresh()
       return true
     } finally {
@@ -115,6 +117,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
               value={draftName}
               onChange={e => setDraftName(e.target.value)}
               autoFocus
+              maxLength={200}
             />
             <button className="rounded bg-foreground px-2 text-sm text-background" type="submit" disabled={busy}>
               加入
@@ -124,20 +127,23 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
             </button>
           </form>
         )}
-        {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
+        {notice && (
+          <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+        )}
         <ul className="flex flex-col gap-2">
           {stops.map((stop, i) => (
             <li
               key={stop.id}
               className={`rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
             >
-              <div
-                className="cursor-pointer"
+              <button
+                type="button"
+                className="block w-full cursor-pointer text-left"
                 onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}
               >
                 <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
                 <span className="font-medium">{stop.name}</span>
-              </div>
+              </button>
               {selectedId === stop.id && (
                 <StopEditor
                   key={stop.id}
@@ -169,6 +175,7 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
                 key={stop.id}
                 position={{ lat: stop.lat, lng: stop.lng }}
                 onClick={() => setSelectedId(stop.id)}
+                title={stop.name}
               >
                 <Pin
                   background={selectedId === stop.id ? '#2563eb' : '#ef4444'}

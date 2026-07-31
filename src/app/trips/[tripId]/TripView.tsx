@@ -13,6 +13,7 @@ import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
+import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
 
@@ -464,6 +465,9 @@ export default function TripView({
     .filter(l => nextByStopId.get(l.from_stop_id) !== l.to_stop_id)
     .filter(l => activeDayStops.some(s => s.id === l.from_stop_id))
 
+  // Important-3 根治：Timeline 連接條與側欄交通列的「趕不上」警示同讀這份單一計算來源（審查 M-4）
+  const dayView = buildDayView(activeDayStops, stops, legs)
+
   // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
   // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件
   // 「Adjusting state when a prop changes」的 useState 追蹤前一輪值＋render 期間比對樣式——
@@ -523,6 +527,14 @@ export default function TripView({
               const next = stopById.get(nextByStopId.get(stop.id) ?? '')
               const leg = next ? legByPair.get(`${stop.id}→${next.id}`) : undefined
               const crossDay = Boolean(next && !activeDayStops.some(s => s.id === next.id))
+              // Important-3 根治：趕不上警示——命中 dayView.tightPairs 時，兩個數值取自對應的
+              // warning 物件（非重新計算），gapMinutes 可能是小數，顯示前四捨五入
+              const tightWarning = next
+                ? dayView.warnings.find(
+                    (w): w is Extract<typeof w, { type: 'transit_too_tight' }> =>
+                      w.type === 'transit_too_tight' && w.fromStopId === stop.id && w.toStopId === next.id,
+                  )
+                : undefined
               return (
                 <Fragment key={stop.id}>
                   <li
@@ -558,13 +570,20 @@ export default function TripView({
                       <button
                         type="button"
                         aria-pressed={selectedLegId === leg.id}
-                        className={`cursor-pointer ${selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'}`}
+                        className={`cursor-pointer ${
+                          tightWarning ? 'text-red-600' : selectedLegId === leg.id ? 'font-medium text-blue-600' : 'text-gray-500'
+                        }`}
                         onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
                       >
                         {MODE_ICON[leg.mode]} {legDurationText(leg)}
                         {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
                         {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
+                        {tightWarning &&
+                          // gapMinutes < requiredMinutes 恆成立（detectConflicts 的判定條件），四捨五入可能把
+                          // 44.6 分進位成 45 分，顯示出「45 分＜45 分」自相矛盾的句子；改用無條件捨去，
+                          // floor(gap) < requiredMinutes 對整數 requiredMinutes 永遠成立，不等式恆自洽
+                          ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分`}
                       </button>
                       {leg.source === 'manual' && (
                         <span className="ml-1">
@@ -710,7 +729,7 @@ export default function TripView({
         busy={busy}
         playing={playing}
         onTogglePlay={togglePlay}
-        legs={legs}
+        dayView={dayView}
         selectedLegId={selectedLegId}
         onSelectLeg={setSelectedLegId}
       />

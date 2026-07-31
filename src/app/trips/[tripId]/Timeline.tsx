@@ -1,11 +1,10 @@
 'use client'
 
 import { useRef, useState } from 'react'
-import type { Stop, Leg } from './TripView'
+import type { Stop } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
-import { detectConflicts } from '@/lib/domain/conflicts'
-import { adjacentPairs } from '@/lib/domain/legSync'
+import type { DayView } from './dayView'
 import { MODE_ICON, MODE_LABEL, legDurationText } from './legUi'
 
 const HOUR_MS = 60 * 60 * 1000
@@ -24,7 +23,7 @@ export type TimelineProps = {
   busy?: boolean // 上層寫入中：擋新拖曳、軌道降低透明度提示
   playing: boolean
   onTogglePlay: () => void
-  legs: Leg[]
+  dayView: DayView
   selectedLegId: string | null
   onSelectLeg: (id: string | null) => void
 }
@@ -39,7 +38,7 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
-  playing, onTogglePlay, legs, selectedLegId, onSelectLeg,
+  playing, onTogglePlay, dayView, selectedLegId, onSelectLeg,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
@@ -84,38 +83,9 @@ export default function Timeline({
     setDrag(null) // 拖曳被中斷（如瀏覽器手勢搶走指標）：只捨棄預覽，絕不提交 onMove
   }
 
-  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4，與 TripView 同規則）
-  const nextByStopId = new Map(
-    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-      .map(([f, t]) => [f.id, t.id]),
-  )
-  const stopById = new Map(stops.map(s => [s.id, s]))
-  const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
-  const dayLegs = dayStops
-    .map(s => {
-      const next = stopById.get(nextByStopId.get(s.id) ?? '')
-      const leg = next ? legByPair.get(`${s.id}→${next.id}`) : undefined
-      return next && leg ? { from: s, to: next, leg } : null
-    })
-    .filter((x): x is NonNullable<typeof x> => x !== null)
-
-  const warnings = detectConflicts(
-    dayStops.map(s => ({
-      id: s.id,
-      startsAt: new Date(s.starts_at).getTime(),
-      endsAt: new Date(s.ends_at).getTime(),
-      locked: s.locked,
-    })),
-    dayLegs
-      .filter(x => x.leg.duration_minutes !== null)
-      .map(x => ({ fromStopId: x.from.id, toStopId: x.to.id, durationMinutes: x.leg.duration_minutes! })),
-  )
-  const conflictIds = new Set(
-    warnings.flatMap(w => (w.type === 'overlap' ? w.stopIds : [w.fromStopId, w.toStopId])),
-  )
-  const tightPairs = new Set(
-    warnings.filter(w => w.type === 'transit_too_tight').map(w => `${w.fromStopId}→${w.toStopId}`),
-  )
+  // dayLegs/conflictIds/tightPairs 的計算單一來源：dayView 由 TripView 呼叫 buildDayView 產出
+  // （審查 M-4：連接條渲染與側欄警示同讀一份，不各自組裝）
+  const { dayLegs, conflictIds, tightPairs } = dayView
 
   return (
     <div className="border-t bg-background p-2">

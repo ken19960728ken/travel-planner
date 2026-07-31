@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { APIProvider, Map } from '@vis.gl/react-google-maps'
+import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
 import PlaceSearch from './PlaceSearch'
@@ -38,6 +38,8 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [busy, setBusy] = useState(false)
+  const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
+  const [draftName, setDraftName] = useState('')
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
@@ -91,14 +93,42 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
         {apiKey && (
           <PlaceSearch onPick={p => addStop({ ...p, isCustom: false })} disabled={busy} />
         )}
+        {draftPin && (
+          <form
+            className="flex gap-1 rounded border p-2"
+            onSubmit={async e => {
+              e.preventDefault()
+              const name = draftName.trim()
+              if (!name) return
+              await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
+              setDraftPin(null)
+              setDraftName('')
+            }}
+          >
+            <input
+              className="min-w-0 flex-1 rounded border p-1 text-sm"
+              placeholder="自訂地點名稱"
+              value={draftName}
+              onChange={e => setDraftName(e.target.value)}
+              autoFocus
+            />
+            <button className="rounded bg-foreground px-2 text-sm text-background" type="submit" disabled={busy}>
+              加入
+            </button>
+            <button className="rounded border px-2 text-sm" type="button" onClick={() => setDraftPin(null)}>
+              取消
+            </button>
+          </form>
+        )}
         {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
         <ul className="flex flex-col gap-2">
-          {stops.map(stop => (
+          {stops.map((stop, i) => (
             <li
               key={stop.id}
               onClick={() => setSelectedId(stop.id)}
               className={`cursor-pointer rounded border p-2 ${selectedId === stop.id ? 'border-blue-500' : ''}`}
             >
+              <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
               <span className="font-medium">{stop.name}</span>
             </li>
           ))}
@@ -113,7 +143,32 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
             mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
             gestureHandling="greedy"
             disableDefaultUI={false}
-          />
+            onContextmenu={e => {
+              const latLng = e.detail.latLng
+              if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+            }}
+          >
+            {stops.map((stop, i) => (
+              <AdvancedMarker
+                key={stop.id}
+                position={{ lat: stop.lat, lng: stop.lng }}
+                onClick={() => setSelectedId(stop.id)}
+              >
+                <Pin
+                  background={selectedId === stop.id ? '#2563eb' : '#ef4444'}
+                  glyphColor="#fff"
+                  borderColor="#fff"
+                >
+                  <span className="text-xs font-bold">{i + 1}</span>
+                </Pin>
+              </AdvancedMarker>
+            ))}
+            {draftPin && (
+              <AdvancedMarker position={draftPin}>
+                <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
+              </AdvancedMarker>
+            )}
+          </Map>
         ) : (
           <div className="flex h-full items-center justify-center text-gray-500">
             尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示

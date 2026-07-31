@@ -46,7 +46,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       .limit(501), // 501 = 500 護欄 + 1 哨兵，藉此偵測「剛好卡在上限」與「真的超過上限」的差異（審查 I-2）
     supabase
       .from('legs')
-      .select('id, from_stop_id, to_stop_id, mode, source, duration_minutes, departs_at, computed_at, stale')
+      .select('id, from_stop_id, to_stop_id, mode, source, duration_minutes, departs_at, computed_at, stale, estimated_cost')
       .eq('trip_id', tripId)
       .order('id')
       .limit(501),
@@ -80,6 +80,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     departsAtMs: l.departs_at ? new Date(l.departs_at).getTime() : null,
     computedAtMs: l.computed_at ? new Date(l.computed_at).getTime() : null,
     stale: l.stale,
+    estimatedCost: l.estimated_cost,
   }))
   const plan = planLegSync(stops, legs, now)
 
@@ -114,6 +115,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     const { data, error } = await supabase.from('legs').delete().eq('id', id).eq('source', 'auto').select('id')
     if (!error) { if ((data ?? []).length > 0) { changed = true; removedCount++ } }
     else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
+  }
+  for (const id of plan.detachAuto) {
+    if (budgetExceeded()) { incomplete = true; break }
+    // Important-1 根治：帶花費的 auto 段脫離配對時轉存 manual——花費是使用者資料必須保留；
+    // Google 衍生欄位全清（脫離段不再被 sync 重算，留著就是 30 天後的 ToS 逾期殘留）。
+    // .eq('source','auto') 原子守衛沿 Critical-1 慣例：已被使用者搶先改 manual 就不動它
+    const { data, error } = await supabase.from('legs').update({
+      source: 'manual', duration_minutes: null, distance_meters: null,
+      polyline: null, detail: null, computed_at: null,
+      departs_at: null, arrives_at: null, stale: true,
+    }).eq('id', id).eq('source', 'auto').select('id')
+    // 成功計 changed = true（不動 legCount——列仍在，只是 source 由 auto 轉 manual）
+    if (!error) { if ((data ?? []).length > 0) changed = true }
+    else console.error('[legs/sync] detachAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (let i = 0; i < plan.create.length; i++) {
     if (budgetExceeded()) {

@@ -8,10 +8,12 @@ export type SyncLeg = {
   departsAtMs: number | null
   computedAtMs: number | null
   stale: boolean
+  estimatedCost: number | null
 }
 export type LegSyncPlan = {
   create: Array<{ fromStopId: string; toStopId: string }>
   removeAuto: string[]
+  detachAuto: string[]
   markStale: string[]
   recompute: string[]
 }
@@ -34,13 +36,16 @@ export function adjacentPairs<T extends { id: string; startsAt: number }>(stops:
 export function planLegSync(stops: SyncStop[], legs: SyncLeg[], nowMs: number): LegSyncPlan {
   const key = (f: string, t: string) => `${f}→${t}`
   const wanted = new Map(adjacentPairs(stops).map(([f, t]) => [key(f.id, t.id), { from: f, to: t }]))
-  const plan: LegSyncPlan = { create: [], removeAuto: [], markStale: [], recompute: [] }
+  const plan: LegSyncPlan = { create: [], removeAuto: [], detachAuto: [], markStale: [], recompute: [] }
   const covered = new Set<string>()
 
   for (const leg of legs) {
     const pair = wanted.get(key(leg.fromStopId, leg.toStopId))
     if (!pair) {
-      if (leg.source === 'auto') plan.removeAuto.push(leg.id)
+      // Important-1 根治：帶花費的 auto 段脫離配對時不能無聲刪除（花費是使用者資料）——
+      // 轉存 manual（detachAuto，實際 UPDATE 在 sync route 執行），無花費才走原本的 removeAuto
+      if (leg.source === 'auto' && leg.estimatedCost !== null) plan.detachAuto.push(leg.id)
+      else if (leg.source === 'auto') plan.removeAuto.push(leg.id)
       else if (!leg.stale) plan.markStale.push(leg.id)
       continue
     }

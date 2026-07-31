@@ -7,7 +7,8 @@ const stop = (id: string, s: number, e: number): SyncStop =>
   ({ id, lat: 33, lng: 130, startsAt: NOW + s * H, endsAt: NOW + e * H })
 const leg = (over: Partial<SyncLeg>): SyncLeg => ({
   id: 'L', fromStopId: 'a', toStopId: 'b', source: 'auto',
-  durationMinutes: 10, departsAtMs: NOW + 2 * H, computedAtMs: NOW, stale: false, ...over,
+  durationMinutes: 10, departsAtMs: NOW + 2 * H, computedAtMs: NOW, stale: false,
+  estimatedCost: null, ...over,
 })
 
 describe('adjacentPairs', () => {
@@ -41,6 +42,28 @@ describe('planLegSync', () => {
     expect(plan.markStale).toEqual(['L2'])
   })
 
+  it('配對脫離的 auto 段有花費 → detachAuto（不進 removeAuto，Important-1 根治）', () => {
+    const plan = planLegSync(stops, [
+      leg({ id: 'L1', fromStopId: 'a', toStopId: 'c', estimatedCost: 500 }),
+    ], NOW)
+    expect(plan.detachAuto).toEqual(['L1'])
+    expect(plan.removeAuto).toEqual([])
+  })
+
+  it('配對脫離的 auto 段無花費 → removeAuto（現行為不變，不進 detachAuto）', () => {
+    const plan = planLegSync(stops, [
+      leg({ id: 'L1', fromStopId: 'a', toStopId: 'c', estimatedCost: null }),
+    ], NOW)
+    expect(plan.removeAuto).toEqual(['L1'])
+    expect(plan.detachAuto).toEqual([])
+  })
+
+  it('相鄰配對上的帶花費 auto 段完全不動（不進 detachAuto/removeAuto）', () => {
+    const plan = planLegSync(stops, [leg({ id: 'L1', estimatedCost: 300 })], NOW)
+    expect(plan.detachAuto).toEqual([])
+    expect(plan.removeAuto).toEqual([])
+  })
+
   it('已 stale 的 manual 段不重複進 markStale', () => {
     const plan = planLegSync(stops, [leg({ id: 'L2', fromStopId: 'c', toStopId: 'a', source: 'manual', stale: true })], NOW)
     expect(plan.markStale).toEqual([])
@@ -68,7 +91,9 @@ describe('planLegSync', () => {
 
   it('基準吻合且未過期的 auto 段不動', () => {
     const plan = planLegSync(stops, [leg({ id: 'L1' })], NOW)
-    expect(plan).toEqual({ create: [{ fromStopId: 'b', toStopId: 'c' }], removeAuto: [], markStale: [], recompute: [] })
+    expect(plan).toEqual({
+      create: [{ fromStopId: 'b', toStopId: 'c' }], removeAuto: [], detachAuto: [], markStale: [], recompute: [],
+    })
   })
 
   it('相鄰配對上的 manual 段完全不動（絕不被自動覆蓋）', () => {

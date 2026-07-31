@@ -15,6 +15,8 @@ describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
   let stranger: SupabaseClient
   let admin: SupabaseClient
   let tripId: string
+  let ownerId: string
+  let strangerId: string
 
   beforeAll(async () => {
     admin = createClient(url!, serviceKey!, { auth: { persistSession: false } })
@@ -22,8 +24,12 @@ describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
     const password = 'test-password-1234'
     const ownerEmail = `owner-${suffix}@test.local`
     const strangerEmail = `stranger-${suffix}@test.local`
-    await admin.auth.admin.createUser({ email: ownerEmail, password, email_confirm: true })
-    await admin.auth.admin.createUser({ email: strangerEmail, password, email_confirm: true })
+    const { data: ownerData, error: ownerErr } = await admin.auth.admin.createUser({ email: ownerEmail, password, email_confirm: true })
+    if (ownerErr) throw ownerErr
+    ownerId = ownerData.user.id
+    const { data: strangerData, error: strangerErr } = await admin.auth.admin.createUser({ email: strangerEmail, password, email_confirm: true })
+    if (strangerErr) throw strangerErr
+    strangerId = strangerData.user.id
 
     owner = newUserClient()
     stranger = newUserClient()
@@ -82,5 +88,7 @@ describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
     if (tripId) {
       await admin.from('trips').delete().eq('id', tripId)
     }
+    if (ownerId) await admin.auth.admin.deleteUser(ownerId)
+    if (strangerId) await admin.auth.admin.deleteUser(strangerId)
   })
 })

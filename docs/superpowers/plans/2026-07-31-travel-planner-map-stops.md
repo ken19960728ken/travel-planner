@@ -574,6 +574,16 @@ git commit -m "feat: nextDefaultSlot 新停留點預設時段"
 
 ### Task 6: 地點搜尋 → 加入停留點
 
+> **已知限制（Task 5 品質審查記錄）**：stops 是全行程扁平清單，`nextDefaultSlot` 接在全域最晚 endsAt 之後——多日行程連續新增停留點時，預設時間會沿同一條時間線往後疊，不會自動落到「隔天早上」。使用者可用 Task 8 的編輯器改時間；正規解（按日分組與時區精算）屬 Plan 3 時間軸範圍，此處不做半套啟發式。
+
+**Step 0（品質審查排入）：產生 DB 型別**
+
+```bash
+supabase gen types typescript --local > src/lib/supabase/database.types.ts
+```
+
+產出檔進版控。本 Task 起新增的 DB 互動程式碼優先使用產生型別（既有手寫 Stop type 不強制回改，Task 8 若碰到再收斂）。
+
 **Files:** Create: `src/app/trips/[tripId]/PlaceSearch.tsx`、`src/lib/domain/datetime.ts`；Modify: `TripView.tsx`（掛入搜尋框）
 
 - [ ] **Step 1: 安裝時區推定**

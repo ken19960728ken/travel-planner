@@ -167,6 +167,7 @@ export default function TripView({
         return
       }
       setNotice(null)
+      setSelectedId(null) // 拖曳連鎖成功：關閉編輯器，避免舊值（starts_at/ends_at）殘留在表單裡被誤存回去覆寫連鎖結果
       router.refresh()
     } finally {
       busyRef.current = false
@@ -394,6 +395,7 @@ export default function TripView({
         </div>
       </div>
       <Timeline
+        key={activeDay} // Day 切換即重掛：內部唯一 state（drag）天然歸零，避免切 Day 後拖曳卡死（不用 effect 清 state，踩過 set-state-in-effect lint 錯誤）
         stops={stops}
         dayKeys={tripDayKeys(trip.start_date, trip.end_date)}
         activeDay={activeDay}

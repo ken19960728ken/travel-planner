@@ -62,8 +62,7 @@ export default function Timeline({
     if (!drag || e.pointerId !== drag.pointerId) return
     const { id, deltaMs } = drag
     if (Math.abs(deltaMs) >= SNAP_MS && onMove) {
-      // 保留 drag 狀態讓色塊停在預覽位置，等 RPC + refresh 把新時間帶回 props 才清掉，
-      // 避免「先彈回原位、新資料一到又跳一次」的兩段式動畫。
+      // 等 RPC 完成才清 drag（縮短回彈窗口；refresh 落地前仍有短暫跳動，完整消除需 pendingDelta 機制，記入 Plan 4）
       // finally 保證任何例外都不會讓 drag 卡死（否則 beginDrag 會永久擋住後續拖曳）
       try {
         await onMove(id, deltaMs)
@@ -144,6 +143,7 @@ export default function Timeline({
                   onPointerMove={moveDrag}
                   onPointerUp={endDrag}
                   onPointerCancel={cancelDrag}
+                  onLostPointerCapture={cancelDrag} // 指標擷取被瀏覽器/系統手勢強制搶走時（未必觸發 pointercancel），一併釋放拖曳，避免卡死
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
                   className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'

@@ -41,7 +41,7 @@ export default function StopEditor({
     setBusy(true)
     try {
       const supabase = createClient()
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('stops')
         .update({
           name: trimmed,
@@ -51,13 +51,23 @@ export default function StopEditor({
           estimated_cost: cost === '' ? null : Number(cost),
           locked,
         })
+        // 樂觀鎖：starts_at/ends_at 帶著開啟編輯器當下讀到的舊值一起比對，
+        // 若期間被拖曳連鎖等操作改動過，這裡會比對不到列（data 為空陣列且無 error），不可再靜默覆寫
         .eq('id', stop.id)
+        .eq('starts_at', stop.starts_at)
+        .eq('ends_at', stop.ends_at)
+        .select('id')
       if (error) {
         setNotice(
           error.code === '23514'
             ? { kind: 'error', text: '輸入內容不符限制，請檢查名稱長度與數值' }
             : { kind: 'error', text: '儲存失敗，請稍後再試' },
         )
+        return
+      }
+      if (data.length === 0) {
+        setNotice({ kind: 'error', text: '此停留點的時間已被其他操作變更，請重新整理後再編輯' })
+        router.refresh()
         return
       }
       setNotice({ kind: 'success', text: '已儲存 ✓' })

@@ -7,6 +7,13 @@ let createdTripId: string | undefined
 test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁', async ({ page }) => {
   const email = `e2e-${Math.random().toString(36).slice(2, 8)}@test.local`
 
+  // 地圖金鑰 referrer 未涵蓋目前來源時，Google Maps 只在 console 噴錯、不拋例外，其餘斷言仍會綠燈通過——
+  // 全程收集這類訊息，尾端斷言必須為空，避免金鑰設定錯誤被誤判為「測試通過」的假綠燈
+  const mapsErrors: string[] = []
+  page.on('console', msg => {
+    if (msg.text().includes('Google Maps JavaScript API error')) mapsErrors.push(msg.text())
+  })
+
   await page.goto('/login')
   await page.getByPlaceholder('Email').fill(email)
   await page.getByPlaceholder('密碼').fill('e2e-password-1234')
@@ -69,6 +76,8 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
     expect(deltaA).toBeGreaterThanOrEqual(5 * 60 * 1000) // 至少一個 snap
     expect(deltaB).toBe(deltaA) // 連鎖：B 跟 A 同步平移
   }
+
+  expect(mapsErrors).toEqual([])
 })
 
 test.afterAll(async () => {

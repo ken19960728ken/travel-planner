@@ -25,6 +25,7 @@
 | 定稿快照 + JSON 匯出（為回憶專案鋪路） | ✅ | |
 | 計畫 vs 實際對比 | | 回憶專案 |
 | mp4 影片匯出 | | 回憶專案 |
+| Excel（xlsx）行程表匯出 | | Plan 5（與 JSON 匯出同批；使用者 2026-07-31 提出。若行前急用，可於 Plan 3 後先出簡版——僅停留點欄位、無交通欄） |
 | 照片 / 社群串接 | | 回憶專案 |
 | 分帳結算（誰付誰欠） | | 不做（Splitwise 級的獨立產品，做了會失焦） |
 | 離線編輯與合併 | | 不做（CRDT 級複雜度，MVP 不碰） |
@@ -322,3 +323,5 @@ flowchart LR
 | Realtime DELETE 事件不套 RLS | Supabase 官方行為：DELETE 廣播給所有訂閱者（payload 僅剩 PK），client 須以「本地有此 id 才移除」冪等處理，且不可依賴 payload 中的 trip_id | Plan 5 共編實作時 |
 | 本機 supabase db reset 故障 | CLI 2.110.0 報 LegacyDbBootstrapError；本機重建 schema 的替代指令：drop schema public cascade 後以 psql 重跑 migration | CLI 修復後移除 workaround |
 | Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |
+| Playwright reuseExistingServer 寫死 true | 導入 CI 時需改為 !process.env.CI 並評估 retries/trace，否則 CI 可能對過期 server 跑出假綠燈 | 導入 CI 時 |
+| E2E 清理的 listUsers 未分頁 | 測試使用者清理只掃第一頁，規模大後可能漏清（不會誤刪，只會少清） | 測試量成長時 |

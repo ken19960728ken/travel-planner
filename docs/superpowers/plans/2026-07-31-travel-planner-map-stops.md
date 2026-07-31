@@ -48,13 +48,13 @@ playwright.config.ts                  # 新
 
 **Files:** Modify: `src/app/layout.tsx`、`src/app/globals.css`、`src/app/login/page.tsx`、`src/app/trips/page.tsx`、`src/app/trips/CreateTripForm.tsx`、`README.md`；Create: `src/app/trips/SignOutButton.tsx`
 
-- [ ] **Step 1: 建立分支**
+- [x] **Step 1: 建立分支**
 
 ```bash
 git checkout -b feat/plan-2-map-stops
 ```
 
-- [ ] **Step 2: layout.tsx（M6 metadata/lang）** — 只改 metadata 與 `<html>`：
+- [x] **Step 2: layout.tsx（M6 metadata/lang）** — 只改 metadata 與 `<html>`：
 
 ```tsx
 export const metadata: Metadata = {
@@ -65,15 +65,15 @@ export const metadata: Metadata = {
 
 `<html lang="en">` → `<html lang="zh-Hant">`
 
-- [ ] **Step 3: globals.css（M7 字型）** — 把 `font-family: Arial, Helvetica, sans-serif;` 改為：
+- [x] **Step 3: globals.css（M7 字型）** — 把 `font-family: Arial, Helvetica, sans-serif;` 改為：
 
 ```css
 font-family: var(--font-geist-sans), "PingFang TC", "Noto Sans TC", sans-serif;
 ```
 
-- [ ] **Step 4: 深色模式按鈕（M5）** — `login/page.tsx` 與 `CreateTripForm.tsx` 中所有 `bg-black p-2 text-white` 改為 `bg-foreground p-2 text-background`（共 2 處）。
+- [x] **Step 4: 深色模式按鈕（M5）** — `login/page.tsx` 與 `CreateTripForm.tsx` 中所有 `bg-black p-2 text-white` 改為 `bg-foreground p-2 text-background`（共 2 處）。
 
-- [ ] **Step 5: 註冊訊息分支（M4）** — `login/page.tsx` 的 `signUp` 函式整段替換：
+- [x] **Step 5: 註冊訊息分支（M4）** — `login/page.tsx` 的 `signUp` 函式整段替換：
 
 ```tsx
   async function signUp() {
@@ -100,7 +100,7 @@ font-family: var(--font-geist-sans), "PingFang TC", "Noto Sans TC", sans-serif;
 
 同時把 `signIn` 的錯誤文案改為通用：`setNotice({ kind: 'error', text: '登入失敗，請確認 Email 與密碼' })`（M3：不轉發 Supabase 原始訊息）。
 
-- [ ] **Step 6: 登出按鈕（S1）** — Create `src/app/trips/SignOutButton.tsx`:
+- [x] **Step 6: 登出按鈕（S1）** — Create `src/app/trips/SignOutButton.tsx`:
 
 ```tsx
 'use client'
@@ -124,7 +124,7 @@ export default function SignOutButton() {
 }
 ```
 
-- [ ] **Step 7: trips/page.tsx（M2/M3 + 登出 + 詳情頁連結）** — 整檔替換：
+- [x] **Step 7: trips/page.tsx（M2/M3 + 登出 + 詳情頁連結）** — 整檔替換：
 
 ```tsx
 import Link from 'next/link'
@@ -175,7 +175,7 @@ export default async function TripsPage() {
 
 （注意第 14 行：`.order('created_at')` 需要 select 有這個欄位嗎？——不需要，PostgREST 允許以未選取欄位排序。）
 
-- [ ] **Step 8: CreateTripForm（M1 trim / M3 / S2 成功回饋）** — 修改三處：
+- [x] **Step 8: CreateTripForm（M1 trim / M3 / S2 成功回饋）** — 修改三處：
 
 1. `createTrip` 開頭：`const trimmed = title.trim()`，驗證與 insert 一律用 `trimmed`；`if (!trimmed || ...)` 
 2. insert 錯誤時：`setMessage('建立失敗，請稍後再試')`
@@ -195,7 +195,7 @@ export default async function TripsPage() {
       )}
 ```
 
-- [ ] **Step 9: README 狀態（M8）** — 「## 專案狀態」段落改為：
+- [x] **Step 9: README 狀態（M8）** — 「## 專案狀態」段落改為：
 
 ```markdown
 ## 專案狀態
@@ -204,7 +204,7 @@ export default async function TripsPage() {
 - 🚧 Plan 2 進行中：地圖與停留點編輯
 ```
 
-- [ ] **Step 10: 驗證與 Commit**
+- [x] **Step 10: 驗證與 Commit**
 
 ```bash
 npm run lint && npx tsc --noEmit && npm run build && npm test
@@ -223,7 +223,7 @@ git commit -m "fix: Plan 1 審查遺留清理（metadata、深色按鈕、註冊
 
 **Files:** Create: `supabase/migrations/20260731000000_title_checks.sql`
 
-- [ ] **Step 1: 寫 migration**
+- [x] **Step 1: 寫 migration**
 
 ```sql
 begin;
@@ -236,7 +236,7 @@ alter table public.stops
 commit;
 ```
 
-- [ ] **Step 2: 套用到本地 DB（db reset 在此環境故障，直接 psql）**
+- [x] **Step 2: 套用到本地 DB（db reset 在此環境故障，直接 psql）**
 
 ```bash
 docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
@@ -245,7 +245,7 @@ docker exec supabase_db_traval psql -U postgres -c \
   "insert into supabase_migrations.schema_migrations (version, name) values ('20260731000000','title_checks');"
 ```
 
-- [ ] **Step 3: 驗證約束生效（預期被拒絕）**
+- [x] **Step 3: 驗證約束生效（預期被拒絕）**
 
 ```bash
 docker exec supabase_db_traval psql -U postgres -c \
@@ -254,7 +254,7 @@ docker exec supabase_db_traval psql -U postgres -c \
 
 Expected: `1`（錯誤訊息含約束名）。
 
-- [ ] **Step 4: `npm test` 全綠後 Commit**
+- [x] **Step 4: `npm test` 全綠後 Commit**
 
 ```bash
 git add supabase/migrations/20260731000000_title_checks.sql
@@ -267,14 +267,14 @@ git commit -m "feat: trips/stops 標題長度約束"
 
 **Files:** Create: `playwright.config.ts`、`e2e/smoke.spec.ts`；Modify: `package.json`（scripts + devDependency）
 
-- [ ] **Step 1: 安裝**
+- [x] **Step 1: 安裝**
 
 ```bash
 npm install -D @playwright/test
 npx playwright install chromium
 ```
 
-- [ ] **Step 2: 設定檔** — Create `playwright.config.ts`:
+- [x] **Step 2: 設定檔** — Create `playwright.config.ts`:
 
 ```ts
 import { defineConfig } from '@playwright/test'
@@ -293,7 +293,7 @@ export default defineConfig({
 
 `package.json` scripts 加：`"test:e2e": "playwright test"`
 
-- [ ] **Step 3: 冒煙測試** — Create `e2e/smoke.spec.ts`:
+- [x] **Step 3: 冒煙測試** — Create `e2e/smoke.spec.ts`:
 
 ```ts
 import { test, expect } from '@playwright/test'
@@ -324,7 +324,7 @@ test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁
 })
 ```
 
-- [ ] **Step 4: 跑測試**
+- [x] **Step 4: 跑測試**
 
 ```bash
 npx playwright test
@@ -332,7 +332,7 @@ npx playwright test
 
 Expected: 前四個斷言通過；**最後兩行（點進詳情頁）此時會失敗——詳情頁 Task 4 才存在**。這是刻意的紅燈：先確認測試會失敗在正確的地方（404），Task 4 完成後轉綠。若紅燈原因不是詳情頁 404 而是更早的步驟，那是真的 bug，要修。
 
-- [ ] **Step 5: Commit（帶著已知紅燈，於 Task 4 轉綠）**
+- [x] **Step 5: Commit（帶著已知紅燈，於 Task 4 轉綠）**
 
 ```bash
 git add playwright.config.ts e2e/ package.json package-lock.json
@@ -345,7 +345,7 @@ git commit -m "test: Playwright E2E 基礎與註冊建行程冒煙（詳情頁�
 
 **Files:** Create: `src/app/trips/[tripId]/page.tsx`、`src/app/trips/[tripId]/TripView.tsx`；Modify: `.env.example`
 
-- [ ] **Step 1: 安裝**
+- [x] **Step 1: 安裝**
 
 ```bash
 npm install @vis.gl/react-google-maps
@@ -357,7 +357,7 @@ npm install @vis.gl/react-google-maps
 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=<GCP 建立的 Maps 金鑰（限制 referrer 與 API）>
 ```
 
-- [ ] **Step 2: 詳情頁 Server Component** — Create `src/app/trips/[tripId]/page.tsx`:
+- [x] **Step 2: 詳情頁 Server Component** — Create `src/app/trips/[tripId]/page.tsx`:
 
 ```tsx
 import Link from 'next/link'
@@ -403,7 +403,7 @@ export default async function TripDetailPage({
 }
 ```
 
-- [ ] **Step 3: TripView 骨架（地圖 + 側欄，選取狀態放這層）** — Create `src/app/trips/[tripId]/TripView.tsx`:
+- [x] **Step 3: TripView 骨架（地圖 + 側欄，選取狀態放這層）** — Create `src/app/trips/[tripId]/TripView.tsx`:
 
 ```tsx
 'use client'
@@ -481,9 +481,17 @@ export default function TripView({ trip, stops }: { trip: Trip; stops: Stop[] })
 
 （`mapId="DEMO_MAP_ID"` 是 Google 提供的開發用 ID，AdvancedMarker 需要它；部署前換成正式 Map ID——記入 README。）
 
-- [ ] **Step 4: 驗證** — `npx tsc --noEmit`、`npm run build` 乾淨；`npx playwright test` **全綠**（Task 3 的紅燈在此轉綠）。有金鑰的話 `npm run dev` 手動確認地圖渲染；沒有金鑰則確認占位訊息顯示。
+- [x] **Step 3.5: 先讓 E2E 紅燈生效（Task 3 執行時發現原設計失效：URL 斷言擋不住 App Router 的 404 導航）** — 在 `e2e/smoke.spec.ts` 的測試最後追加一行內容層級斷言：
 
-- [ ] **Step 5: Commit**
+```ts
+  await expect(page.getByText('還沒有停留點')).toBeVisible({ timeout: 10_000 })
+```
+
+先跑 `npx playwright test` 確認**紅燈**（詳情頁尚不存在、404 頁上無此文字），再繼續 Step 4 的實作，完成後轉綠——這才是真正的紅綠循環。
+
+- [x] **Step 4: 驗證** — `npx tsc --noEmit`、`npm run build` 乾淨；`npx playwright test` **全綠**（Step 3.5 的紅燈在此轉綠）。有金鑰的話 `npm run dev` 手動確認地圖渲染；沒有金鑰則確認占位訊息顯示。
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/app/trips/ .env.example package.json package-lock.json
@@ -496,7 +504,7 @@ git commit -m "feat: 行程詳情頁骨架（地圖 + 停留點側欄）"
 
 **Files:** Create: `src/lib/domain/slot.ts`、`src/lib/domain/slot.test.ts`
 
-- [ ] **Step 1: 失敗測試** — Create `src/lib/domain/slot.test.ts`:
+- [x] **Step 1: 失敗測試** — Create `src/lib/domain/slot.test.ts`:
 
 ```ts
 import { describe, it, expect } from 'vitest'
@@ -531,9 +539,9 @@ describe('nextDefaultSlot', () => {
 })
 ```
 
-- [ ] **Step 2: 跑紅** — `npx vitest run src/lib/domain/slot.test.ts` → FAIL（Cannot find module './slot'）
+- [x] **Step 2: 跑紅** — `npx vitest run src/lib/domain/slot.test.ts` → FAIL（Cannot find module './slot'）
 
-- [ ] **Step 3: 實作** — Create `src/lib/domain/slot.ts`:
+- [x] **Step 3: 實作** — Create `src/lib/domain/slot.ts`:
 
 ```ts
 import type { StopSchedule } from './types'
@@ -554,7 +562,7 @@ export function nextDefaultSlot(
 }
 ```
 
-- [ ] **Step 4: 跑綠 + 全套（29 tests）+ Commit**
+- [x] **Step 4: 跑綠 + 全套（29 tests）+ Commit**
 
 ```bash
 npx vitest run src/lib/domain/slot.test.ts && npm test
@@ -566,15 +574,25 @@ git commit -m "feat: nextDefaultSlot 新停留點預設時段"
 
 ### Task 6: 地點搜尋 → 加入停留點
 
+> **已知限制（Task 5 品質審查記錄）**：stops 是全行程扁平清單，`nextDefaultSlot` 接在全域最晚 endsAt 之後——多日行程連續新增停留點時，預設時間會沿同一條時間線往後疊，不會自動落到「隔天早上」。使用者可用 Task 8 的編輯器改時間；正規解（按日分組與時區精算）屬 Plan 3 時間軸範圍，此處不做半套啟發式。
+
+**Step 0（品質審查排入）：產生 DB 型別**
+
+```bash
+supabase gen types typescript --local > src/lib/supabase/database.types.ts
+```
+
+產出檔進版控。本 Task 起新增的 DB 互動程式碼優先使用產生型別（既有手寫 Stop type 不強制回改，Task 8 若碰到再收斂）。
+
 **Files:** Create: `src/app/trips/[tripId]/PlaceSearch.tsx`、`src/lib/domain/datetime.ts`；Modify: `TripView.tsx`（掛入搜尋框）
 
-- [ ] **Step 1: 安裝時區推定**
+- [x] **Step 1: 安裝時區推定**
 
 ```bash
 npm install @photostructure/tz-lookup
 ```
 
-- [ ] **Step 2: datetime 轉換工具** — Create `src/lib/domain/datetime.ts`:
+- [x] **Step 2: datetime 轉換工具** — Create `src/lib/domain/datetime.ts`:
 
 ```ts
 /** epoch ms → datetime-local input 值（瀏覽器時區）。Plan 3 引入停留點時區顯示後再精算。 */
@@ -590,7 +608,7 @@ export function fromDatetimeLocalValue(value: string): number {
 }
 ```
 
-- [ ] **Step 3: PlaceSearch 元件** — Create `src/app/trips/[tripId]/PlaceSearch.tsx`：
+- [x] **Step 3: PlaceSearch 元件** — Create `src/app/trips/[tripId]/PlaceSearch.tsx`：
 
 使用 Places API (New) 的 `PlaceAutocompleteElement`（新專案無法用舊版 Autocomplete widget）。**實作前先以官方文件核對事件與欄位名**：https://developers.google.com/maps/documentation/javascript/place-autocomplete-new （事件名 `gmp-select`、`placePrediction.toPlace()`、`fetchFields`）。以下為依官方文件撰寫的完整程式碼，若執行時事件未觸發，以文件為準修正事件名並回報：
 
@@ -644,7 +662,7 @@ export default function PlaceSearch({ onPick }: { onPick: (p: PlacePick) => void
 }
 ```
 
-- [ ] **Step 4: TripView 接上搜尋與寫入** — 修改 `TripView.tsx`：
+- [x] **Step 4: TripView 接上搜尋與寫入** — 修改 `TripView.tsx`：
 
 1. imports 加：
 
@@ -709,9 +727,9 @@ import tzlookup from '@photostructure/tz-lookup'
         {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
 ```
 
-- [ ] **Step 5: 驗證** — `tsc`/`build`/`npm test` 全綠；有金鑰時手動：搜尋「淺草寺」→ 選取 → 側欄出現、重新整理仍在（DB 落地），Studio 可見該列 `timezone = Asia/Tokyo`。
+- [x] **Step 5: 驗證** — `tsc`/`build`/`npm test` 全綠；有金鑰時手動：搜尋「淺草寺」→ 選取 → 側欄出現、重新整理仍在（DB 落地），Studio 可見該列 `timezone = Asia/Tokyo`。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/app/trips/ src/lib/domain/datetime.ts package.json package-lock.json
@@ -724,7 +742,7 @@ git commit -m "feat: 地點搜尋加入停留點（Places New + 離線時區推�
 
 **Files:** Modify: `src/app/trips/[tripId]/TripView.tsx`
 
-- [ ] **Step 1: 標記與聯動** — `Map` 元件內渲染標記（import 加 `AdvancedMarker, Pin`）：
+- [x] **Step 1: 標記與聯動** — `Map` 元件內渲染標記（import 加 `AdvancedMarker, Pin`）：
 
 ```tsx
               {stops.map((stop, i) => (
@@ -746,7 +764,7 @@ git commit -m "feat: 地點搜尋加入停留點（Places New + 離線時區推�
 
 側欄項目補上編號徽章（與地圖一致）：`<span className="mr-1 text-xs text-gray-400">{i + 1}.</span>`（map callback 改為 `(stop, i)`）。
 
-- [ ] **Step 2: 右鍵加自訂停留點** — TripView 加狀態 `const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)` 與 `const [draftName, setDraftName] = useState('')`。
+- [x] **Step 2: 右鍵加自訂停留點** — TripView 加狀態 `const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)` 與 `const [draftName, setDraftName] = useState('')`。
 
 `Map` 加事件（@vis.gl/react-google-maps 的 map 事件 prop）：
 
@@ -795,9 +813,9 @@ draftPin 存在時在地圖上顯示灰色標記：
         )}
 ```
 
-- [ ] **Step 3: 驗證** — `tsc`/`build`/`npm test` 綠；有金鑰手動：點標記 ↔ 側欄高亮同步；右鍵地圖 → 灰標記 + 表單 → 命名加入 → 變正式標記，Studio 中 `is_custom = true`。
+- [x] **Step 3: 驗證** — `tsc`/`build`/`npm test` 綠；有金鑰手動：點標記 ↔ 側欄高亮同步；右鍵地圖 → 灰標記 + 表單 → 命名加入 → 變正式標記，Studio 中 `is_custom = true`。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/app/trips/
@@ -810,7 +828,7 @@ git commit -m "feat: 地圖標記聯動與右鍵自訂停留點"
 
 **Files:** Create: `src/app/trips/[tripId]/StopEditor.tsx`；Modify: `TripView.tsx`（選取的停留點顯示編輯器）
 
-- [ ] **Step 1: StopEditor** — Create `src/app/trips/[tripId]/StopEditor.tsx`:
+- [x] **Step 1: StopEditor** — Create `src/app/trips/[tripId]/StopEditor.tsx`:
 
 ```tsx
 'use client'
@@ -904,11 +922,13 @@ export default function StopEditor({ stop, currency }: { stop: Stop; currency: s
 }
 ```
 
-- [ ] **Step 2: TripView 掛入** — 側欄 `<li>` 內，`selectedId === stop.id` 時渲染 `<StopEditor key={stop.id} stop={stop} currency={trip.currency} />`（key 用 stop.id 讓切換選取時表單狀態重置；`onClick` 移到名稱那行避免點表單觸發收合——名稱行包一層 `<div onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}>`）。
+- [x] **Step 2: TripView 掛入** — 側欄 `<li>` 內，`selectedId === stop.id` 時渲染 `<StopEditor key={stop.id} stop={stop} currency={trip.currency} />`（key 用 stop.id 讓切換選取時表單狀態重置；`onClick` 移到名稱那行避免點表單觸發收合——名稱行包一層 `<div onClick={() => setSelectedId(selectedId === stop.id ? null : stop.id)}>`）。
 
-- [ ] **Step 3: 驗證** — `tsc`/`build`/`npm test` 綠；手動：改名/改時間/加備註/花費 → 儲存 → 重新整理仍在；locked 勾選後 Studio 中該列 `locked = true`；刪除兩段式確認正常。
+> **Task 7 品質審查前瞻提醒**：(1) 刪除當前選中的停留點成功後，需將 TripView 的 `selectedId` 重置為 null（可透過 StopEditor 接受 `onDeleted` callback 實現），避免懸空選取。(2) StopEditor 的 save/remove 錯誤處理沿用「失敗時保留表單狀態、僅顯示訊息」模式（其現有設計已符合，實作時勿改成失敗也清空）。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 3: 驗證** — `tsc`/`build`/`npm test` 綠；手動：改名/改時間/加備註/花費 → 儲存 → 重新整理仍在；locked 勾選後 Studio 中該列 `locked = true`；刪除兩段式確認正常。
+
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/app/trips/
@@ -917,23 +937,68 @@ git commit -m "feat: 停留點編輯與刪除"
 
 ---
 
-### Task 9: E2E 補詳情頁空狀態斷言
+### Task 9: E2E 補強與測試債清理（品質審查 2026-07-31 裁定項）
 
-**Files:** Modify: `e2e/smoke.spec.ts`
+**Files:** Modify: `e2e/smoke.spec.ts`、`playwright.config.ts`、`src/lib/supabase/rls.test.ts`
 
-- [ ] **Step 1:** 測試最後追加兩個斷言（開詳情頁後）：
+- [x] **Step 0: E2E 測試資料清理（還債）**
+
+1. `playwright.config.ts` 頂部加入（Node 22 內建，零依賴）：
 
 ```ts
-  await expect(page.getByText('還沒有停留點')).toBeVisible()
+try {
+  process.loadEnvFile('.env.test.local')
+} catch {
+  // 無此檔（如 CI 環境）時靜默跳過，測試內的清理邏輯會自行判斷
+}
+```
+
+2. `e2e/smoke.spec.ts`：email 改用 random suffix（與 rls.test.ts 一致）：
+
+```ts
+const email = `e2e-${Math.random().toString(36).slice(2, 8)}@test.local`
+```
+
+並在測試中把詳情頁 URL 的 trip id 存起來、檔尾加清理：
+
+```ts
+import { createClient } from '@supabase/supabase-js'
+
+let createdTripId: string | undefined
+
+// 測試內，點進詳情頁斷言 URL 之後：
+//   createdTripId = page.url().split('/').pop()
+
+test.afterAll(async () => {
+  const url = process.env.SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) return
+  const admin = createClient(url, serviceKey, { auth: { persistSession: false } })
+  if (createdTripId) await admin.from('trips').delete().eq('id', createdTripId)
+  const { data } = await admin.auth.admin.listUsers()
+  const testUsers = data?.users.filter(u => u.email?.endsWith('@test.local') && u.email.startsWith('e2e-')) ?? []
+  for (const u of testUsers) await admin.auth.admin.deleteUser(u.id)
+})
+```
+
+3. `src/lib/supabase/rls.test.ts` 的 afterAll 補刪兩個測試使用者（admin client 已在範疇內；把兩個 email 對應的 user id 於 beforeAll 記下，afterAll 逐一 `admin.auth.admin.deleteUser(id)`，順序：先刪 trip 再刪 users）。
+
+驗證：連跑兩次 `npx playwright test` + `npm test` 後，`auth.users` 中無 `e2e-*`/`owner-*`/`stranger-*` 殘留、trips 無測試行程殘留（psql 查證）。
+
+- [x] **Step 1:** 測試追加地圖區斷言（空狀態斷言已於 Task 4 Step 3.5 加入）：
+
+```ts
   // 無金鑰環境顯示占位訊息；有金鑰環境顯示地圖——兩者擇一存在即可
   const placeholder = page.getByText(/尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY/)
   const mapCanvas = page.locator('div[aria-label="地圖"], div[role="region"]').first()
   await expect(placeholder.or(mapCanvas)).toBeVisible({ timeout: 10_000 })
 ```
 
+（另一筆記債不在本計畫處理：導入 CI 時 `reuseExistingServer` 改為 `!process.env.CI` 並評估 retries/trace——記於 spec 殘留風險。）
+
 （地圖互動不進 E2E——Google Maps canvas 的自動化脆弱且消耗配額，互動部分維持手動驗證。）
 
-- [ ] **Step 2:** `npx playwright test` 全綠 → Commit
+- [x] **Step 2:** `npx playwright test` 全綠 → Commit
 
 ```bash
 git add e2e/
@@ -946,9 +1011,9 @@ git commit -m "test: E2E 補詳情頁空狀態斷言"
 
 **Files:** Modify: `README.md`
 
-- [ ] **Step 1:** README「核心功能」下補一段目前進度、開發段補 `npm run test:e2e` 與 Maps 金鑰需求說明（`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`、GCP 需啟用 Maps JavaScript API + Places API (New)、`mapId` 部署前需換正式值）。
+- [x] **Step 1:** README「核心功能」下補一段目前進度、開發段補 `npm run test:e2e` 與 Maps 金鑰需求說明（`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`、GCP 需啟用 Maps JavaScript API + Places API (New)、`mapId` 部署前需換正式值）。已知限制一併記入：新增停留點後地圖鏡頭不會自動跟隨（defaultCenter 僅初始生效，Plan 3 時間軸的鏡頭跟隨機制屆時一併處理）、多日行程預設時段沿時間線尾端疊加（Task 6 註記）。
 
-- [ ] **Step 2:** 全量驗證：
+- [x] **Step 2:** 全量驗證：
 
 ```bash
 npm run lint && npx tsc --noEmit && npm run build && npm test && npx playwright test
@@ -956,7 +1021,7 @@ npm run lint && npx tsc --noEmit && npm run build && npm test && npx playwright 
 
 Expected: lint/tsc/build 乾淨、vitest 29、E2E 綠。
 
-- [ ] **Step 3:** Commit + push 分支：
+- [x] **Step 3:** Commit + push 分支：
 
 ```bash
 git add README.md
@@ -968,8 +1033,8 @@ git push -u origin feat/plan-2-map-stops
 
 ## 完成定義（Definition of Done）
 
-- [ ] lint / tsc / build 全乾淨
-- [ ] `npm test` 29 綠（26 + slot 3）；`npx playwright test` 綠
-- [ ] 手動流程（需金鑰）：開行程 → 搜尋景點加入 → 標記出現且與側欄聯動 → 右鍵加自訂點 → 編輯時間/備註/花費/鎖定 → 刪除 → 重新整理資料仍正確
-- [ ] 無金鑰時詳情頁不炸（占位訊息）
-- [ ] 全部 commit 推上 feat/plan-2-map-stops
+- [x] lint / tsc / build 全乾淨
+- [x] `npm test` 33 綠（26 + slot 3 + datetime 2 + constraints 2）；`npx playwright test` 綠
+- [x] 手動流程（需金鑰）：開行程 → 搜尋景點加入 → 標記出現且與側欄聯動 → 右鍵加自訂點 → 編輯時間/備註/花費/鎖定 → 刪除 → 重新整理資料仍正確
+- [x] 無金鑰時詳情頁不炸（占位訊息）
+- [x] 全部 commit 推上 feat/plan-2-map-stops

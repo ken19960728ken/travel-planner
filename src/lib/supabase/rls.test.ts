@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 const url = process.env.SUPABASE_URL
@@ -13,16 +13,23 @@ function newUserClient(): SupabaseClient {
 describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
   let owner: SupabaseClient
   let stranger: SupabaseClient
+  let admin: SupabaseClient
   let tripId: string
+  let ownerId: string
+  let strangerId: string
 
   beforeAll(async () => {
-    const admin = createClient(url!, serviceKey!, { auth: { persistSession: false } })
+    admin = createClient(url!, serviceKey!, { auth: { persistSession: false } })
     const suffix = Math.random().toString(36).slice(2, 8)
     const password = 'test-password-1234'
     const ownerEmail = `owner-${suffix}@test.local`
     const strangerEmail = `stranger-${suffix}@test.local`
-    await admin.auth.admin.createUser({ email: ownerEmail, password, email_confirm: true })
-    await admin.auth.admin.createUser({ email: strangerEmail, password, email_confirm: true })
+    const { data: ownerData, error: ownerErr } = await admin.auth.admin.createUser({ email: ownerEmail, password, email_confirm: true })
+    if (ownerErr) throw ownerErr
+    ownerId = ownerData.user.id
+    const { data: strangerData, error: strangerErr } = await admin.auth.admin.createUser({ email: strangerEmail, password, email_confirm: true })
+    if (strangerErr) throw strangerErr
+    strangerId = strangerData.user.id
 
     owner = newUserClient()
     stranger = newUserClient()
@@ -75,5 +82,13 @@ describe.skipIf(!hasEnv)('RLS 權限規則（需本地 Supabase）', () => {
       cache_key: 'x', result: {},
     })
     expect(error).not.toBeNull()
+  })
+
+  afterAll(async () => {
+    if (tripId) {
+      await admin.from('trips').delete().eq('id', tripId)
+    }
+    if (ownerId) await admin.auth.admin.deleteUser(ownerId)
+    if (strangerId) await admin.auth.admin.deleteUser(strangerId)
   })
 })

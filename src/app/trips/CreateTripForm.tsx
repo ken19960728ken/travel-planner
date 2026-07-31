@@ -4,37 +4,44 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
+type Notice = { kind: 'error' | 'success'; text: string } | null
+
 export default function CreateTripForm() {
   const router = useRouter()
   const [title, setTitle] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [currency, setCurrency] = useState('TWD')
-  const [message, setMessage] = useState('')
+  const [notice, setNotice] = useState<Notice>(null)
   const [submitting, setSubmitting] = useState(false)
 
   async function createTrip(e: React.FormEvent) {
     e.preventDefault()
-    if (!title || !startDate || !endDate) {
-      setMessage('標題與起訖日期都要填')
+    const trimmed = title.trim()
+    if (!trimmed || !startDate || !endDate) {
+      setNotice({ kind: 'error', text: '標題與起訖日期都要填' })
       return
     }
     if (endDate < startDate) {
-      setMessage('結束日期不能早於開始日期')
+      setNotice({ kind: 'error', text: '結束日期不能早於開始日期' })
       return
     }
     setSubmitting(true)
     const supabase = createClient()
     const { error } = await supabase
       .from('trips')
-      .insert({ title, start_date: startDate, end_date: endDate, currency })
+      .insert({ title: trimmed, start_date: startDate, end_date: endDate, currency })
     setSubmitting(false)
     if (error) {
-      setMessage(`建立失敗：${error.message}`)
+      setNotice(
+        error.code === '23514'
+          ? { kind: 'error', text: '標題長度需在 1–200 字之間' }
+          : { kind: 'error', text: '建立失敗，請稍後再試' },
+      )
       return
     }
     setTitle('')
-    setMessage('')
+    setNotice({ kind: 'success', text: '已建立 ✓' })
     router.refresh()
   }
 
@@ -45,6 +52,7 @@ export default function CreateTripForm() {
         placeholder="行程標題（例如：東京五日遊）"
         value={title}
         onChange={e => setTitle(e.target.value)}
+        maxLength={200}
       />
       <div className="flex gap-2">
         <input
@@ -71,10 +79,12 @@ export default function CreateTripForm() {
           <option value="KRW">KRW</option>
         </select>
       </div>
-      <button className="rounded bg-black p-2 text-white disabled:opacity-50" type="submit" disabled={submitting}>
+      <button className="rounded bg-foreground p-2 text-background disabled:opacity-50" type="submit" disabled={submitting}>
         {submitting ? '建立中…' : '建立行程'}
       </button>
-      {message && <p className="text-sm text-red-600">{message}</p>}
+      {notice && (
+        <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+      )}
     </form>
   )
 }

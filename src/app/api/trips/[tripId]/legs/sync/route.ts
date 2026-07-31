@@ -16,10 +16,11 @@ export const maxDuration = 30
 // 已知限制：模組層記憶體在 serverless 平台為每實例獨立，護欄弱化——記入 spec §8，商用前換集中式限流。
 const GOOGLE_CALL_LIMIT = 30
 const RATE_WINDOW_MS = 60_000
-const MAX_GOOGLE_CALLS_PER_SYNC = 5 // 單次 sync 的 Google 呼叫上限（5 段 × 5s timeout = 25s < maxDuration 30s，餘裕留給 DB 往返；未算完的段留 pending 下次補）
+const MAX_GOOGLE_CALLS_PER_SYNC = 5 // 額外上限（次要護欄）：即使牆鐘預算未耗盡，單次 sync 最多打 5 次 Google——
+                                     // 真正的逾時防線是下方 WALL_CLOCK_BUDGET_MS（審查 I-1）；未算完的段留 pending 下次補
 const FETCH_TIMEOUT_MS = 5_000
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // route_cache TTL（Google ToS 上限）
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const rateWindows = new Map<string, RateWindow>()
 
 type AutoMode = RouteQuery['mode']
@@ -35,18 +36,30 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const { data: isEditor } = await supabase.rpc('is_trip_editor', { p_trip_id: tripId })
   if (!isEditor) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
 
-  // 讀現況（user client：RLS 生效）
-  const { data: stopRows, error: stopsErr } = await supabase
-    .from('stops')
-    .select('id, lat, lng, starts_at, ends_at')
-    .eq('trip_id', tripId)
-    .limit(500)
-  const { data: legRows, error: legsErr } = await supabase
-    .from('legs')
-    .select('id, from_stop_id, to_stop_id, mode, source, duration_minutes, departs_at, computed_at, stale')
-    .eq('trip_id', tripId)
-    .limit(500)
-  if (stopsErr || legsErr) return NextResponse.json({ error: 'read failed' }, { status: 500 })
+  // 讀現況（user client：RLS 生效）。兩查詢互不依賴，平行送出（審查 S-1）。
+  const [{ data: stopRows, error: stopsErr }, { data: legRows, error: legsErr }] = await Promise.all([
+    supabase
+      .from('stops')
+      .select('id, lat, lng, starts_at, ends_at')
+      .eq('trip_id', tripId)
+      .order('starts_at')
+      .limit(501), // 501 = 500 護欄 + 1 哨兵，藉此偵測「剛好卡在上限」與「真的超過上限」的差異（審查 I-2）
+    supabase
+      .from('legs')
+      .select('id, from_stop_id, to_stop_id, mode, source, duration_minutes, departs_at, computed_at, stale')
+      .eq('trip_id', tripId)
+      .order('id')
+      .limit(501),
+  ])
+  if (stopsErr || legsErr) {
+    if (stopsErr) console.error('[legs/sync] stops read failed', { tripId, code: stopsErr.code, message: stopsErr.message })
+    if (legsErr) console.error('[legs/sync] legs read failed', { tripId, code: legsErr.code, message: legsErr.message })
+    return NextResponse.json({ error: 'read failed' }, { status: 500 })
+  }
+  // 哨兵命中（審查 I-2）：行程規模超出同步上限，拒絕處理而非悄悄截斷資料造成配對錯亂
+  if ((stopRows?.length ?? 0) > 500 || (legRows?.length ?? 0) > 500) {
+    return NextResponse.json({ error: 'trip too large to sync' }, { status: 413 })
+  }
 
   const now = Date.now()
   const stops: SyncStop[] = (stopRows ?? []).map(s => ({
@@ -74,13 +87,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   for (const id of plan.markStale) {
     const { error } = await supabase.from('legs').update({ stale: true }).eq('id', id)
     if (!error) changed = true
+    else console.error('[legs/sync] markStale failed', { tripId, code: error.code, message: error.message })
   }
   for (const id of plan.removeAuto) {
     const { error } = await supabase.from('legs').delete().eq('id', id)
     if (!error) changed = true
+    else console.error('[legs/sync] removeAuto failed', { tripId, code: error.code, message: error.message })
   }
   for (const c of plan.create) {
-    // 併發同開時可能撞 unique（23505）——視為他人已建，靜默略過且不入列
     const { data, error } = await supabase
       .from('legs')
       .insert({ trip_id: tripId, from_stop_id: c.fromStopId, to_stop_id: c.toStopId, mode: 'transit', source: 'auto' })
@@ -89,6 +103,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     if (!error && data) {
       changed = true
       computeQueue.push({ legId: data.id, fromStopId: c.fromStopId, toStopId: c.toStopId, mode: 'transit' })
+    } else if (error && error.code !== '23505') {
+      // 23505：併發同開時撞 unique，視為他人已建，靜默略過且不入列——其餘錯誤才記錄（審查 I-3）
+      console.error('[legs/sync] create leg failed', { tripId, code: error.code, message: error.message })
     }
   }
   const legMetaById = new Map((legRows ?? []).map(l => [l.id, l]))
@@ -103,6 +120,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   let computed = 0
   let pending = 0
   let googleCalls = 0
+  const startedAt = Date.now()
+  // 牆鐘預算（審查 I-1）：真正的逾時防線——與 maxDuration=30s 留 6s 餘裕給結構同步後續的 DB 往返與回應序列化
+  const WALL_CLOCK_BUDGET_MS = 24_000
 
   // 有界過期清理（審查 M-7）：每次 sync 順手刪最多 50 列逾期快取（fetched_at 已建索引），表不無限成長
   if (service) {
@@ -117,10 +137,19 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     if (w.timestamps.every(t => now - t >= RATE_WINDOW_MS)) rateWindows.delete(k)
   }
 
-  for (const item of computeQueue) {
+  for (let i = 0; i < computeQueue.length; i++) {
+    if (Date.now() - startedAt > WALL_CLOCK_BUDGET_MS) {
+      // 牆鐘預算耗盡（審查 I-1）：剩餘段一律留 pending，絕不讓迴圈把 maxDuration 撞穿
+      pending += computeQueue.length - i
+      break
+    }
+    const item = computeQueue[i]
     const from = stopById.get(item.fromStopId)
     const to = stopById.get(item.toStopId)
-    if (!from || !to || !AUTO_MODES.includes(item.mode)) continue
+    if (!from || !to || !AUTO_MODES.includes(item.mode)) {
+      pending++ // flight/custom 等非自動模式段本就不會被算，但仍需計入 pending（審查 M-2）
+      continue
+    }
 
     if (!apiKey) {
       pending++ // 無伺服器金鑰：leg 維持待計算（外部失敗不阻擋編輯，spec §6）
@@ -138,7 +167,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     if (service) {
       const { data: hit } = await service.from('route_cache').select('result, fetched_at').eq('cache_key', cacheKey).maybeSingle()
       if (hit && now - new Date(hit.fetched_at).getTime() <= CACHE_TTL_MS) {
-        result = hit.result as ReturnType<typeof parseComputeRoutesResponse>
+        // 輕量驗形（審查 M-4）：快取列可能因手動改壞 / 未來欄位變更而毀損；不驗形直接信任會讓非法
+        // durationMinutes 流入下方 new Date(...) 運算炸出 Invalid time value，殃及整個 handler。
+        // 不合格視為 miss，落入下方重算分支，不特別記錄（快取毀損不是呼叫方的錯，重算即自癒）。
+        const candidate = hit.result as { ok?: unknown; durationMinutes?: unknown }
+        const validShape = typeof candidate.ok === 'boolean' &&
+          (candidate.ok === false || (Number.isInteger(candidate.durationMinutes) && (candidate.durationMinutes as number) > 0))
+        if (validShape) result = hit.result as ReturnType<typeof parseComputeRoutesResponse>
       }
     }
     if (!result) {
@@ -191,6 +226,8 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       if (!error) {
         computed++
         changed = true
+      } else {
+        console.error('[legs/sync] update computed leg failed', { tripId, code: error.code, message: error.message })
       }
     } else if (result.reason === 'no_route') {
       const { error } = await supabase.from('legs').update({
@@ -200,6 +237,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         computed_at: new Date(now).toISOString(), stale: false,
       }).eq('id', item.legId)
       if (!error) changed = true
+      else console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
     } else {
       pending++
     }

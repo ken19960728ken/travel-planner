@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { nextDefaultSlot } from '@/lib/domain/slot'
-import { formatLocalTime } from '@/lib/domain/tz'
+import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
+import { tripDayKeys } from '@/lib/domain/days'
 import PlaceSearch from './PlaceSearch'
 import StopEditor from './StopEditor'
 import tzlookup from '@photostructure/tz-lookup'
@@ -61,6 +62,8 @@ export default function TripView({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  // null = 全部；Timeline 上線後 Task 5 會給它 Day 分頁 UI，本 Task 先接資料流
+  const [activeDay, setActiveDay] = useState<string | null>(null)
   const busyRef = useRef(false)
   const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
@@ -82,19 +85,28 @@ export default function TripView({
     busyRef.current = true
     setBusy(true)
     try {
-      const schedule = stops.map(s => ({
+      // Day-aware：只用當日既有停留點排定時段，避開「多日預設時段疊加」
+      const dayKeys = tripDayKeys(trip.start_date, trip.end_date)
+      const targetDay = activeDay ?? dayKeys[0]
+      // 該日的參考時區：當日已有停留點用其時區，否則沿用全行程最後一個停留點的時區，再不然用瀏覽器時區
+      const dayStops = stops.filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === targetDay)
+      const refTz =
+        dayStops[dayStops.length - 1]?.timezone ??
+        stops[stops.length - 1]?.timezone ??
+        Intl.DateTimeFormat().resolvedOptions().timeZone
+      const daySchedule = dayStops.map(s => ({
         id: s.id,
         startsAt: new Date(s.starts_at).getTime(),
         endsAt: new Date(s.ends_at).getTime(),
         locked: s.locked,
       }))
-      // 空行程的預設開場：出發日早上九點（瀏覽器時區推定，Plan 3 隨時間軸精算為當地時區）
-      const fallback = new Date(`${trip.start_date}T09:00:00`).getTime()
+      // 空日的預設開場：當地早上九點
+      const fallback = wallInputToUtcMs(`${targetDay}T09:00`, refTz)
       if (lastInsertedEndRef.current > 0) {
         // router.refresh() 尚未把新列帶回 props 前，用上次成功寫入的結束時間墊底，避免連續加入算出相同時段
-        schedule.push({ id: '__pending__', startsAt: lastInsertedEndRef.current - 1, endsAt: lastInsertedEndRef.current, locked: false })
+        daySchedule.push({ id: '__pending__', startsAt: lastInsertedEndRef.current - 1, endsAt: lastInsertedEndRef.current, locked: false })
       }
-      const slot = nextDefaultSlot(schedule, fallback)
+      const slot = nextDefaultSlot(daySchedule, fallback)
 
       let timezone = 'UTC'
       try {

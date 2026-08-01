@@ -60,6 +60,7 @@ export type Leg = {
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
+const PLAYBACK_MAX_ZOOM = 15 // 起播 fitBounds 的縮放上限：單點/近距離日程會被拉到最大縮放，需夾住
 const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
 const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
@@ -78,15 +79,50 @@ function CameraFollow({ target }: { target: { lat: number; lng: number } | null 
 
 /** 播放中鏡頭跟隨橘點（M-7）：只在播放時作用，不干擾使用者平時手動平移。
  *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。 */
-function PlaybackCamera({ lat, lng, active }: { lat: number | null; lng: number | null; active: boolean }) {
+function PlaybackCamera({
+  lat, lng, active, bounds,
+}: {
+  lat: number | null
+  lng: number | null
+  active: boolean
+  /** 當日停留點的原始座標陣列（未化簡成 min/max）：TripView 每次 render 都會重新 map() 出新參照，
+   *  故不放進下面 effect 的 deps，改用 ref 讀最新值（同 L468 playheadMsRef 的作法：ref 寫入也要放進
+   *  effect 裡，不能在 render 期間直接賦值，否則違反 react-hooks/refs） */
+  bounds: { lat: number; lng: number }[] | null
+}) {
   const map = useMap()
-  // 起播時若視野過遠先拉近一次；之後不再動縮放，讓使用者能自行調整
+  const boundsRef = useRef(bounds)
+  useEffect(() => {
+    boundsRef.current = bounds
+  }, [bounds])
+  // 起播時（active 由 false→true）把當日整段收進視野，取代原本「zoom<12 才拉近單點」的邏輯——
+  // 遠距離日程（如福岡→鹿兒島 200km）不會再被單點 setZoom(14) 強拉到超出容器涵蓋範圍。
+  // 這裡用逐點 extend 建構 LatLngBounds 而非在呼叫端 Math.min/max 化簡座標，是因為 Math.min/max
+  // 在跨 180 度經線時會算出反向（過大）的框；extend 交給 Google 官方實作正確處理，且只能在
+  // google.maps 腳本已載入後呼叫（map 非 null 時保證已載入），render 期間（含 SSR）不能碰 google 全域
   useEffect(() => {
     if (!map || !active) return
-    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
+    const b = boundsRef.current
+    if (!b || b.length === 0) return
+    const latLngBounds = new google.maps.LatLngBounds()
+    for (const p of b) latLngBounds.extend(p)
+    map.fitBounds(latLngBounds, 60)
+    if ((map.getZoom() ?? 0) > PLAYBACK_MAX_ZOOM) map.setZoom(PLAYBACK_MAX_ZOOM)
   }, [map, active])
   useEffect(() => {
     if (!map || !active || lat === null || lng === null) return
+    // 邊緣閘門：點還在目前視窗中央 70% 區域內（上下左右各留 15% padding）就不動鏡頭，避免每個
+    // 取樣點都 panTo 一次造成掃視感；真的要出邊界才動，動的時候仍是平滑 panTo（非瞬移）
+    const viewport = map.getBounds()
+    if (viewport) {
+      const ne = viewport.getNorthEast()
+      const sw = viewport.getSouthWest()
+      const padLat = (ne.lat() - sw.lat()) * 0.15
+      const padLng = (ne.lng() - sw.lng()) * 0.15
+      const insideCenter =
+        lat > sw.lat() + padLat && lat < ne.lat() - padLat && lng > sw.lng() + padLng && lng < ne.lng() - padLng
+      if (insideCenter) return
+    }
     map.panTo({ lat, lng })
   }, [map, active, lat, lng])
   return null
@@ -464,6 +500,12 @@ export default function TripView({
           clampedPlayheadMs,
         )
 
+  // 播放鏡頭 fitBounds 用的當日停留點座標（M-7 修復）：只傳原始點陣列，不在這裡用 Math.min/max 化簡成
+  // min/max——跨 180 度經線時 min/max 會反向算出錯誤的框。真正安全的 LatLngBounds 建構（逐點 extend）
+  // 只能在 google.maps 腳本載入後執行，這裡是 render 期間（含 SSR）碰不到 google 全域，故挪到
+  // PlaybackCamera 的 effect 裡處理
+  const playbackBounds = activeDayStops.length > 0 ? activeDayStops.map(s => ({ lat: s.lat, lng: s.lng })) : null
+
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
   useEffect(() => {
@@ -799,7 +841,12 @@ export default function TripView({
                 </AdvancedMarker>
               )}
               <CameraFollow target={cameraTarget} />
-              <PlaybackCamera lat={playheadPos?.lat ?? null} lng={playheadPos?.lng ?? null} active={playing} />
+              <PlaybackCamera
+                lat={playheadPos?.lat ?? null}
+                lng={playheadPos?.lng ?? null}
+                active={playing}
+                bounds={playbackBounds}
+              />
             </Map>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-500">

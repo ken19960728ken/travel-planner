@@ -11,7 +11,7 @@ const BASE = {
 }
 
 describe('buildRouteCacheKey', () => {
-  it('鍵含版本前綴（C-1：no_transit_data 語意變更後舊快取需全面 miss，見 migration 20260801180000）', () => {
+  it('鍵含版本前綴（C-1：no_transit_data 語意變更後舊快取需全面 miss，見 migration 20260803000002）', () => {
     expect(buildRouteCacheKey(BASE).startsWith('v2|')).toBe(true)
   })
 

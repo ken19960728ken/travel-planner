@@ -11,7 +11,7 @@ const BUCKET_MS = 30 * 60 * 1000
 const COORD_DECIMALS = 4
 // C-1：ComputedRoute 的語意變更（no_transit_data 新增/改形）版本前綴——舊快取列（用舊語意寫入）必須
 // 全面 miss，否則會把「部署前誤判成正常大眾運輸的純步行時長」繼續當快取命中吐回使用者。舊列由既有
-// CACHE_TTL_MS（30 天）清理自然淘汰，不需另外刪除；配合 supabase/migrations/20260807000000_transit_recompute.sql
+// CACHE_TTL_MS（30 天）清理自然淘汰，不需另外刪除；配合 supabase/migrations/20260801180000_transit_recompute.sql
 // 強制既有 legs 列重算。
 const CACHE_KEY_VERSION = 'v2'
 

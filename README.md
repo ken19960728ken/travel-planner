@@ -79,9 +79,11 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 
 ## 部署
 
-正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、Plan 4 以前的 migration 純新增免 down；Plan 5b 的 GRANT 收緊見下段、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
+正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；一般流程是 migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、Plan 4 以前的 migration 純新增免 down；Plan 5b 的 GRANT 收緊見下段、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
 
-**回滾主路徑是 Vercel Instant Rollback，且它單獨執行即安全，不需要任何資料庫動作**——舊版程式碼完全不寫 `trips`（只有 SELECT 與 INSERT）、也不碰 `trip_members` / `trip_invites`，與 `20260803000000` 之後的 schema 完全相容。
+**`supabase/migrations/20260801180000_transit_recompute.sql` 的部署順序與上述一般流程相反**：必須等 Vercel 完成本次功能部署（transit steps 三態偵測新邏輯上線）之後，才能對 Supabase 雲端執行這支 migration。新程式碼先上線本身無害——它沿用既有 TTL／`computed_at` 判準運作，不會誤寫任何資料；但若這支 migration 先套用、Vercel 還沒部署，這段空窗期只要有人開一次行程頁，仍在線上跑的舊版 sync 邏輯就會用舊 parse 邏輯把這批 `computed_at=null` 的段重算，寫回同樣錯誤的步行時長、新的 `computed_at`，並改寫 `departs_at`——導致 `moved` 判準永遠為 false、TTL 30 天在出發前不會到期，這批壞資料自此不會再被正確邏輯修正，且整個過程沒有任何告警（M-1，2026-08-01 複審）。
+
+**回滾主路徑是 Vercel Instant Rollback，但這個「單獨執行即安全，不需要任何資料庫動作」的保證只涵蓋 `20260801180000_transit_recompute.sql` 之前的 migration**——舊版程式碼完全不寫 `trips`（只有 SELECT 與 INSERT）、也不碰 `trip_members` / `trip_invites`，與 `20260803000000` 之後的 schema 完全相容。`20260801180000_transit_recompute.sql` 是本專案第一支資料 migration（UPDATE 既有列，非純 DDL 新增），一旦套用過就不再滿足這個假設：若在它套用之後才對 Vercel 做 Instant Rollback，回滾回去的舊版程式碼一樣會在使用者開行程頁時把這批 `computed_at=null` 的段用舊 parse 邏輯重算、寫回相同的錯誤值，等於讓這次 migration 白做——因此只有確認新程式碼已穩定運作、不需要回滾時才執行這支 migration；一旦回滾，在重新部署新程式碼前不要再套用/重跑它。
 
 只有在確認問題來自欄位級 GRANT 或邀請 RPC 本身時，才執行以下 SQL（純還原權限，不刪表、不刪資料）：
 

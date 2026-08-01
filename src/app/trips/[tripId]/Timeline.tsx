@@ -5,7 +5,7 @@ import type { Stop } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
 import type { DayView } from './dayView'
-import { MODE_ICON, MODE_LABEL, legDurationText } from './legUi'
+import { MODE_ICON, MODE_LABEL, legDurationText, legDurationShortText } from './legUi'
 
 const HOUR_MS = 60 * 60 * 1000
 const SNAP_MS = 5 * 60 * 1000 // 拖曳吸附至 5 分鐘；位移小於此視為點擊
@@ -175,7 +175,7 @@ export default function Timeline({
                   tabIndex={-1}
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
                   title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
-                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden whitespace-nowrap rounded text-center text-[10px] leading-tight ${
+                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
                     isDeadZone ? 'pointer-events-none' : ''
                   } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
                     selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
@@ -184,7 +184,7 @@ export default function Timeline({
                 >
                   {MODE_ICON[leg.mode]}
                   {leg.stale && '⚠️'}
-                  {legDurationText(leg)}
+                  {legDurationShortText(leg)}
                 </button>
               )
             })}

@@ -44,3 +44,6 @@ next-env.d.ts
 # Playwright 執行產物
 /test-results/
 /playwright-report/
+
+# Claude Code worktrees（含各自的 node_modules/.next，不應進 repo）
+/.claude/

@@ -220,9 +220,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         // 輕量驗形（審查 M-4）：快取列可能因手動改壞 / 未來欄位變更而毀損；不驗形直接信任會讓非法
         // durationMinutes 流入下方 new Date(...) 運算炸出 Invalid time value，殃及整個 handler。
         // 不合格視為 miss，落入下方重算分支，不特別記錄（快取毀損不是呼叫方的錯，重算即自癒）。
-        const candidate = hit.result as { ok?: unknown; durationMinutes?: unknown }
-        const validShape = typeof candidate.ok === 'boolean' &&
-          (candidate.ok === false || (Number.isInteger(candidate.durationMinutes) && (candidate.durationMinutes as number) > 0))
+        // M-4 白名單：ok:false 只信任 no_route／no_transit_data 兩個穩定結論（bad_response 本不會被
+        // 寫入快取，見下方 upsert 條件，這裡仍防禦手動改壞/未來新增 reason）；no_transit_data 帶
+        // durationMinutes（I-2 方案 a：保留步行時長），一併驗形，格式不對就當快取毀損重算。
+        const candidate = hit.result as { ok?: unknown; reason?: unknown; durationMinutes?: unknown }
+        const hasValidDuration = Number.isInteger(candidate.durationMinutes) && (candidate.durationMinutes as number) > 0
+        const validShape = typeof candidate.ok === 'boolean' && (
+          candidate.ok === true
+            ? hasValidDuration
+            : candidate.reason === 'no_route' || (candidate.reason === 'no_transit_data' && hasValidDuration)
+        )
         if (validShape) result = hit.result as ReturnType<typeof parseComputeRoutesResponse>
       }
     }
@@ -251,21 +258,21 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
           pending++ // Google 4xx/5xx：leg 維持待計算可重試（錯誤格式 {error:{code,message,status}}，不透傳細節給 client）
           continue
         }
-        result = parseComputeRoutesResponse(await res.json())
+        result = parseComputeRoutesResponse(await res.json(), query.mode)
       } catch {
         pending++
         continue // 網路失敗/逾時同上
       }
-      // 只快取 ok 與 no_route（穩定結論）；bad_response 屬暫時性異常，快取 30 天會毒化該路段
+      // 只快取 ok、no_route、no_transit_data（皆為穩定結論）；bad_response 屬暫時性異常，快取 30 天會毒化該路段
       if (service && result && !(result.ok === false && result.reason === 'bad_response')) {
         await service.from('route_cache').upsert({ cache_key: cacheKey, result, fetched_at: new Date(now).toISOString() })
       }
     }
 
     if (result.ok) {
-      // 審查 Critical-1：Google 呼叫期間（可長達數秒）該段可能已被 LegEditor 改成 manual，
-      // .eq('source', 'auto') 讓寫回在 DB 層原子化重新確認，絕不能用「呼叫前讀到的 mode/source」
-      // 這種 check-then-act 判斷，那道間隙正是 PoC 復現的缺口
+      // 審查 Critical-1：Google 呼叫期間（可長達數秒）該段可能已被 LegEditor 改成 manual 或換了交通
+      // 方式，.eq('source', 'auto').eq('mode', item.mode)（I-3）讓寫回在 DB 層原子化重新確認，絕不能
+      // 用「呼叫前讀到的 mode/source」這種 check-then-act 判斷，那道間隙正是 PoC 復現的缺口
       const { data, error } = await supabase.from('legs').update({
         duration_minutes: result.durationMinutes,
         distance_meters: result.distanceMeters,
@@ -275,9 +282,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         arrives_at: new Date(from.endsAt + result.durationMinutes * 60_000).toISOString(),
         computed_at: new Date(now).toISOString(),
         stale: false,
-      }).eq('id', item.legId).eq('source', 'auto').select('id')
+      }).eq('id', item.legId).eq('source', 'auto').eq('mode', item.mode).select('id')
       if (!error) {
-        // 0 列＝寫回瞬間已被改成 manual，這段已完工換人負責，不計 computed 也不計 pending
+        // 0 列＝寫回瞬間已被改成 manual 或換了交通方式，這段已換人負責，不計 computed 也不計 pending
         if ((data ?? []).length > 0) {
           computed++
           changed = true
@@ -292,16 +299,41 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
         detail: { no_route: true },
         departs_at: new Date(from.endsAt).toISOString(), arrives_at: null,
         computed_at: new Date(now).toISOString(), stale: false,
-      }).eq('id', item.legId).eq('source', 'auto').select('id')
+      }).eq('id', item.legId).eq('source', 'auto').eq('mode', item.mode).select('id')
       if (!error) {
-        // 同上：0 列＝已被改成 manual，不算變化也不計 pending（Critical-1 source 守衛）
+        // 同上：0 列＝已被改成 manual 或換了交通方式，不算變化也不計 pending（Critical-1/I-3 守衛）
         if ((data ?? []).length > 0) changed = true
       } else {
         pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
         console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
       }
+    } else if (result.reason === 'no_transit_data') {
+      // 日本大眾運輸 fallback，I-2 方案 (a)：鏡像 ok 分支寫回真實步行時長/距離/polyline（衝突偵測
+      // 需要真實時長），只在 detail 記哨兵供 UI 顯示「無大眾運輸資料」；穩定結論可快取（上方快取
+      // 條件已涵蓋），避免每次 sync 重打 Google
+      const { data, error } = await supabase.from('legs').update({
+        duration_minutes: result.durationMinutes,
+        distance_meters: result.distanceMeters,
+        polyline: result.polyline,
+        detail: { no_transit_data: true },
+        departs_at: new Date(from.endsAt).toISOString(),
+        arrives_at: new Date(from.endsAt + result.durationMinutes * 60_000).toISOString(),
+        computed_at: new Date(now).toISOString(),
+        stale: false,
+      }).eq('id', item.legId).eq('source', 'auto').eq('mode', item.mode).select('id')
+      if (!error) {
+        // N-3／同上：0 列＝寫回瞬間已被改成 manual 或換了交通方式，這段已換人負責，不計 changed 也不計 pending
+        if ((data ?? []).length > 0) changed = true
+      } else {
+        pending++
+        console.error('[legs/sync] update no_transit_data leg failed', { tripId, code: error.code, message: error.message })
+      }
     } else {
+      // I-1：bad_response 涵蓋「duration 格式異常」與「transit legs/steps 資料不完整（三態偵測判 unknown）」
+      // 兩種情況——皆屬暫時性/待查異常，不快取、留 pending 自動重試；記一筆 log 供追蹤
+      // （tripId/legId/mode 足以定位問題，不含 API 金鑰或座標等敏感內容）
       pending++
+      console.error('[legs/sync] compute got bad_response', { tripId, legId: item.legId, mode: item.mode })
     }
   }
 

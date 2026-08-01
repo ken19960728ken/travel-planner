@@ -8,7 +8,7 @@
 - **多人即時共編**：旅伴共同編輯同一份行程，改動即時同步
 - **交通自動計算 + 手動修正**：相鄰停留點間自動計算大眾運輸／步行／開車路線與時間（Google Routes API），可手動修正時長／交通方式／航班起訖（手動內容絕不被自動計算覆蓋，僅標記「前後行程變動過」提示重新確認）；支援跨日航班段（出發／抵達分屬不同日期與時區）；交通時間與前後停留點銜接不上時，連接條與時間軸色塊變色警示（警示不阻擋編輯）
 - **時間連鎖順延**：中途插入景點，後續行程自動順延；可鎖定不可動的時間點（航班、訂位）並警示衝突
-- **行程預覽動畫**：一鍵播放整趟行程，地圖鏡頭跟著路線飛
+- **行程預覽動畫**：一鍵播放整趟行程，起播時鏡頭自動收整段路線入鏡（定格全景），「我」標記在畫面內移動；只有標記跑出可視範圍（跨距過大或手動平移過鏡頭）時鏡頭才會微調追上
 - **分享連結**：旅伴免註冊即可唯讀檢視
 - **預估花費**：景點與交通的可留空花費欄位，含總覽統計
 - **定稿快照 + JSON 匯出**：出發前凍結計畫，為未來的「計畫 vs 實際」回憶功能預留資料
@@ -79,9 +79,11 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 
 ## 部署
 
-正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、Plan 4 以前的 migration 純新增免 down；Plan 5b 的 GRANT 收緊見下段、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
+正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；一般流程是 migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、Plan 4 以前的 migration 純新增免 down；Plan 5b 的 GRANT 收緊見下段、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
 
-**回滾主路徑是 Vercel Instant Rollback，且它單獨執行即安全，不需要任何資料庫動作**——舊版程式碼完全不寫 `trips`（只有 SELECT 與 INSERT）、也不碰 `trip_members` / `trip_invites`，與 `20260803000000` 之後的 schema 完全相容。
+**`supabase/migrations/20260803000002_transit_recompute.sql` 的部署順序與上述一般流程相反**：必須等 Vercel 完成本次功能部署（transit steps 三態偵測新邏輯上線）之後，才能對 Supabase 雲端執行這支 migration。新程式碼先上線本身無害——它沿用既有 TTL／`computed_at` 判準運作，不會誤寫任何資料；但若這支 migration 先套用、Vercel 還沒部署，這段空窗期只要有人開一次行程頁，仍在線上跑的舊版 sync 邏輯就會用舊 parse 邏輯把這批 `computed_at=null` 的段重算，寫回同樣錯誤的步行時長、新的 `computed_at`，並改寫 `departs_at`——導致 `moved` 判準永遠為 false、TTL 30 天在出發前不會到期，這批壞資料自此不會再被正確邏輯修正，且整個過程沒有任何告警（M-1，2026-08-01 複審）。
+
+**回滾主路徑是 Vercel Instant Rollback，但這個「單獨執行即安全，不需要任何資料庫動作」的保證只涵蓋 `20260803000002_transit_recompute.sql` 之前的 migration**——舊版程式碼完全不寫 `trips`（只有 SELECT 與 INSERT）、也不碰 `trip_members` / `trip_invites`，與 `20260803000000` 之後的 schema 完全相容。`20260803000002_transit_recompute.sql` 是本專案第一支資料 migration（UPDATE 既有列，非純 DDL 新增），一旦套用過就不再滿足這個假設：若在它套用之後才對 Vercel 做 Instant Rollback，回滾回去的舊版程式碼一樣會在使用者開行程頁時把這批 `computed_at=null` 的段用舊 parse 邏輯重算、寫回相同的錯誤值，等於讓這次 migration 白做——因此只有確認新程式碼已穩定運作、不需要回滾時才執行這支 migration；一旦回滾，在重新部署新程式碼前不要再套用/重跑它。
 
 只有在確認問題來自欄位級 GRANT 或邀請 RPC 本身時，才執行以下 SQL（純還原權限，不刪表、不刪資料）：
 
@@ -96,12 +98,14 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 ## 已知限制
 
 - 地圖 `mapId` 目前為開發用 `DEMO_MAP_ID`，部署前需在 GCP 建立正式 Map ID 並替換
-- 鏡頭跟隨目前涵蓋「加入停留點」與「點選側欄」；播放動畫式的完整鏡頭運動屬 Plan 5
+- 鏡頭跟隨涵蓋「加入停留點」「點選側欄／時間軸」與「播放預覽動畫」；播放中的鏡頭行為是刻意的
+  「起播定格全景」（fitBounds 收整段路線入鏡一次，之後原則上不動，僅在「我」標記跑出可視範圍時
+  才 panTo 追上），不是逐幀貼著標記跑
 - 時間軸拖曳僅支援整塊平移（時長調整請透過停留點編輯器）
 - 跨午夜停留點僅顯示於開始日
-- 播放頭的鏡頭跟隨與預覽動畫完整版屬 Plan 5
 - 選中日地圖路線圖層（polyline）尚未實作，留待旅途中或 Plan 5 補
 - 步行路線為 Google Beta 功能，可能缺乏人行道資訊
+- Google Routes API 不支援日本（及印度鐵路）的大眾運輸；TRANSIT 查詢在這類地區（或任何無合適大眾運輸路線的短程）會顯示「無大眾運輸資料」，並保留 Google 回傳的步行時間估算供參考，可手動修正
 - 刪除停留點會連帶刪除其相鄰交通段（FK cascade），含手動填寫的 manual／flight 段——重要班次資訊請留意
 - 跨夜交通段顯示歸屬出發日，隔日視角不顯示延續
 - 路線代理限流為單機（模組層記憶體）實作，serverless 多實例部署下護欄效果弱化；商用前需換集中式限流（Upstash／DB）

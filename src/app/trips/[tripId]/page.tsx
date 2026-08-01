@@ -5,6 +5,7 @@ import TripView from './TripView'
 import type { Leg } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
+import type { Candidate } from './CandidatesPanel'
 
 export default async function TripDetailPage({
   params,
@@ -40,6 +41,7 @@ export default async function TripDetailPage({
     { data: memberRows, error: membersError },
     { data: stops, error: stopsError },
     { data: legs, error: legsError },
+    { data: candidateRows, error: candidatesError },
   ] = await Promise.all([
     supabase.from('trip_members').select('user_id, role').eq('trip_id', tripId),
     supabase
@@ -55,6 +57,13 @@ export default async function TripDetailPage({
       .eq('trip_id', tripId)
       .order('id', { ascending: true })
       .limit(500),
+    supabase
+      .from('trip_candidates')
+      .select('id, name, lat, lng, place_id, created_at')
+      .eq('trip_id', tripId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(100), // 對齊 DB trip_candidates_limit_check trigger 的 100 筆上限
   ])
   if (membersError) {
     return (
@@ -127,7 +136,15 @@ export default async function TripDetailPage({
       {legsError && (
         <p className="border-b p-2 text-sm text-red-600">交通段讀取失敗，請重新整理再試</p>
       )}
-      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} legs={(legs ?? []) as Leg[]} canEdit={canEdit} />
+      <TripView
+        trip={trip}
+        stops={stops ?? []}
+        stopsError={Boolean(stopsError)}
+        legs={(legs ?? []) as Leg[]}
+        canEdit={canEdit}
+        candidates={(candidateRows ?? []) as Candidate[]}
+        candidatesError={Boolean(candidatesError)}
+      />
     </main>
   )
 }

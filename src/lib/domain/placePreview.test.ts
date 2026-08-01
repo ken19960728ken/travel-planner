@@ -18,6 +18,14 @@ describe('isRatableCategory', () => {
     expect(isRatableCategory([], null)).toBe(false)
     expect(isRatableCategory([], undefined)).toBe(false)
   })
+
+  it('刻意擴大：拉麵店（舊白名單漏掉的 Food and Drink 細分類）現在也算 ratable', () => {
+    expect(isRatableCategory([], 'ramen_restaurant')).toBe(true)
+  })
+
+  it('atm 不屬於任何 ratable 分類，仍為 false', () => {
+    expect(isRatableCategory([], 'atm')).toBe(false)
+  })
 })
 
 describe('priceLevelLabel', () => {

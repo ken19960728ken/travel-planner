@@ -49,3 +49,13 @@ describe('googleMapsSearchUrl', () => {
     expect(url).toBe('https://www.google.com/maps/search/?api=1&query=%E4%B8%80%E8%98%AD+%E6%9C%AC%E5%BA%97&query_place_id=ChIJabc123')
   })
 })
+
+describe('isRatableCategory 的行為收窄（審查 M-1 迴歸鎖）', () => {
+  it('車站的 types 夾帶 shopping_mall 不再誤抓（舊版會抓）', () => {
+    expect(isRatableCategory(['train_station', 'subway_station', 'shopping_mall'], null)).toBe(false)
+  })
+
+  it('機場的 types 夾帶 restaurant 不再誤抓（舊版會抓）', () => {
+    expect(isRatableCategory(['airport', 'restaurant', 'food'], 'international_airport')).toBe(false)
+  })
+})

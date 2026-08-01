@@ -33,6 +33,9 @@ const TRANSPORT_TYPES: readonly string[] = [
   'park_and_ride', 'subway_station', 'taxi_service', 'taxi_stand', 'toll_station',
   'train_station', 'train_ticket_office', 'tram_stop', 'transit_depot', 'transit_station',
   'transit_stop', 'transportation_service', 'truck_stop',
+  // 具名例外（自 Automotive section）：道の駅／高速 SA・PA。沿途停靠點，語意屬交通而非購物——
+  // 若不列名會被 types 陣列裡常伴隨的 store／food 撿走，歸成購物或餐飲。
+  'rest_stop',
 ]
 
 /** Table A「Culture」+「Entertainment and Recreation」+「Natural Features」+「Places of Worship」
@@ -58,6 +61,10 @@ const SIGHT_TYPES: readonly string[] = [
   'hindu_temple', 'mosque', 'shinto_shrine', 'synagogue', 'bridge',
   'ski_resort', 'stadium', 'arena', 'place_of_worship', 'natural_feature',
   'landmark', 'town_square',
+  // 具名例外（自 Facilities / Health and Wellness / Services section）：溫泉、銭湯、三溫暖、
+  // 觀光案內所。在日本旅遊語境下這些是「去玩的目的地」而非附屬設施——九州行程的溫泉若歸「其他」，
+  // 地圖沒有分類色、Excel 分類欄顯示其他，明顯不符使用者預期（2026-08-02 審查 M-5，主控拍板）。
+  'public_bath', 'sauna', 'spa', 'massage_spa', 'tourist_information_center',
 ]
 
 /** Table A「Food and Drink」全 section + Table B：food。 */
@@ -139,16 +146,25 @@ const TYPE_CATEGORY: ReadonlyMap<string, StopCategory> = new Map(
   ),
 )
 
-/** 推導順序寫死：primaryType 查表命中即回傳；否則依 types 陣列原順序逐項查表，
- *  第一個命中即回傳；全不命中 → other。TYPE_CATEGORY 內不含 other 鍵，故「命中」恆非 other。 */
+/** 推導順序寫死（D1）：primaryType 查表**命中且非 other** 即回傳；否則依 types 陣列原順序逐項查表，
+ *  第一個命中且非 other 者回傳；全不命中 → other。
+ *
+ *  `!== 'other'` 的判斷看似冗餘（`OTHER_TYPES` 目前是空的），但這是刻意的防禦：若未來有人為了
+ *  自我說明往 `OTHER_TYPES` 塞字串（如 atm、parking），少了這個判斷會讓 categorize 提早短路，
+ *  `['parking','restaurant']` 從 food 靜默變成 other——而全部測試會照樣綠燈。本檔是 8 個下游任務的
+ *  單一事實來源，靜默漂移的爆炸半徑是整個 Plan 7（2026-08-02 審查 I-1）。
+ *
+ *  另註：Google 從未在文件中保證 types 陣列的順序有意義（官方只在 Introduction 用例子暗示「由具體
+ *  到泛用」）。本規則建立在觀察而非契約上；primaryType 路徑才是確定性的（官方明文：有 primary type
+ *  時它必然也在 types 內），而最終權威是使用者在預覽卡的分類下拉。 */
 export function categorize(types: readonly string[], primaryType: string | null | undefined): StopCategory {
   if (primaryType) {
     const primary = TYPE_CATEGORY.get(primaryType)
-    if (primary) return primary
+    if (primary && primary !== 'other') return primary
   }
   for (const type of types) {
     const category = TYPE_CATEGORY.get(type)
-    if (category) return category
+    if (category && category !== 'other') return category
   }
   return 'other'
 }

@@ -94,7 +94,8 @@ describe('六桶對照表無重複', () => {
     for (const [category, types] of Object.entries(CATEGORY_TYPES)) {
       for (const type of types) {
         if (seen.has(type)) {
-          duplicates.push(type)
+          // 失敗訊息帶上「哪兩桶撞了」，否則只知道字串重複、還要自己去翻六個陣列
+          duplicates.push(`${type}: ${seen.get(type)} vs ${category}`)
         } else {
           seen.set(type, category)
         }
@@ -105,6 +106,57 @@ describe('六桶對照表無重複', () => {
 
   it('六桶皆存在（含恆空的 other）', () => {
     expect(Object.keys(CATEGORY_TYPES).sort()).toEqual([...CATEGORY_ORDER].sort())
+  })
+
+  // 審查 I-1：categorize 的「命中恆非 other」前提只靠 OTHER_TYPES 為空維持。
+  // 程式碼已加 `!== 'other'` 防禦，這條測試把不變量本身也鎖住，兩道防線。
+  it('other 桶恆為空（categorize 的短路前提）', () => {
+    expect(CATEGORY_TYPES.other).toEqual([])
+  })
+
+  // 審查 M-4：343 筆對照表原本只有 30 個字串（8.7%）被測試覆蓋，刪行/貼錯/合併衝突誤解都不會被發現。
+  // 數字對應 2026-08-02 官方文件 + 本專案的具名例外；Google 新增型別時本測試會紅，這是刻意的提醒機制。
+  it('各桶數量符合官方 section（Google 改文件時會紅，屬預期）', () => {
+    expect(CATEGORY_TYPES.transport).toHaveLength(24) // Transportation 23 + rest_stop
+    expect(CATEGORY_TYPES.sight).toHaveLength(97) // 原 92 + 溫泉/三溫暖/spa/massage_spa/觀光案內所
+    expect(CATEGORY_TYPES.food).toHaveLength(167)
+    expect(CATEGORY_TYPES.lodging).toHaveLength(18)
+    expect(CATEGORY_TYPES.shopping).toHaveLength(43)
+  })
+})
+
+describe('具名例外與反向邊界', () => {
+  it('自其他 section 移入的具名例外', () => {
+    for (const type of ['bridge', 'ski_resort', 'stadium', 'arena']) {
+      expect(categorize([type], null)).toBe('sight')
+    }
+  })
+
+  // 審查 M-5（主控拍板）：日本旅遊語境下溫泉/銭湯/三溫暖是「去玩的目的地」而非附屬設施。
+  it('日本行程實務例外：溫泉、銭湯、三溫暖、觀光案內所歸景點', () => {
+    for (const type of ['public_bath', 'sauna', 'spa', 'massage_spa', 'tourist_information_center']) {
+      expect(categorize([type], type)).toBe('sight')
+    }
+  })
+
+  it('道の駅（rest_stop）歸交通，不被 types 陣列裡的 store 撿走', () => {
+    expect(categorize(['rest_stop', 'store', 'food'], 'rest_stop')).toBe('transport')
+    expect(categorize(['rest_stop', 'store', 'food'], null)).toBe('transport')
+  })
+
+  // 審查 M-2：D1 明文「Sports section 僅 ski_resort/stadium/arena 三型移入 sight，其餘落 other」。
+  // 沒有這條反向測試的話，未來把整個 Sports section（21 型）併進 sight 也不會有人發現。
+  it('Sports section 其餘型別落 other（守住「僅此三型」的邊界）', () => {
+    for (const type of ['gym', 'golf_course', 'swimming_pool', 'athletic_field']) {
+      expect(categorize([type], null)).toBe('other')
+    }
+  })
+
+  // 審查 M-3：Table B 五項原本只測了 place_of_worship 與 food
+  it('Table B 其餘三項歸 sight', () => {
+    for (const type of ['natural_feature', 'landmark', 'town_square']) {
+      expect(categorize([type], null)).toBe('sight')
+    }
   })
 })
 

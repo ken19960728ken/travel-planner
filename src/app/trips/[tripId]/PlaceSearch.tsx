@@ -39,7 +39,16 @@ export default function PlaceSearch({
   useEffect(() => {
     if (!places || !containerRef.current) return
     const container = containerRef.current
-    const el = new places.PlaceAutocompleteElement()
+    let el: google.maps.places.PlaceAutocompleteElement
+    try {
+      el = new places.PlaceAutocompleteElement()
+    } catch {
+      // I-2：金鑰缺 Places (New) 權限等情況下這裡已知會拋出；攔下改走既有的降級提示路徑，避免這個
+      // useEffect 內的例外冒泡到最近的 error boundary，把整個行程頁打崩（原本沒有 try/catch 時就是
+      // 這樣：只有地圖區塊有 boundary，PlaceSearch 位在側欄，例外會一路冒泡到 Next 的路由層預設崩潰頁）
+      onErrorRef.current?.('地點搜尋服務目前無法使用')
+      return
+    }
     el.style.width = '100%'
     elementRef.current = el
     container.appendChild(el)

@@ -67,7 +67,9 @@ type DetailStatus = 'idle' | 'loading' | 'loaded' | 'error'
 
 /** 搜尋預覽卡片：選中地點先預覽再決定要不要加入行程，不寫 DB。
  *  評分/營業時間/價位等 Enterprise 資料只活在本元件 state（含上面的模組快取），卸載即消失——
- *  onAdd 只會把使用者編輯後的名稱交給父層的 addStop，絕不把這些欄位帶出這個元件。 */
+ *  onAdd 只會把使用者編輯後的名稱交給父層的 addStop，絕不把這些欄位帶出這個元件。
+ *  onSaveCandidate（存入備選）同樣只交出使用者編輯後的名稱字串，一樣禁止把 detail/place 的
+ *  Enterprise 欄位帶出這個元件。 */
 export default function PlacePreviewCard({
   place,
   initialName,
@@ -75,6 +77,7 @@ export default function PlacePreviewCard({
   lng,
   busy,
   onAdd,
+  onSaveCandidate,
   onCancel,
 }: {
   place: google.maps.places.Place
@@ -83,6 +86,7 @@ export default function PlacePreviewCard({
   lng: number
   busy: boolean
   onAdd: (name: string) => Promise<boolean>
+  onSaveCandidate?: (name: string) => Promise<boolean>
   onCancel: () => void
 }) {
   const [name, setName] = useState(initialName)
@@ -201,6 +205,20 @@ export default function PlacePreviewCard({
         <button className="rounded bg-foreground px-2 text-sm text-background disabled:opacity-50" type="submit" disabled={busy}>
           加入行程
         </button>
+        {onSaveCandidate && (
+          <button
+            className="rounded border px-2 text-sm disabled:opacity-50"
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const trimmed = name.trim()
+              if (!trimmed) return
+              void onSaveCandidate(trimmed)
+            }}
+          >
+            存入備選
+          </button>
+        )}
         <button className="rounded border px-2 text-sm disabled:opacity-50" type="button" disabled={busy} onClick={onCancel}>
           取消
         </button>

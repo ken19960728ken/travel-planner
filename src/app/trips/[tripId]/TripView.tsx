@@ -9,7 +9,8 @@ import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
 import { adjacentPairs } from '@/lib/domain/legSync'
-import PlaceSearch from './PlaceSearch'
+import PlaceSearch, { type PlacePick } from './PlaceSearch'
+import PlacePreviewCard from './PlacePreviewCard'
 import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
@@ -241,6 +242,11 @@ export default function TripView({
   const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
   const [draftName, setDraftName] = useState('')
+  // 搜尋預覽（先看再決定加不加入，不寫 DB）：與 draftPin 互斥同一時間只顯示一張卡，視覺概念一致
+  // （同一套灰 Pin + 名稱輸入 + 加入/取消），seq 遞增只為了讓每次新選點都強制重新掛載
+  // PlacePreviewCard（換掉舊卡的內部 state，不留痕跡）
+  const [searchPreview, setSearchPreview] = useState<(PlacePick & { seq: number }) | null>(null)
+  const previewSeqRef = useRef(0)
   const [cameraTarget, setCameraTarget] = useState<{ lat: number; lng: number } | null>(null)
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
@@ -538,12 +544,40 @@ export default function TripView({
         <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
           {canEdit && apiKey && !stopsError && (
             <PlaceSearch
-              onPick={p => addStop({ ...p, isCustom: false })}
+              onPick={p => {
+                previewSeqRef.current += 1
+                setDraftPin(null) // 互斥：新的搜尋預覽取代地圖右鍵草稿，避免兩張卡同時掛著
+                setDraftName('')
+                setSearchPreview({ ...p, seq: previewSeqRef.current })
+                setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛過去，落地圖預覽釘見下方 AdvancedMarker
+              }}
               onError={text => setNotice({ kind: 'error', text })}
               disabled={busy}
             />
           )}
-          {canEdit && draftPin && (
+          {canEdit && searchPreview && !stopsError && (
+            <PlacePreviewCard
+              key={searchPreview.seq}
+              place={searchPreview.place}
+              initialName={searchPreview.name}
+              lat={searchPreview.lat}
+              lng={searchPreview.lng}
+              busy={busy}
+              onAdd={async name => {
+                const ok = await addStop({
+                  name,
+                  lat: searchPreview.lat,
+                  lng: searchPreview.lng,
+                  placeId: searchPreview.place.id,
+                  isCustom: false,
+                })
+                if (ok) setSearchPreview(null) // 成功後清掉預覽；失敗維持原樣讓使用者能重試
+                return ok
+              }}
+              onCancel={() => setSearchPreview(null)}
+            />
+          )}
+          {canEdit && draftPin && !stopsError && (
             <form
               className="flex gap-1 rounded border p-2"
               onSubmit={async e => {
@@ -568,7 +602,14 @@ export default function TripView({
               <button className="rounded bg-foreground px-2 text-sm text-background" type="submit" disabled={busy}>
                 加入
               </button>
-              <button className="rounded border px-2 text-sm" type="button" onClick={() => setDraftPin(null)}>
+              <button
+                className="rounded border px-2 text-sm"
+                type="button"
+                onClick={() => {
+                  setDraftPin(null)
+                  setDraftName('')
+                }}
+              >
                 取消
               </button>
             </form>
@@ -706,7 +747,10 @@ export default function TripView({
               onContextmenu={e => {
                 if (!canEdit || stopsError) return
                 const latLng = e.detail.latLng
-                if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+                if (latLng) {
+                  setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
+                  setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+                }
               }}
             >
               {stops.map(stop => {
@@ -737,6 +781,11 @@ export default function TripView({
               })}
               {canEdit && draftPin && (
                 <AdvancedMarker position={draftPin}>
+                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
+                </AdvancedMarker>
+              )}
+              {canEdit && searchPreview && (
+                <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>
               )}

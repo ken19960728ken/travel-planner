@@ -14,6 +14,7 @@ import PlacePreviewCard from './PlacePreviewCard'
 import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
+import MapErrorBoundary from './MapErrorBoundary'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
@@ -780,74 +781,76 @@ export default function TripView({
         </aside>
         <div className="min-h-0 flex-1">
           {apiKey ? (
-            <Map
-              defaultCenter={center}
-              defaultZoom={12}
-              mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
-              gestureHandling="greedy"
-              disableDefaultUI={false}
-              onContextmenu={e => {
-                if (!canEdit || stopsError) return
-                const latLng = e.detail.latLng
-                if (latLng) {
-                  setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
-                  setDraftPin({ lat: latLng.lat, lng: latLng.lng })
-                }
-              }}
-            >
-              {stops.map(stop => {
-                // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
-                const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
-                const inActiveDay = dayIdx >= 0
-                return (
-                  <AdvancedMarker
-                    key={stop.id}
-                    position={{ lat: stop.lat, lng: stop.lng }}
-                    onClick={() => {
-                      // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
-                      const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
-                      if (day !== activeDay) changeDay(day)
-                      setSelectedId(stop.id)
-                    }}
-                    title={stop.name}
-                  >
-                    <Pin
-                      background={selectedId === stop.id ? '#2563eb' : inActiveDay ? '#ef4444' : '#d1d5db'}
-                      glyphColor="#fff"
-                      borderColor="#fff"
+            <MapErrorBoundary>
+              <Map
+                defaultCenter={center}
+                defaultZoom={12}
+                mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
+                gestureHandling="greedy"
+                disableDefaultUI={false}
+                onContextmenu={e => {
+                  if (!canEdit || stopsError) return
+                  const latLng = e.detail.latLng
+                  if (latLng) {
+                    setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
+                    setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+                  }
+                }}
+              >
+                {stops.map(stop => {
+                  // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
+                  const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
+                  const inActiveDay = dayIdx >= 0
+                  return (
+                    <AdvancedMarker
+                      key={stop.id}
+                      position={{ lat: stop.lat, lng: stop.lng }}
+                      onClick={() => {
+                        // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
+                        const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
+                        if (day !== activeDay) changeDay(day)
+                        setSelectedId(stop.id)
+                      }}
+                      title={stop.name}
                     >
-                      {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
-                    </Pin>
+                      <Pin
+                        background={selectedId === stop.id ? '#2563eb' : inActiveDay ? '#ef4444' : '#d1d5db'}
+                        glyphColor="#fff"
+                        borderColor="#fff"
+                      >
+                        {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
+                      </Pin>
+                    </AdvancedMarker>
+                  )
+                })}
+                {canEdit && !stopsError && draftPin && (
+                  <AdvancedMarker position={draftPin}>
+                    <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
-                )
-              })}
-              {canEdit && !stopsError && draftPin && (
-                <AdvancedMarker position={draftPin}>
-                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
-                </AdvancedMarker>
-              )}
-              {canEdit && !stopsError && searchPreview && (
-                <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
-                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
-                </AdvancedMarker>
-              )}
-              {playheadPos && (
-                // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
-                // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
-                // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
-                // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
-                <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
-                  <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
-                </AdvancedMarker>
-              )}
-              <CameraFollow target={cameraTarget} />
-              <PlaybackCamera
-                lat={playheadPos?.lat ?? null}
-                lng={playheadPos?.lng ?? null}
-                active={playing}
-                bounds={playbackBounds}
-              />
-            </Map>
+                )}
+                {canEdit && !stopsError && searchPreview && (
+                  <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
+                    <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
+                  </AdvancedMarker>
+                )}
+                {playheadPos && (
+                  // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
+                  // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
+                  // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
+                  // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
+                  <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                  </AdvancedMarker>
+                )}
+                <CameraFollow target={cameraTarget} />
+                <PlaybackCamera
+                  lat={playheadPos?.lat ?? null}
+                  lng={playheadPos?.lng ?? null}
+                  active={playing}
+                  bounds={playbackBounds}
+                />
+              </Map>
+            </MapErrorBoundary>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-500">
               尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示

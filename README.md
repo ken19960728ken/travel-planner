@@ -102,6 +102,7 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 - 播放頭的鏡頭跟隨與預覽動畫完整版屬 Plan 5
 - 選中日地圖路線圖層（polyline）尚未實作，留待旅途中或 Plan 5 補
 - 步行路線為 Google Beta 功能，可能缺乏人行道資訊
+- Google Routes API 不支援日本（及印度鐵路）的大眾運輸；TRANSIT 查詢在這類地區（或任何無合適大眾運輸路線的短程）會顯示「無大眾運輸資料」，並保留 Google 回傳的步行時間估算供參考，可手動修正
 - 刪除停留點會連帶刪除其相鄰交通段（FK cascade），含手動填寫的 manual／flight 段——重要班次資訊請留意
 - 跨夜交通段顯示歸屬出發日，隔日視角不顯示延續
 - 路線代理限流為單機（模組層記憶體）實作，serverless 多實例部署下護欄效果弱化；商用前需換集中式限流（Upstash／DB）

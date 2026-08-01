@@ -154,14 +154,14 @@ export default function LegEditor({
             onClick={() => write({ stale: false }, { kind: 'success', text: '已確認 ✓' })}>已重新確認</button>
         </div>
       )}
-      {isNoRoute(leg) && (
+      {/* N-2：兩種情況互斥（sync 只會寫其中一種 detail 哨兵），改 if/else 結構確保畫面最多顯示一條 */}
+      {isNoRoute(leg) ? (
         <p className="text-xs text-amber-700">查無路線：可改用其他交通方式，或切為航班/自訂手動填寫</p>
-      )}
-      {isNoTransitData(leg) && (
+      ) : isNoTransitData(leg) ? (
         <p className="text-xs text-amber-700">
-          無大眾運輸資料：Google 不支援此地區（如日本）或無合適路線——可改開車／步行，或切為航班／自訂手動填寫
+          此路段 Google 未提供大眾運輸班次，以下為步行估算——可改開車／步行，或切為航班／自訂手動填寫
         </p>
-      )}
+      ) : null}
       <label className="flex items-center gap-2 text-xs">
         交通方式
         <select className="rounded border p-1" value={mode} onChange={e => setMode(e.target.value as Mode)}>

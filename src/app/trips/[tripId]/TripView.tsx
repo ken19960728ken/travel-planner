@@ -779,12 +779,12 @@ export default function TripView({
                   </AdvancedMarker>
                 )
               })}
-              {canEdit && draftPin && (
+              {canEdit && !stopsError && draftPin && (
                 <AdvancedMarker position={draftPin}>
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>
               )}
-              {canEdit && searchPreview && (
+              {canEdit && !stopsError && searchPreview && (
                 <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>

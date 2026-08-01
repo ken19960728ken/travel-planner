@@ -73,24 +73,39 @@ export default function MembersPanel({
     setNotice(null)
     try {
       const supabase = createClient()
-      // 撤銷邀請必須先於改角色（審查 I-1，PoC 實證）：邀請連結是 bearer token，只要該行程還有任何一條
-      // 未過期的 editor 邀請，被降級者可以「自行退出 → 用舊連結重新加入」把自己升回 editor，
-      // owner 的降級形同無效。與 removeMember 同一前提、同一順序理由（先撤銷再改，任何交錯都安全）。
-      const { error: revokeErr } = await supabase.from('trip_invites').delete().eq('trip_id', tripId)
-      if (revokeErr) {
-        setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未調整角色，請稍後再試' })
-        return
+      // 降級才需要撤銷，且只撤 editor 連結（審查 I-1 + N-4）：邀請連結是 bearer token，未過期的
+      // editor 連結會讓被降級者「自行退出 → 用舊連結重新加入」把自己升回 editor，owner 的降級形同無效。
+      // 但範圍要精準——升級（viewer→editor）是在給更多權限，不需撤銷任何連結；viewer 連結被重用最多
+      // 換回 viewer，無提權，故保留。順序必須先撤銷再改角色（同 removeMember 的 N-1 理由）。
+      const downgrading = nextRole === 'viewer'
+      if (downgrading) {
+        const { error: revokeErr } = await supabase
+          .from('trip_invites').delete().eq('trip_id', tripId).eq('role', 'editor')
+        if (revokeErr) {
+          setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未調整角色，請稍後再試' })
+          return
+        }
       }
       const { data, error } = await supabase
         .from('trip_members').update({ role: nextRole }).eq('trip_id', tripId).eq('user_id', userId).select('user_id')
       if (error || data.length === 0) {
         // RLS USING 排除時 error 為 null 但 0 列受影響（比照 invites.test.ts 記載的既有語義）——
         // 不能把這種靜默失敗顯示成成功
-        setNotice({ kind: 'error', text: '角色調整未生效，但該行程邀請連結已全部撤銷，請重新整理後再試（如需再邀請請重新產生）' })
+        setNotice({
+          kind: 'error',
+          text: downgrading
+            ? '角色調整未生效，但 editor 邀請連結已撤銷，請重新整理後再試（如需再邀請請重新產生）'
+            : '角色調整未生效，請重新整理後再試',
+        })
         router.refresh()
         return
       }
-      setNotice({ kind: 'success', text: '已調整角色 ✓（該行程所有邀請連結已一併撤銷，如需再邀請請重新產生）' })
+      setNotice({
+        kind: 'success',
+        text: downgrading
+          ? '已調整角色 ✓（editor 邀請連結已一併撤銷，如需再邀請請重新產生）'
+          : '已調整角色 ✓',
+      })
       router.refresh()
     } finally {
       busyRef.current = false

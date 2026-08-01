@@ -540,8 +540,11 @@ export default function TripView({
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        {/* 手機（< md）上下堆疊：側欄改滿寬、上限 38vh 內部捲動（overflow-y-auto 已存在），
+            讓 flex-1 的地圖區塊自動吃下剩餘高度，不需要另外幫地圖寫死高度（見下方地圖容器）。
+            桌機（md 以上）維持原本 320px 固定寬側欄 + 左右並排，外觀與行為完全不變。 */}
+        <aside className="max-h-[38vh] w-full overflow-y-auto border-b p-3 md:max-h-none md:w-80 md:shrink-0 md:border-b-0 md:border-r">
           {canEdit && apiKey && !stopsError && (
             <PlaceSearch
               onPick={p => {
@@ -736,12 +739,26 @@ export default function TripView({
             </details>
           )}
         </aside>
-        <div className="min-h-0 flex-1">
+        {/* min-h-[160px]（僅手機）：側欄在極短螢幕上被壓到接近 0 時，地圖仍保有可用的最小高度，
+            不會整個被擠到看不見；md:min-h-0 還原成桌機原本的值，避免這個安全下限在桌機的極端矮視窗
+            （例如瀏覽器被縮到很矮）改變原本「地圖可以被壓到 0」的行為，確保桌機零變化。
+            flex-1 本身在 row（桌機）與 col（手機）兩種方向下都會自動吃下側欄以外的剩餘空間，
+            兩種斷點共用同一組 flex-1，不需要另外寫死 vh 高度。 */}
+        <div className="min-h-[160px] flex-1 md:min-h-0">
           {apiKey ? (
             <Map
               defaultCenter={center}
               defaultZoom={12}
               mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
+              // 手勢策略決策（手機版面陷阱）：改成上下堆疊後地圖橫跨全寬，若維持會捲頁的單指手勢，
+              // 使用者想滑向下方時間軸/側欄會被地圖吃掉。這裡選 (b) 而非 (a) cooperative：
+              // 本頁殼層本來就是 h-screen 固定版面、不存在「頁面捲動」這件事（page.tsx 的 <main>
+              // 用 h-screen，TripView 外層是 min-h-0 flex-1）——桌機原本就沒有整頁捲動、只有側欄
+              // 自己的 overflow-y-auto。手機版把地圖用 flex-1 限制在剩餘高度內、側欄補上 max-h-[38vh]
+              // 上限捲動，三個區塊（側欄／地圖／時間軸）在同一個螢幕內各自可見、各自捲動，本來就不需要
+              // 使用者「滑過地圖」才能看到下一段內容，因此不必犧牲地圖雙指以外的手勢；也順帶避開了
+              // 依視窗寬度切換 gestureHandling 需要在 client 用 JS 判斷寬度、可能造成 SSR/hydration
+              // 不一致的風險（純 CSS 斷點即可解決，不需要 JS 介入）。桌機行為原封不動。
               gestureHandling="greedy"
               disableDefaultUI={false}
               onContextmenu={e => {

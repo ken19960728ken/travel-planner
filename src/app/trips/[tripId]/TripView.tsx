@@ -15,6 +15,7 @@ import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
 import SectionErrorBoundary from './SectionErrorBoundary'
+import { shouldPanCamera } from './cameraGeometry'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
@@ -78,8 +79,16 @@ function CameraFollow({ target }: { target: { lat: number; lng: number } | null 
   return null
 }
 
-/** 播放中鏡頭跟隨橘點（M-7）：只在播放時作用，不干擾使用者平時手動平移。
- *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。 */
+/** 播放鏡頭（M-7，2026-08-01 產品拍板：**起播定格全景，不是逐幀跟著橘點跑**）：起播時用
+ *  fitBounds 把當日整段路線收進視野一次，之後鏡頭原則上不動，橘點自己在畫面內移動；只有橘點跑出
+ *  視窗中央 70% 安全區（例如單日跨距超過容器、或使用者手動平移過鏡頭）才會 panTo 追上去。
+ *  這是刻意的產品行為（使用者在 N-4 review 明確選擇「定格全景」而非「鏡頭貼著橘點跑」），
+ *  邊緣閘門是安全網——不要因為「九州這種日程通常不會觸發」就拿掉，沒有它，遠距離或使用者平移過的
+ *  日程會回到瞬移灰塊的舊 bug。
+ *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。
+ *  M-6（跨分支提醒）：Google 官方文件記載地圖容器 `display:none` 時 fitBounds 讀到 0x0 尺寸、
+ *  不會做任何事——若 mobile 版面把地圖面板用 `hidden` class 藏起來，這裡的 fitBounds 會靜默失效，
+ *  合併前請檢查手機版面下播放是否仍會收整段視野。 */
 function PlaybackCamera({
   lat, lng, active, bounds,
 }: {
@@ -96,6 +105,10 @@ function PlaybackCamera({
   useEffect(() => {
     boundsRef.current = bounds
   }, [bounds])
+  // M-2：跟下面的跟隨 effect 同樣依賴 active，起播那個 commit 兩者會接連執行；跟隨 effect
+  // 若接著讀 map.getBounds() 可能拿到 fitBounds 套用前的舊視窗（見下方 C-1 說明的同一個啟發式
+  // 時序問題），在舊座標系下誤判邊緣、跟 fitBounds 的動畫互搶。用這個旗標讓跟隨 effect 那輪跳過一次。
+  const justFittedRef = useRef(false)
   // 起播時（active 由 false→true）把當日整段收進視野，取代原本「zoom<12 才拉近單點」的邏輯——
   // 遠距離日程（如福岡→鹿兒島 200km）不會再被單點 setZoom(14) 強拉到超出容器涵蓋範圍。
   // 這裡用逐點 extend 建構 LatLngBounds 而非在呼叫端 Math.min/max 化簡座標，是因為 Math.min/max
@@ -105,25 +118,39 @@ function PlaybackCamera({
     if (!map || !active) return
     const b = boundsRef.current
     if (!b || b.length === 0) return
+    // C-1（審查更正，race-free 修復）：原本 fitBounds 後立刻 getZoom() 判斷要不要夾縮放上限，
+    // 但 @types/google.maps 的 fitBounds 文件明載「是否套用動畫由內部啟發式決定」——呼叫後立刻讀到
+    // 的可能是套用前的舊值。用「按播放前的 zoom」去判斷「fitBounds 之後該不該夾」是競態、行為不可
+    // 決定（實測：使用者先手動放大到 z17 再播放 → 誤讀舊值 17 → 才誤觸發夾成 15，但若舊 zoom 本來
+    // 就 <15 則完全不會觸發，該夾的單點/近距離日程反而夾不到）。改用 maxZoom 選項讓 fitBounds 在
+    // 套用當下就不會超過上限，沒有「事後讀值」這個步驟，天生不會有時序競態。
+    map.setOptions({ maxZoom: PLAYBACK_MAX_ZOOM })
     const latLngBounds = new google.maps.LatLngBounds()
     for (const p of b) latLngBounds.extend(p)
     map.fitBounds(latLngBounds, 60)
-    if ((map.getZoom() ?? 0) > PLAYBACK_MAX_ZOOM) map.setZoom(PLAYBACK_MAX_ZOOM)
+    justFittedRef.current = true
+    return () => {
+      // active 轉 false（暫停/停止）時還原，不永久限制使用者手動縮放
+      map.setOptions({ maxZoom: null })
+    }
   }, [map, active])
   useEffect(() => {
     if (!map || !active || lat === null || lng === null) return
-    // 邊緣閘門：點還在目前視窗中央 70% 區域內（上下左右各留 15% padding）就不動鏡頭，避免每個
-    // 取樣點都 panTo 一次造成掃視感；真的要出邊界才動，動的時候仍是平滑 panTo（非瞬移）
-    const viewport = map.getBounds()
-    if (viewport) {
-      const ne = viewport.getNorthEast()
-      const sw = viewport.getSouthWest()
-      const padLat = (ne.lat() - sw.lat()) * 0.15
-      const padLng = (ne.lng() - sw.lng()) * 0.15
-      const insideCenter =
-        lat > sw.lat() + padLat && lat < ne.lat() - padLat && lng > sw.lng() + padLng && lng < ne.lng() - padLng
-      if (insideCenter) return
+    if (justFittedRef.current) {
+      justFittedRef.current = false
+      return
     }
+    // 邊緣閘門（純函式抽到 cameraGeometry.ts 方便單元測試，含跨 180 度經線的 M-1 修復）：點還在
+    // 目前視窗中央 70% 區域內就不動鏡頭，避免每個取樣點都 panTo 一次造成掃視感；真的要出邊界才動，
+    // 動的時候仍是平滑 panTo（非瞬移）
+    const rawBounds = map.getBounds()
+    const viewport = rawBounds
+      ? {
+          ne: { lat: rawBounds.getNorthEast().lat(), lng: rawBounds.getNorthEast().lng() },
+          sw: { lat: rawBounds.getSouthWest().lat(), lng: rawBounds.getSouthWest().lng() },
+        }
+      : null
+    if (!shouldPanCamera({ lat, lng }, viewport)) return
     map.panTo({ lat, lng })
   }, [map, active, lat, lng])
   return null

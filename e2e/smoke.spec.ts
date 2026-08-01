@@ -1,11 +1,19 @@
 import { test, expect } from '@playwright/test'
 import { createClient } from '@supabase/supabase-js'
 
+// 護欄（critic 審查 H-2，Task 7 隨手補上）：afterAll 的 listUsers 會翻頁掃描整個 auth.users 表
+// 並刪除符合前綴的帳號——只允許對本地 Supabase 執行，避免 .env.test.local 誤指到雲端時大規模
+// 誤刪正式帳號（比照 src/lib/supabase/invites.test.ts 既有護欄）
+const sbUrlGuard = process.env.SUPABASE_URL
+if (sbUrlGuard && !/^https?:\/\/(127\.0\.0\.1|localhost)([:/]|$)/.test(sbUrlGuard)) {
+  throw new Error('SUPABASE_URL 不是本地位址，拒絕執行 E2E 測試（防止誤打正式環境）')
+}
+
 let createdTripId: string | undefined
 
 // 需要本地 Supabase（供 auth 與資料庫）；email 自動確認為本地設定
 test('註冊 → 自動登入 → 建立行程 → 清單顯示 → 開詳情頁', async ({ page }) => {
-  const email = `e2e-${Math.random().toString(36).slice(2, 8)}@test.local`
+  const email = `e2e-smoke-${Math.random().toString(36).slice(2, 8)}@test.local`
 
   // 地圖金鑰 referrer 未涵蓋目前來源時，Google Maps 只在 console 噴錯、不拋例外，其餘斷言仍會綠燈通過——
   // 全程收集這類訊息，尾端斷言必須為空，避免金鑰設定錯誤被誤判為「測試通過」的假綠燈
@@ -99,7 +107,18 @@ test.afterAll(async () => {
   if (!url || !serviceKey) return
   const admin = createClient(url, serviceKey, { auth: { persistSession: false } })
   if (createdTripId) await admin.from('trips').delete().eq('id', createdTripId)
-  const { data } = await admin.auth.admin.listUsers()
-  const testUsers = data?.users.filter(u => u.email?.endsWith('@test.local') && u.email.startsWith('e2e-')) ?? []
+  // M-5：listUsers 預設每頁 50 筆，只掃第一頁會漏刪；翻頁掃到底才能保證零殘留
+  const perPage = 200
+  let page = 1
+  const allUsers: { id: string; email?: string }[] = []
+  for (;;) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage })
+    if (error || !data) break
+    allUsers.push(...data.users)
+    if (data.users.length < perPage) break
+    page += 1
+  }
+  // 各 e2e 檔案專屬前綴（M-5）：本檔只清自己建立的帳號，不誤刪 invite.spec.ts 等其他檔案的殘留
+  const testUsers = allUsers.filter(u => u.email?.endsWith('@test.local') && u.email.startsWith('e2e-smoke-'))
   for (const u of testUsers) await admin.auth.admin.deleteUser(u.id)
 })

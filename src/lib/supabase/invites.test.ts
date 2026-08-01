@@ -395,4 +395,42 @@ describe.skipIf(!hasEnv)('trip_invites + accept RPC + 權限收緊（需本地 S
       .from('trip_members').select('role').eq('trip_id', tripId).eq('user_id', ownerId!).single()
     expect(data?.role).toBe('owner') // 未被更動
   })
+
+  // ---- 9. 移除成員時撤銷邀請（Task 6 遺留根治：MembersPanel 移除成員時的實際查詢模式） ----
+
+  it('owner 移除成員時可批次撤銷該行程「全部」邀請連結（不論已用未用），critic 審查後改採此設計', async () => {
+    // C-1 根治紀錄：原設計曾用 accepted_by 欄位只鎖「最近一次接受者」，經 critic + PoC 證實
+    // fail-open——同一條邀請連結若先後被多人接受（或 owner 自己重複點擊測試），accepted_by
+    // 會被覆寫，導致被移除的人仍能用手上舊連結重新加入。改採「移除成員時撤銷該行程全部邀請」
+    // ——bearer-token 分享連結（本設計無 email 定向收件人）沒有更精確的辦法能區分「誰的連結」，
+    // 全部撤銷才是誠實、完整、不 fail-open 的根治（owner 事後可重新產生連結）。
+    // 這裡只驗證 DB 層權限：owner 對自己的行程可以不帶 id 條件、只用 trip_id 批次刪除全部邀請列
+    // （既有「owner 可撤銷邀請」policy 是 is_trip_owner(trip_id)，本就支援批次刪除，非新權限）。
+    const { data: invite1, error: inv1Err } = await owner
+      .from('trip_invites').insert({ trip_id: tripId, role: 'editor' }).select('id').single()
+    if (inv1Err) throw inv1Err
+    const { data: invite2, error: inv2Err } = await owner
+      .from('trip_invites').insert({ trip_id: tripId, role: 'viewer' }).select('id').single()
+    if (inv2Err) throw inv2Err
+
+    const kicked = await makeUser('bulk-revoke-kicked')
+    const { data: acceptedTripId, error: acceptErr } = await kicked.client.rpc('accept_trip_invite', { p_token: invite1.id })
+    expect(acceptErr).toBeNull()
+    expect(acceptedTripId).toBe(tripId)
+
+    // MembersPanel.removeMember 的實際查詢：移除 trip_members 列後，批次刪掉該行程剩下的全部邀請
+    await admin.from('trip_members').delete().eq('trip_id', tripId).eq('user_id', kicked.id)
+    const { error: revokeErr } = await owner.from('trip_invites').delete().eq('trip_id', tripId)
+    expect(revokeErr).toBeNull()
+
+    const { data: remaining } = await admin.from('trip_invites').select('id').eq('trip_id', tripId)
+    expect(remaining).toEqual([]) // 全清空——連未被任何人使用過的 invite2 也一併撤銷
+    const { data: invite2StillThere } = await admin.from('trip_invites').select('id').eq('id', invite2.id).maybeSingle()
+    expect(invite2StillThere).toBeNull() // 明確斷言：不是只清了 invite1，未使用過的 invite2 同樣被撤銷
+
+    // 撤銷後即使 kicked 手上還留著舊連結，也不能再用它加入（token 已不存在）
+    const { data: reAccept, error: reAcceptErr } = await kicked.client.rpc('accept_trip_invite', { p_token: invite1.id })
+    expect(reAcceptErr).toBeNull()
+    expect(reAccept).toBeNull()
+  })
 })

@@ -11,6 +11,10 @@ const BASE = {
 }
 
 describe('buildRouteCacheKey', () => {
+  it('鍵含版本前綴（C-1：no_transit_data 語意變更後舊快取需全面 miss，見 migration 20260807000000）', () => {
+    expect(buildRouteCacheKey(BASE).startsWith('v2|')).toBe(true)
+  })
+
   it('同一 30 分鐘桶內的不同出發時間產生相同的鍵', () => {
     const a = buildRouteCacheKey({ ...BASE, departureMs: Date.UTC(2026, 9, 1, 9, 1) })
     const b = buildRouteCacheKey({ ...BASE, departureMs: Date.UTC(2026, 9, 1, 9, 29) })

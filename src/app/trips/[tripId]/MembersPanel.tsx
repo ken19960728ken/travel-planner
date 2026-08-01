@@ -99,21 +99,24 @@ export default function MembersPanel({
     setNotice(null)
     try {
       const supabase = createClient()
+      // 順序不可對調（審查 N-1，PoC 實證）：兩句之間有一個網路往返的窗口，若先刪成員後撤邀請，
+      // 被移除者在窗口內用舊連結 accept 會成功（on conflict 不再命中），第一次踢人必定打空。
+      // 先撤邀請再刪成員則任何交錯都安全：窗口內 accept 時連結已不存在，窗口前 accept 會被隨後的刪除吃掉。
+      // 代價是「撤銷成功但刪成員失敗」時邀請已沒了——良性失敗，owner 重新產生連結即可。
+      const { error: revokeErr } = await supabase.from('trip_invites').delete().eq('trip_id', tripId)
+      if (revokeErr) {
+        setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未移除成員，請稍後再試' })
+        return
+      }
       const { data, error } = await supabase
         .from('trip_members').delete().eq('trip_id', tripId).eq('user_id', userId).select('user_id')
       if (error) {
-        setNotice({ kind: 'error', text: '移除失敗，請稍後再試' })
+        setNotice({ kind: 'error', text: '移除未生效，但該行程邀請連結已全部撤銷，請重新整理後再試（如需再邀請請重新產生）' })
+        router.refresh()
         return
       }
       if (data.length === 0) {
-        setNotice({ kind: 'error', text: '移除未生效，請重新整理後再試' })
-        return
-      }
-      // 撤銷該行程「全部」邀請連結（不只是被移除者用過的那條）——沒有 email 收件人欄位，
-      // 無法精確鎖定單一連結；全部撤銷是唯一不會 fail-open 的作法（見檔頭長註解）
-      const { error: revokeErr } = await supabase.from('trip_invites').delete().eq('trip_id', tripId)
-      if (revokeErr) {
-        setNotice({ kind: 'error', text: '已移除成員，但邀請連結撤銷失敗，請手動撤銷全部邀請' })
+        setNotice({ kind: 'error', text: '移除未生效，但該行程邀請連結已全部撤銷，請重新整理後再試（如需再邀請請重新產生）' })
         router.refresh()
         return
       }

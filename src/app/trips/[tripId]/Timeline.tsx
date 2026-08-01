@@ -146,7 +146,7 @@ export default function Timeline({
                   // editor 維持原本「按下→放開由 endDrag 判斷位移」流程，onClick 讓給 undefined 不重複觸發
                   onClick={onMove ? undefined : () => onSelect(stop.id)}
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
-                  className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
+                  className={`absolute top-1 bottom-1 touch-none truncate rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'
                   }`}
                   style={{ left: `${pct(s + offset)}%`, width: `${Math.max(pct(e + offset) - pct(s + offset), 1.5)}%` }}

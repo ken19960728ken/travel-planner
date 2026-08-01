@@ -75,6 +75,22 @@ function CameraFollow({ target }: { target: { lat: number; lng: number } | null 
   return null
 }
 
+/** 播放中鏡頭跟隨橘點（M-7）：只在播放時作用，不干擾使用者平時手動平移。
+ *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。 */
+function PlaybackCamera({ lat, lng, active }: { lat: number | null; lng: number | null; active: boolean }) {
+  const map = useMap()
+  // 起播時若視野過遠先拉近一次；之後不再動縮放，讓使用者能自行調整
+  useEffect(() => {
+    if (!map || !active) return
+    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
+  }, [map, active])
+  useEffect(() => {
+    if (!map || !active || lat === null || lng === null) return
+    map.panTo({ lat, lng })
+  }, [map, active, lat, lng])
+  return null
+}
+
 /** 「改回自動計算」鈕（審查 M-1：轉存/手動段沒有自動復原路徑，堵死路）——以 UPDATE 轉回 auto 空殼（不是
  *  DELETE）：相鄰時 legSync 判 neverComputed 原地重算，不相鄰時 estimatedCost 已清為 null 走 removeAuto
  *  自然收斂，兩態皆閉環。同一顆元件用在脫離段區塊與正常交通列的 manual 段兩處，行為單一來源保持一致。 */
@@ -404,6 +420,20 @@ export default function TripView({
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
   // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
   const clampedPlayheadMs = playheadMs === null || !win ? null : Math.min(Math.max(playheadMs, win.start), win.end)
+  // 播放位置提到 component body：地圖「我」標記與 PlaybackCamera（M-7 鏡頭跟隨）共用同一份，不各算一次
+  const playheadPos =
+    clampedPlayheadMs === null
+      ? null
+      : interpolatePosition(
+          activeDayStops.map(s => ({
+            id: s.id,
+            lat: s.lat,
+            lng: s.lng,
+            startsAt: new Date(s.starts_at).getTime(),
+            endsAt: new Date(s.ends_at).getTime(),
+          })),
+          clampedPlayheadMs,
+        )
 
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
@@ -682,28 +712,17 @@ export default function TripView({
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>
               )}
-              {clampedPlayheadMs !== null && (() => {
-                const pos = interpolatePosition(
-                  activeDayStops.map(s => ({
-                    id: s.id,
-                    lat: s.lat,
-                    lng: s.lng,
-                    startsAt: new Date(s.starts_at).getTime(),
-                    endsAt: new Date(s.ends_at).getTime(),
-                  })),
-                  clampedPlayheadMs,
-                )
-                return pos ? (
-                  // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
-                  // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
-                  // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
-                  // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
-                  <AdvancedMarker position={pos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
-                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
-                  </AdvancedMarker>
-                ) : null
-              })()}
+              {playheadPos && (
+                // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
+                // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
+                // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
+                // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
+                <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                  <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                </AdvancedMarker>
+              )}
               <CameraFollow target={cameraTarget} />
+              <PlaybackCamera lat={playheadPos?.lat ?? null} lng={playheadPos?.lng ?? null} active={playing} />
             </Map>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-500">

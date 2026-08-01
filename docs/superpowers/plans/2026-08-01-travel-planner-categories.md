@@ -59,7 +59,7 @@ sight     ← Table A「Culture」+「Entertainment and Recreation」+「Natural
             +「Places of Worship」全 section
             + 具名補入 bridge, ski_resort, stadium, arena
             + Table B: place_of_worship, natural_feature, landmark, town_square
-food      ← Table A「Food and Drink」全 section（約 180）+ Table B: food
+food      ← Table A「Food and Drink」全 section（166，實作時核實；本文原寫「約 180」有誤）+ Table B: food
 lodging   ← Table A「Lodging」全 section（18）
 shopping  ← Table A「Shopping」全 section（43）
 other     ← 其餘全部，且為預設值
@@ -84,7 +84,8 @@ Table B 必須納入掃描——官方明載 Table B 型別「may also be return
 `isRatableCategory = (t,p) => RATABLE_CATEGORIES.has(categorize(t,p))`，`RATABLE_CATEGORIES = {food, sight, lodging, shopping}`。
 
 - 既有 4 個測試案例全數維持通過（已逐一比對，無需改測試）
-- **行為擴大**：白名單 15 → 約 250 個 type，幾乎所有餐飲/景點/住宿/購物都會打一次 Enterprise 批次
+- **行為擴大**：白名單 15 → 320 個 type（實作後核實；本文原寫「約 250」有誤），幾乎所有餐飲/景點/住宿/購物都會打一次 Enterprise 批次
+- **同時反向收窄**（審查 M-1）：語義從「陣列任一命中就抓」變成「第一個命中決定分類」。東京駅這類 types 夾帶 `shopping_mall` 的複合地點舊版會誤抓、新版歸 transport 不抓——方向是對的（舊註解本就寫「車站一律不抓」），使用者仍可手動按「查看評分」
 - **量化承擔**：只在預覽卡掛載時觸發、一次搜尋最多一次、`placeDetailCache` 同分頁去重 → 單次規劃 session 數十次 vs 免費額度 1,000/月。**明確接受**，決策寫進 `placePreview.ts` 註解（取代現有「車站/機場一律不主動抓」那段，避免註解與程式碼說法不一致）
 
 ### D3 — 檔案分層

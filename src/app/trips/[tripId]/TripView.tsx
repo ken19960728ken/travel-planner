@@ -16,6 +16,7 @@ import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText } from './legUi'
+import type { Candidate } from './CandidatesPanel'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -228,6 +229,9 @@ export default function TripView({
   legs: Leg[]
   /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
   canEdit: boolean
+  /** Plan 6 Task 5：CandidatesPanel 整合任務（Task 6）的前置型別宣告，本檔尚未使用 */
+  candidates: Candidate[]
+  candidatesError?: boolean
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)

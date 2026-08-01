@@ -385,6 +385,32 @@ describe.skipIf(!hasEnv)('trip_invites + accept RPC + 權限收緊（需本地 S
     expect(afterUpgrade?.role).toBe('editor')
   })
 
+  it('降級成員時撤銷全部邀請，被降級者無法用舊 editor 連結升回去（審查 I-1 迴歸鎖）', async () => {
+    // 邀請連結是 bearer token：被降級者可「自行退出 → 用舊 editor 連結重新加入」把自己升回 editor。
+    // MembersPanel.toggleRole 先撤銷該行程全部邀請再改角色，這裡鎖住 DB 層的可行性前提。
+    const { data: inv } = await owner
+      .from('trip_invites')
+      .insert({ trip_id: tripId, role: 'editor', expires_at: new Date(Date.now() + 3 * 24 * 3600_000).toISOString() })
+      .select('id').single()
+    expect(inv?.id).toBeTruthy()
+
+    // toggleRole 的第一步：撤銷該行程全部邀請
+    const { error: revokeErr } = await owner.from('trip_invites').delete().eq('trip_id', tripId)
+    expect(revokeErr).toBeNull()
+
+    // 被降級者退出後拿舊連結重來 → RPC 找不到邀請，回 null，不會重新入團
+    await admin.from('trip_members').delete().eq('trip_id', tripId).eq('user_id', editorId!)
+    const { data: accepted, error: acceptErr } = await editor.rpc('accept_trip_invite', { p_token: inv!.id })
+    expect(acceptErr).toBeNull()
+    expect(accepted).toBeNull()
+    const { data: rows } = await admin
+      .from('trip_members').select('role').eq('trip_id', tripId).eq('user_id', editorId!)
+    expect(rows?.length ?? 0).toBe(0)
+
+    // 還原：後續測試仍預期 editor 是成員
+    await admin.from('trip_members').insert({ trip_id: tripId, user_id: editorId!, role: 'editor' })
+  })
+
   it('owner 改自己的 role → 被拒（USING 排除自己這列，0 列受影響、角色不變）', async () => {
     // with check 的 user_id <> auth.uid() 是 USING 子句同時具備的條件：owner 對自己這列在
     // RLS 下「根本不可見於此 UPDATE」，因此不是 WITH CHECK 違規（無 42501），而是靜默 0 列更新

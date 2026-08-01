@@ -73,18 +73,24 @@ export default function MembersPanel({
     setNotice(null)
     try {
       const supabase = createClient()
+      // 撤銷邀請必須先於改角色（審查 I-1，PoC 實證）：邀請連結是 bearer token，只要該行程還有任何一條
+      // 未過期的 editor 邀請，被降級者可以「自行退出 → 用舊連結重新加入」把自己升回 editor，
+      // owner 的降級形同無效。與 removeMember 同一前提、同一順序理由（先撤銷再改，任何交錯都安全）。
+      const { error: revokeErr } = await supabase.from('trip_invites').delete().eq('trip_id', tripId)
+      if (revokeErr) {
+        setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未調整角色，請稍後再試' })
+        return
+      }
       const { data, error } = await supabase
         .from('trip_members').update({ role: nextRole }).eq('trip_id', tripId).eq('user_id', userId).select('user_id')
-      if (error) {
-        setNotice({ kind: 'error', text: '角色調整失敗，請稍後再試' })
-        return
-      }
-      if (data.length === 0) {
+      if (error || data.length === 0) {
         // RLS USING 排除時 error 為 null 但 0 列受影響（比照 invites.test.ts 記載的既有語義）——
         // 不能把這種靜默失敗顯示成成功
-        setNotice({ kind: 'error', text: '角色調整未生效，請重新整理後再試' })
+        setNotice({ kind: 'error', text: '角色調整未生效，但該行程邀請連結已全部撤銷，請重新整理後再試（如需再邀請請重新產生）' })
+        router.refresh()
         return
       }
+      setNotice({ kind: 'success', text: '已調整角色 ✓（該行程所有邀請連結已一併撤銷，如需再邀請請重新產生）' })
       router.refresh()
     } finally {
       busyRef.current = false

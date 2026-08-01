@@ -73,8 +73,8 @@ describe('parseComputeRoutesResponse', () => {
   })
 })
 
-describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit steps 偵測）', () => {
-  it('transit 回應含至少一個 TRANSIT step → ok（正常大眾運輸路線，紐約對照組）', () => {
+describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit steps 三態偵測，I-1/I-2）', () => {
+  it('transit 回應含至少一個 TRANSIT step → ok（正常大眾運輸路線，台北實測對照組）', () => {
     const json = {
       routes: [{
         duration: '1800s',
@@ -85,16 +85,38 @@ describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit s
       { ok: true, durationMinutes: 30, distanceMeters: null, polyline: null },
     )
   })
-  it('transit 回應全是 WALK step（無 TRANSIT）→ no_transit_data（福岡實測：Google 回純步行路線）', () => {
-    const json = { routes: [{ duration: '2074s', legs: [{ steps: [{ travelMode: 'WALK' }] }] }] }
-    expect(parseComputeRoutesResponse(json, 'transit')).toEqual({ ok: false, reason: 'no_transit_data' })
-  })
-  it('transit 回應缺少 legs/steps（無資料可判斷）→ 同樣視為 no_transit_data，不誤把步行時長當大眾運輸', () => {
-    expect(parseComputeRoutesResponse({ routes: [{ duration: '600s' }] }, 'transit')).toEqual(
-      { ok: false, reason: 'no_transit_data' },
+  it('transit 回應全是 WALK step（無 TRANSIT）→ no_transit_data 且保留步行時長/距離/polyline（I-2 方案 a，福岡實測）', () => {
+    const json = {
+      routes: [{
+        duration: '2074s', distanceMeters: 2361, polyline: { encodedPolyline: 'walk-only' },
+        legs: [{ steps: [{ travelMode: 'WALK' }] }],
+      }],
+    }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual(
+      { ok: false, reason: 'no_transit_data', durationMinutes: 35, distanceMeters: 2361, polyline: 'walk-only' },
     )
   })
-  it('transit 空 routes 仍維持 no_route（不被 no_transit_data 取代既有語意）', () => {
+  it('transit 回應多個 leg 中至少一個帶 steps 且無 TRANSIT（部分 leg 缺 steps 陣列）→ 仍視為 walk_only', () => {
+    const json = {
+      routes: [{
+        duration: '600s',
+        legs: [{ steps: [{ travelMode: 'WALK' }] }, { /* 無 steps 欄位 */ }],
+      }],
+    }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual(
+      { ok: false, reason: 'no_transit_data', durationMinutes: 10, distanceMeters: null, polyline: null },
+    )
+  })
+  it('transit 回應缺少 legs 欄位（無資料可判斷）→ bad_response（I-1：不可斷言 no_transit_data，留 pending 自動重試）', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '600s' }] }, 'transit')).toEqual(
+      { ok: false, reason: 'bad_response' },
+    )
+  })
+  it('transit 回應 legs 為陣列但所有 leg 都沒有 steps 陣列 → 同樣視為 bad_response（unknown）', () => {
+    const json = { routes: [{ duration: '600s', legs: [{}, { steps: 'not-an-array' }] }] }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual({ ok: false, reason: 'bad_response' })
+  })
+  it('transit 空 routes 仍維持 no_route（不被 no_transit_data/bad_response 取代既有語意）', () => {
     expect(parseComputeRoutesResponse({ routes: [] }, 'transit')).toEqual({ ok: false, reason: 'no_route' })
   })
   it('walking 模式全是 WALK step 不誤判（步行偵測僅限 transit 請求，WALK 模式本就該是純步行）', () => {
@@ -103,7 +125,7 @@ describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit s
       { ok: true, durationMinutes: 10, distanceMeters: null, polyline: null },
     )
   })
-  it('driving 模式不受步行偵測影響（即使沒有 legs 欄位也照常判 ok）', () => {
+  it('driving 模式不受 steps 偵測影響（即使沒有 legs 欄位也照常判 ok，不會落入 bad_response）', () => {
     expect(parseComputeRoutesResponse({ routes: [{ duration: '600s' }] }, 'driving')).toEqual(
       { ok: true, durationMinutes: 10, distanceMeters: null, polyline: null },
     )

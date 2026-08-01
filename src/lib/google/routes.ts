@@ -64,17 +64,27 @@ export function buildComputeRoutesRequest(q: RouteQuery, apiKey: string): Comput
 
 export type ComputedRoute =
   | { ok: true; durationMinutes: number; distanceMeters: number | null; polyline: string | null }
-  | { ok: false; reason: 'no_route' | 'bad_response' | 'no_transit_data' }
+  | { ok: false; reason: 'no_route' | 'bad_response' }
+  // I-2 方案 (a)：無大眾運輸資料但 Google 仍回傳純步行路線時，保留步行時長/距離/polyline
+  // （衝突偵測需要真實時長）；detail 哨兵另記在 sync 端，語意上這是步行估算而非大眾運輸班次。
+  | { ok: false; reason: 'no_transit_data'; durationMinutes: number; distanceMeters: number | null; polyline: string | null }
 
-/** routes[0] 的 steps 是否含至少一個 TRANSIT step（日本大眾運輸 fallback 偵測，見 TRANSIT_FIELD_MASK 註解）。
- *  legs/steps 缺失（欄位未如預期回傳）視為「無法證明有大眾運輸路線」，同樣判 false——寧可保守也不誤把
- *  純步行時長掛上大眾運輸標籤。 */
-function hasTransitStep(route: { legs?: unknown }): boolean {
-  const legs = Array.isArray(route.legs) ? route.legs : []
-  return legs.some(leg =>
-    typeof leg === 'object' && leg !== null && Array.isArray((leg as { steps?: unknown }).steps) &&
-    (leg as { steps: unknown[] }).steps.some(step =>
-      typeof step === 'object' && step !== null && (step as { travelMode?: unknown }).travelMode === 'TRANSIT'))
+type TransitStepState = 'has_transit' | 'walk_only' | 'unknown'
+
+/** routes[0] 的 steps 資料完整性與 TRANSIT 含量三態判斷（I-1，日本大眾運輸 fallback 偵測）：
+ *  - unknown：legs 不是陣列，或所有 leg 都沒有 steps 陣列——看不到任何有效 step 資料，不能斷言
+ *    「這是純步行路線」，交由呼叫端當 bad_response 處理（不快取、留 pending、自動重試），避免誤判
+ *    掉一條實際存在但欄位未如預期回傳的大眾運輸路線。
+ *  - has_transit／walk_only：確實看到至少一個 leg 帶 steps 陣列，資料足以下結論才回傳這兩種。 */
+function transitStepState(route: { legs?: unknown }): TransitStepState {
+  const legs = Array.isArray(route.legs) ? route.legs : null
+  if (!legs) return 'unknown'
+  const legsWithSteps = legs.filter((leg): leg is { steps: unknown[] } =>
+    typeof leg === 'object' && leg !== null && Array.isArray((leg as { steps?: unknown }).steps))
+  if (legsWithSteps.length === 0) return 'unknown'
+  const hasTransit = legsWithSteps.some(leg =>
+    leg.steps.some(step => typeof step === 'object' && step !== null && (step as { travelMode?: unknown }).travelMode === 'TRANSIT'))
+  return hasTransit ? 'has_transit' : 'walk_only'
 }
 
 /** 解析 computeRoutes 回應（純函式）。routes 為空 = 查無路線（官方行為，非 404）。
@@ -95,13 +105,14 @@ export function parseComputeRoutesResponse(json: unknown, mode: RouteQuery['mode
   // M-4：改回 no_route（穩定結論可快取）——bad_response 在 sync 端點被視為暫時性異常不進 route_cache，
   // 會讓這種畸形回應每次 sync 都重打 Google；異常值本身是穩定的（同一段路線不會忽大忽小），值得快取
   if (durationMinutes > MAX_DURATION_MINUTES) return { ok: false, reason: 'no_route' }
-  // 日本大眾運輸 fallback：transit 請求但 routes[0] 沒有任何 TRANSIT step，代表 Google 退化成純步行
-  // 路線（或該地區不支援）——duration 誠實不寫入 duration_minutes，避免掛著「大眾運輸」標籤誤導使用者
-  if (mode === 'transit' && !hasTransitStep(route)) return { ok: false, reason: 'no_transit_data' }
-  return {
-    ok: true,
-    durationMinutes,
-    distanceMeters: typeof route.distanceMeters === 'number' ? route.distanceMeters : null,
-    polyline: typeof route.polyline?.encodedPolyline === 'string' ? route.polyline.encodedPolyline : null,
+
+  const distanceMeters = typeof route.distanceMeters === 'number' ? route.distanceMeters : null
+  const polyline = typeof route.polyline?.encodedPolyline === 'string' ? route.polyline.encodedPolyline : null
+
+  if (mode === 'transit') {
+    const state = transitStepState(route)
+    if (state === 'unknown') return { ok: false, reason: 'bad_response' }
+    if (state === 'walk_only') return { ok: false, reason: 'no_transit_data', durationMinutes, distanceMeters, polyline }
   }
+  return { ok: true, durationMinutes, distanceMeters, polyline }
 }

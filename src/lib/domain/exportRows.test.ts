@@ -70,12 +70,12 @@ describe('buildItineraryRows', () => {
     expect(rows.find(r => r.kind === 'leg')).toMatchObject({ durationText: '查無路線' })
   })
 
-  it('duration_minutes null 且 detail.no_transit_data 時顯示「無大眾運輸資料」（日本大眾運輸 fallback）', () => {
+  it('detail.no_transit_data 時顯示「無大眾運輸資料（步行約 N 分）」（I-2 方案 a：保留步行時長）', () => {
     const a = mkStop({ id: 'A', startsAt: Date.UTC(2026, 7, 1, 0, 0), endsAt: Date.UTC(2026, 7, 1, 1, 0) })
     const b = mkStop({ id: 'B', startsAt: Date.UTC(2026, 7, 1, 3, 0), endsAt: Date.UTC(2026, 7, 1, 4, 0) })
-    const leg = mkLeg({ id: 'L', from_stop_id: 'A', to_stop_id: 'B', duration_minutes: null, detail: { no_transit_data: true } })
+    const leg = mkLeg({ id: 'L', from_stop_id: 'A', to_stop_id: 'B', duration_minutes: 35, detail: { no_transit_data: true } })
     const rows = buildItineraryRows(trip(), [a, b], [leg])
-    expect(rows.find(r => r.kind === 'leg')).toMatchObject({ durationText: '無大眾運輸資料' })
+    expect(rows.find(r => r.kind === 'leg')).toMatchObject({ durationText: '無大眾運輸資料（步行約 35 分）' })
   })
 
   it('脫離配對的 leg 列在該日末尾標 detached: true（Task 1 轉存後仍存在）', () => {

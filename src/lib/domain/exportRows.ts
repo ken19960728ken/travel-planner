@@ -2,6 +2,7 @@ import { adjacentPairs } from './legSync'
 import { tripDayKeys, filterDayStops } from './days'
 import { formatLocalTime, localDateKey } from './tz'
 import { totalEstimatedCost } from './cost'
+import { legDurationText } from './legStatus'
 
 /** exportRows 屬 domain 層，輸入型別自帶最小欄位（不 import app 層的 TripView/legUi）。 */
 export type ExportTrip = { start_date: string; end_date: string }
@@ -35,22 +36,6 @@ export type ItineraryRow =
 
 const MODE_LABEL: Record<ExportLegMode, string> = {
   transit: '大眾運輸', walking: '步行', driving: '開車', flight: '航班', custom: '自訂',
-}
-
-function isNoRoute(leg: ExportLeg): boolean {
-  return typeof leg.detail === 'object' && leg.detail !== null && (leg.detail as { no_route?: boolean }).no_route === true
-}
-
-function isNoTransitData(leg: ExportLeg): boolean {
-  return typeof leg.detail === 'object' && leg.detail !== null &&
-    (leg.detail as { no_transit_data?: boolean }).no_transit_data === true
-}
-
-/** 沿 legUi.legDurationText 的文案邏輯（duration null 時區分「待計算」「查無路線」「無大眾運輸資料」）。 */
-function legDurationText(leg: ExportLeg): string {
-  if (leg.duration_minutes !== null) return `${leg.duration_minutes} 分`
-  if (isNoTransitData(leg)) return '無大眾運輸資料'
-  return isNoRoute(leg) ? '查無路線' : '待計算'
 }
 
 /** 純函式：把 trip/stops/legs 轉成 xlsx 匯出用的行別陣列。

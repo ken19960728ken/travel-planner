@@ -24,6 +24,9 @@ export type Trip = {
   start_date: string
   end_date: string
   currency: string
+  /** Task 8：分享頁重用此型別，但資料來自 get_shared_trip RPC 白名單，不含 share_token
+   *  （白名單本就刻意不收，撤銷憑證不能送給匿名訪客）——宣告為可選讓兩種資料來源都能通過型別檢查 */
+  share_token?: string
 }
 
 export type Stop = {
@@ -221,6 +224,7 @@ export default function TripView({
   stopsError,
   legs,
   canEdit,
+  autoPlay = false,
 }: {
   trip: Trip
   stops: Stop[]
@@ -228,6 +232,9 @@ export default function TripView({
   legs: Leg[]
   /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
   canEdit: boolean
+  /** Task 8（spec §5「分享連結預設進播放模式」）：分享頁掛載時直接進播放模式。惰性 useState 初始化
+   *  （避免 set-state-in-effect lint——本專案已兩度踩過），不開額外 effect */
+  autoPlay?: boolean
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -236,8 +243,16 @@ export default function TripView({
   const [busy, setBusy] = useState(false)
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
   const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
-  const [playheadMs, setPlayheadMs] = useState<number | null>(null)
-  const [playing, setPlaying] = useState(false)
+  // autoPlay 初始值以第一天視窗推導：視窗不存在（行程還沒有停留點）則保持暫停，播放頭留 null
+  const [playheadMs, setPlayheadMs] = useState<number | null>(() => {
+    if (!autoPlay) return null
+    const win = dayWindow(filterDayStops(stops, tripDayKeys(trip.start_date, trip.end_date)[0]))
+    return win ? win.start : null
+  })
+  const [playing, setPlaying] = useState(() => {
+    if (!autoPlay) return false
+    return dayWindow(filterDayStops(stops, tripDayKeys(trip.start_date, trip.end_date)[0])) !== null
+  })
   const busyRef = useRef(false)
   const lastInsertedEndRef = useRef(0)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)

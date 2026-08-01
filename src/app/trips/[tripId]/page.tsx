@@ -20,7 +20,7 @@ export default async function TripDetailPage({
 
   const { data: trip, error: tripError } = await supabase
     .from('trips')
-    .select('id, title, start_date, end_date, currency')
+    .select('id, title, start_date, end_date, currency, share_token')
     .eq('id', tripId)
     .maybeSingle()
   if (tripError) {
@@ -110,6 +110,7 @@ export default async function TripDetailPage({
           isOwner={isOwner}
           members={members}
           invites={invites}
+          shareToken={trip.share_token}
           loadError={membersPanelLoadError}
         />
       </header>

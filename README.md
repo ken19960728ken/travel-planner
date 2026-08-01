@@ -81,6 +81,13 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 
 正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、migration 純新增免 down、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
 
+`20260803000000_invites_and_grants.sql`（trips 欄位級 GRANT 收緊、邀請 RPC）上線後若需緊急回滾，執行以下兩條 SQL（純還原權限，不刪表/不刪資料）：
+
+```sql
+grant update on public.trips to authenticated;                                    -- 還原欄位收緊
+revoke execute on function public.accept_trip_invite(uuid) from authenticated;    -- 應急停用邀請
+```
+
 ## 已知限制
 
 - 地圖 `mapId` 目前為開發用 `DEMO_MAP_ID`，部署前需在 GCP 建立正式 Map ID 並替換
@@ -98,3 +105,4 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 - flight／custom 起訖若落在時區的日光節約時間（DST）邊界、剛好是當地「不存在的時刻」（例如春進時鐘跳過的那一小時），底層 `date-fns-tz` 會靜默位移到鄰近有效時刻，尚無專屬測試覆蓋
 - 脫離行程順序的交通段收在側欄專屬區塊（資料保留、可刪除）；恢復相鄰後保留為手動段，可一鍵改回自動計算（花費將清除）
 - 多位協作者同時開啟同一行程會各自觸發交通段同步；快取命中與資料庫 unique 約束衝突的靜默略過吸收了多數重複，但仍存在重複呼叫 Google 的窗口
+- 邀請連結（`trip_invites`）多次可用直到過期（預設 7 天、上限 30 天）或 owner 手動撤銷；owner 移除某成員後，若該成員手上仍有未過期的邀請連結，可直接重新加入——移除操作目前不會連帶失效既有邀請，屬已知設計缺口，留待 Task 7 成員面板一併處理（db-expert/critic 審查共識）

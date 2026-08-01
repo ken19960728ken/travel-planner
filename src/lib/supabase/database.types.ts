@@ -217,6 +217,41 @@ export type Database = {
           },
         ]
       }
+      trip_invites: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          expires_at: string
+          id: string
+          role: string
+          trip_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          role: string
+          trip_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          role?: string
+          trip_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trip_invites_trip_id_fkey"
+            columns: ["trip_id"]
+            isOneToOne: false
+            referencedRelation: "trips"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       trip_members: {
         Row: {
           joined_at: string
@@ -322,6 +357,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      accept_trip_invite: { Args: { p_token: string }; Returns: string }
       cascade_shift_stops: {
         Args: {
           p_changed_stop_id: string
@@ -334,6 +370,7 @@ export type Database = {
       is_trip_member: { Args: { p_trip_id: string }; Returns: boolean }
       is_trip_owner: { Args: { p_trip_id: string }; Returns: boolean }
       my_trip_ids: { Args: never; Returns: string[] }
+      regenerate_share_token: { Args: { p_trip_id: string }; Returns: string }
     }
     Enums: {
       [_ in never]: never

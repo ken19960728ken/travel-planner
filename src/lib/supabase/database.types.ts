@@ -217,6 +217,47 @@ export type Database = {
           },
         ]
       }
+      trip_candidates: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          id: string
+          lat: number
+          lng: number
+          name: string
+          place_id: string
+          trip_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lat: number
+          lng: number
+          name: string
+          place_id: string
+          trip_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lat?: number
+          lng?: number
+          name?: string
+          place_id?: string
+          trip_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trip_candidates_trip_id_fkey"
+            columns: ["trip_id"]
+            isOneToOne: false
+            referencedRelation: "trips"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       trip_invites: {
         Row: {
           created_at: string

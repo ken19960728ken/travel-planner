@@ -28,5 +28,5 @@ export function legDurationText(leg: LegStatusInput): string {
   if (leg.duration_minutes !== null) {
     return isNoTransitData(leg) ? `無大眾運輸資料（步行約 ${leg.duration_minutes} 分）` : `${leg.duration_minutes} 分`
   }
-  return isNoRoute(leg) ? '查無路線' : '待計算'
+  return isNoRoute(leg) ? '查無路線' : isNoTransitData(leg) ? '無大眾運輸資料' : '待計算'
 }

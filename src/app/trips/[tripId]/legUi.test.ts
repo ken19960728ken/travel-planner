@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { legDurationShortText } from './legUi'
+import { legDurationShortText, legDurationText } from './legUi'
 import type { Leg } from './TripView'
 
 // isNoRoute/isNoTransitData/legDurationText 的完整行為測試已下沉至
@@ -28,5 +28,15 @@ describe('legDurationShortText（M-1：Timeline 連接條窄空間短標籤）',
   })
   it('duration 為 null 且 detail 為 null 時顯示「待計算」', () => {
     expect(legDurationShortText(mkLeg({ duration_minutes: null, detail: null }))).toBe('待計算')
+  })
+})
+
+describe('legDurationText 與 legDurationShortText 語意一致性（m-8：N-1 單一來源不該讓兩處文案漂移）', () => {
+  it('duration=null + no_transit_data：兩者都要指出「無大眾運輸資料」，都不能落回「待計算」', () => {
+    const leg = mkLeg({ duration_minutes: null, detail: { no_transit_data: true } })
+    expect(legDurationText(leg)).not.toBe('待計算')
+    expect(legDurationShortText(leg)).not.toBe('待計算')
+    expect(legDurationText(leg)).toBe('無大眾運輸資料')
+    expect(legDurationShortText(leg)).toBe('無班次資料')
   })
 })

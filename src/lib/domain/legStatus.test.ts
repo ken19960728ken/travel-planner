@@ -20,6 +20,9 @@ describe('legDurationText', () => {
       '無大眾運輸資料（步行約 35 分）',
     )
   })
+  it('duration 為 null 且 detail.no_transit_data 時顯示「無大眾運輸資料」，不落回「待計算」（m-8：N-1 抽取遺漏的分支）', () => {
+    expect(legDurationText(mkLeg({ duration_minutes: null, detail: { no_transit_data: true } }))).toBe('無大眾運輸資料')
+  })
 })
 
 describe('legDurationText 優先序（M-3：detail 同時髒污含 no_route 與 no_transit_data 的邊界情境）', () => {

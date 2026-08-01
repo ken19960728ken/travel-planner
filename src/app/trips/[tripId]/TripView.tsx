@@ -15,7 +15,7 @@ import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
 import { buildDayView } from './dayView'
-import { MODE_ICON, legDurationText } from './legUi'
+import { MODE_ICON, legDurationText, isNoTransitData } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -678,7 +678,12 @@ export default function TripView({
                           // gapMinutes < requiredMinutes 恆成立（detectConflicts 的判定條件），四捨五入可能把
                           // 44.6 分進位成 45 分，顯示出「45 分＜45 分」自相矛盾的句子；改用無條件捨去，
                           // floor(gap) < requiredMinutes 對整數 requiredMinutes 永遠成立，不等式恆自洽
-                          ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分`}
+                          // M-3：isNoTransitData 段的 requiredMinutes 是步行估算而非大眾運輸班次時間，
+                          // 警示文案需明確標註，否則像九州這種 Routes API 不支援大眾運輸的地區會整條
+                          // 時間軸誤報趕不上
+                          ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分${
+                            isNoTransitData(leg) ? '（步行估算）' : ''
+                          }`}
                       </button>
                       {canEdit && leg.source === 'manual' && (
                         <span className="ml-1">

@@ -69,6 +69,15 @@ describe('defaultSlotForDay', () => {
     })
   })
 
+  it('pending.endsAt 為 0 時視同無墊底（守衛內化，避免算出 1970 年時段）', () => {
+    const targetDay = '2026-08-05'
+    const expectedStart = wallInputToUtcMs(`${targetDay}T09:00`, 'Asia/Taipei')
+    expect(defaultSlotForDay([], targetDay, { day: targetDay, endsAt: 0 }, 'Asia/Taipei')).toEqual({
+      startsAt: expectedStart,
+      endsAt: expectedStart + HOUR,
+    })
+  })
+
   it('pending.day === targetDay 且晚於當日所有停留點 → 以 pending 為基準', () => {
     const targetDay = '2026-08-05'
     const stops = [daySlotStop('2026-08-05T01:00:00.000Z', '2026-08-05T03:00:00.000Z', 'Asia/Taipei')]

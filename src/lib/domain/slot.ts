@@ -38,7 +38,10 @@ export function defaultSlotForDay(
       endsAt: new Date(s.ends_at).getTime(),
       locked: s.locked,
     })),
-    ...(pending && pending.day === targetDay
+    // endsAt > 0 是內化的不變式（原本在 TripView 是 `lastInsertedEndRef.current > 0`）：
+    // 若接線端傳進 endsAt=0，空日的 daySchedule 會變成非空，nextDefaultSlot 改以 lastEnd=0 起算，
+    // 算出 1970-01-01T00:30Z 而非當地 09:00。守衛留在呼叫端會在接線時流失，故收進函式內。
+    ...(pending && pending.endsAt > 0 && pending.day === targetDay
       ? [{ id: '__pending__', startsAt: pending.endsAt - 1, endsAt: pending.endsAt, locked: false }]
       : []),
   ]

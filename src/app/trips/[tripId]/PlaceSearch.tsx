@@ -3,11 +3,13 @@
 import { useEffect, useRef } from 'react'
 import { useMap, useMapsLibrary } from '@vis.gl/react-google-maps'
 
-type PlacePick = {
+// 搜尋選中先預覽不寫入 DB：帶出 place 物件本身（而非拆散成純資料），讓 PlacePreviewCard
+// 需要時能對同一個 Place 實例再 fetchFields 一次抓 Enterprise 批次（評分/營業時間等）
+export type PlacePick = {
+  place: google.maps.places.Place
   name: string
   lat: number
   lng: number
-  placeId: string
 }
 
 export default function PlaceSearch({
@@ -45,17 +47,19 @@ export default function PlaceSearch({
     const handler = async (event: google.maps.places.PlacePredictionSelectEvent) => {
       const place = event.placePrediction.toPlace()
       try {
-        await place.fetchFields({ fields: ['displayName', 'location', 'id'] })
+        // types/primaryType 與 displayName 同層或更低（Pro），不升計費級別；供 PlacePreviewCard
+        // 判斷評分白名單。rating/priceLevel 等 Enterprise 欄位刻意不在此抓，留給預覽卡片視情況再抓
+        await place.fetchFields({ fields: ['displayName', 'location', 'id', 'types', 'primaryType'] })
       } catch {
         onErrorRef.current?.('地點資料取得失敗，請再試一次')
         return
       }
       if (!place.location) return
       onPickRef.current({
+        place,
         name: place.displayName ?? '未命名地點',
         lat: place.location.lat(),
         lng: place.location.lng(),
-        placeId: place.id,
       })
       el.value = '' // 連續加入多個景點：選取後清空輸入框
     }

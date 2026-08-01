@@ -334,16 +334,17 @@ commit;
 
 **Files:** Create `src/app/trips/[tripId]/MembersPanel.tsx`、`src/app/invite/[token]/page.tsx`、`e2e/invite.spec.ts`；Modify `page.tsx`、`e2e/smoke.spec.ts`
 
-- [ ] **Step 1: 資料** — page.tsx 讀成員與邀請（**兩段查詢**：trip_members 無 profiles 直接 FK，PostgREST 嵌入 join 不可用——先取 members 再 `profiles.select('id, display_name').in('id', userIds)`；spec §8 updated_by 孤兒語義：查無 profile 顯示「已離開的成員」）；owner 時另讀 trip_invites。傳入 MembersPanel。
-- [ ] **Step 2: MembersPanel** — header「成員」鈕展開面板（client）：
+- [x] **Step 1: 資料** — page.tsx 讀成員與邀請（**兩段查詢**：trip_members 無 profiles 直接 FK，PostgREST 嵌入 join 不可用——先取 members 再 `profiles.select('id, display_name').in('id', userIds)`；spec §8 updated_by 孤兒語義：查無 profile 顯示「已離開的成員」）；owner 時另讀 trip_invites。傳入 MembersPanel。
+- [x] **Step 2: MembersPanel** — header「成員」鈕展開面板（client）：
   - 成員列表：display_name + role 標籤；owner 對**其他**成員顯示角色切換（editor↔viewer，`update trip_members set role`——RLS 已擋自改與 owner 值）與移除鈕（confirm 兩段式）；非 owner 成員顯示「退出行程」（刪自己列 → `router.push('/trips')`）。
   - 邀請管理（owner 限定）：角色選擇（editor/viewer）＋「產生邀請連結」（insert 後 `navigator.clipboard.writeText(`${location.origin}/invite/${id}`)` + 成功提示）；現有邀請列表（角色、剩餘效期、撤銷鈕）。
   - 錯誤處理沿 StopEditor 慣例（notice + busy guard）。
-- [ ] **Step 3: 接受頁** — Create `app/invite/[token]/page.tsx`（**先讀 Next docs 對應章節**；server component）：
+  - **實作附加（Task 6 遺留根治，README 已知限制）**：owner 移除成員時一併撤銷邀請。計畫正文未寫死作法，第一版做法是新增 migration 幫 `trip_invites` 加 `accepted_by` 欄追蹤「最近一次接受者」，`removeMember` 憑此欄位精準撤銷該成員曾用來加入的那一條——**critic 審查（C-1，CRITICAL）以 PoC 證實此設計 fail-open**：邀請連結本無 email 收件人、可被多人重複使用，只要連結被別人（甚至 owner 自己測試）重複點過，`accepted_by` 就會被覆寫，被移除者仍能用手上舊連結重新加入，且 README 反而會誤導 operator「已根治」。改採**移除成員時撤銷該行程「全部」邀請連結**（`removeMember` 刪除 `trip_members` 列後追加 `delete from trip_invites where trip_id=X`，不篩 accepted_by）——沒有更精確的辦法能區分「誰的連結」，全部撤銷才是不會 fail-open 的根治；因此**不需要**新 migration/新欄位，`20260805000000_invite_accepted_by.sql` 已建立又移除（含 DB 回滾）。`invites.test.ts` 補 1 案例鎖住「批次撤銷含未使用過的邀請」語義。
+- [x] **Step 3: 接受頁** — Create `app/invite/[token]/page.tsx`（**先讀 Next docs 對應章節**；server component）：
   - **未登入 → 降級方案定案（審查 M-6）**：顯示「請先登入，登入後**重新開啟這個邀請連結**」＋登入頁連結。**不做 `next` 回跳參數**——login 頁與 OAuth callback 的 redirect 白名單改動屬回國後範圍（記入 Task 10 Step 4 與 README 已知限制）。
-  - 已登入 → 顯示「你被邀請加入行程」＋「加入」鈕（client 子元件；**必須是使用者主動點擊才呼叫 RPC**——link prefetch/爬蟲絕不能造成入團副作用，這是接受頁不做 GET 自動加入的原因）→ `rpc('accept_trip_invite')` → 回 trip_id 則 `router.push(/trips/${tripId})`；回 null 顯示「邀請連結無效或已過期」。token 非 UUID 格式直接顯示無效（不打 RPC）。
+  - 已登入 → 顯示「你被邀請加入行程」＋「加入」鈕（client 子元件；**必須是使用者主動點擊才呼叫 RPC**——link prefetch/爬蟲絕不能造成入團副作用，這是接受頁不做 GET 自動加入的原因）→ `rpc('accept_trip_invite')` → 回 trip_id 則 `router.push(/trips/${tripId})`；回 null 顯示「邀請連結無效或已過期」。token 非 UUID 格式直接顯示無效（不打 RPC；實作把此檢查放在登入檢查**之前**——無效連結不因登入與否而有不同結果，比計畫文字的敘述順序更早短路，行為不變）。
   - metadata：`robots: { index: false }` + **`referrer: 'no-referrer'`**（token 在 URL，不得經 Referer 外洩到外部連結）。
-- [ ] **Step 4: E2E** — Create `e2e/invite.spec.ts`（比照 smoke.spec.ts 的 admin client / 登入 helper）：owner 建行程 → UI 產生 editor 邀請（從 DB 撈 token 組 URL）→ 使用者 B 登入開啟接受頁 → 點加入 → 落在行程頁且可見編輯入口；再驗 viewer 邀請 → B2 進入後無編輯入口（Task 5 的唯讀化斷言）；owner 面板移除 B → B 再開行程頁 404。**測試帳號隔離（審查 M-5）**：每檔專屬 email 前綴——本檔用 `e2e-invite-`、既有 smoke.spec.ts 同步改為 `e2e-smoke-`（Task 8 分享冒煙用 `e2e-share-`）；清理只 filter 自己前綴，且 **listUsers 改為翻頁掃到底**（修既有「只掃第一頁」缺口，spec §8 該條目同步更新）。雙跑零殘留。
+- [x] **Step 4: E2E** — Create `e2e/invite.spec.ts`（比照 smoke.spec.ts 的 admin client / 登入 helper）：owner 建行程 → UI 產生 editor 邀請（從 DB 撈 token 組 URL）→ 使用者 B 登入開啟接受頁 → 點加入 → 落在行程頁且可見編輯入口；再驗 viewer 邀請 → B2 進入後無編輯入口（Task 5 的唯讀化斷言）；owner 面板移除 B → B 再開行程頁 404。**測試帳號隔離（審查 M-5）**：每檔專屬 email 前綴——本檔用 `e2e-invite-`、既有 smoke.spec.ts 同步改為 `e2e-smoke-`（Task 8 分享冒煙用 `e2e-share-`）；清理只 filter 自己前綴，且 **listUsers 改為翻頁掃到底**（修既有「只掃第一頁」缺口，spec §8 該條目同步更新）。雙跑零殘留（已實測兩輪，DB 抽查測試帳號與行程皆歸零）。額外補一條斷言：editor 曾用來加入的邀請在移除後於 DB 消失（Task 6 遺留根治的迴歸鎖）。
 - [ ] **Step 5: 部署檢查點 B** — migration 推雲端（`supabase db push` 既有 kill+verify workaround）→ **push 後權限驗證（審查 M-9）**：SQL editor 執行並斷言——
 
 ```sql

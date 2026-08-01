@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { utcMsToWallInput, wallInputToUtcMs, formatLocalTime, localDateKey } from './tz'
+import { utcMsToWallInput, wallInputToUtcMs, formatLocalTime, localDateKey, localWeekMinute } from './tz'
 
 // 固定用 Asia/Tokyo（UTC+9，無夏令）與 America/New_York（有夏令）——結果與執行機器的時區無關
 describe('tz 轉換', () => {
@@ -25,5 +25,10 @@ describe('tz 轉換', () => {
   it('localDateKey 依當地日期（跨日邊界）', () => {
     // UTC 10/1 16:00 = 東京 10/2 01:00
     expect(localDateKey(Date.UTC(2026, 9, 1, 16, 0), 'Asia/Tokyo')).toBe('2026-10-02')
+  })
+
+  it('localWeekMinute 換算當地週幾與當日分鐘數', () => {
+    // UTC 2026-10-01（週四）16:00 = 東京 2026-10-02（週五）01:00 → day=5, minutes=60
+    expect(localWeekMinute(Date.UTC(2026, 9, 1, 16, 0), 'Asia/Tokyo')).toEqual({ day: 5, minutes: 60 })
   })
 })

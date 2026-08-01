@@ -19,3 +19,9 @@ export function formatLocalTime(ms: number, timeZone: string): string {
 export function localDateKey(ms: number, timeZone: string): string {
   return format(toZonedTime(ms, timeZone), 'yyyy-MM-dd', { timeZone })
 }
+
+/** UTC epoch ms → 當地「週幾＋當日分鐘數」（day 0=週日...6=週六）。搜尋預覽卡片算 isOpenNow 用。 */
+export function localWeekMinute(ms: number, timeZone: string): { day: number; minutes: number } {
+  const zoned = toZonedTime(ms, timeZone)
+  return { day: zoned.getDay(), minutes: zoned.getHours() * 60 + zoned.getMinutes() }
+}

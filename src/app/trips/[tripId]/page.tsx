@@ -31,6 +31,24 @@ export default async function TripDetailPage({
   }
   if (!trip) notFound() // RLS 擋掉的非成員也走這裡，不洩漏行程是否存在
 
+  // Task 5：role 資料流——查無 membership 列（例如帳號刪除語義下的孤兒行程 owner_id 路徑）一律視為唯讀，安全預設。
+  // membership PK 是 (trip_id, user_id)，maybeSingle 不會因多列出錯；error 只可能來自傳輸/RLS 層問題，
+  // 比照 tripError 走整頁錯誤——絕不能把暫時性查詢失敗誤判成「你是 viewer」而靜默藏光所有編輯入口
+  const { data: membership, error: membershipError } = await supabase
+    .from('trip_members')
+    .select('role')
+    .eq('trip_id', tripId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+  if (membershipError) {
+    return (
+      <main className="flex h-screen items-center justify-center text-red-600">
+        讀取失敗，請重新整理再試
+      </main>
+    )
+  }
+  const canEdit = membership?.role === 'owner' || membership?.role === 'editor'
+
   const { data: stops, error: stopsError } = await supabase
     .from('stops')
     .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost')
@@ -52,7 +70,15 @@ export default async function TripDetailPage({
         <Link href="/trips" className="text-sm text-gray-500">← 我的行程</Link>
         <h1 className="text-lg font-bold">{trip.title}</h1>
         <span className="text-sm text-gray-500">{trip.start_date} ~ {trip.end_date}</span>
-        <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} />
+        {!canEdit && (
+          <span
+            className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
+            title="你在此行程的角色為檢視者，無法編輯"
+          >
+            👁 檢視模式
+          </span>
+        )}
+        <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} canEdit={canEdit} />
       </header>
       {stopsError && (
         <p className="border-b p-2 text-sm text-red-600">停留點讀取失敗，請重新整理再試</p>
@@ -60,7 +86,7 @@ export default async function TripDetailPage({
       {legsError && (
         <p className="border-b p-2 text-sm text-red-600">交通段讀取失敗，請重新整理再試</p>
       )}
-      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} legs={(legs ?? []) as Leg[]} />
+      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} legs={(legs ?? []) as Leg[]} canEdit={canEdit} />
     </main>
   )
 }

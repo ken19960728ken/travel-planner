@@ -52,7 +52,9 @@ export default function Timeline({
   const trackRef = useRef<HTMLDivElement>(null)
 
   function beginDrag(e: React.PointerEvent, stopId: string) {
-    if (!win || busy || drag) return // 上層寫入中或已有拖曳進行中，不再開新的一場
+    // Task 5：!onMove 早退（viewer 沒有 onMove）——原本只在 endDrag 檢查，viewer 會看到拖曳預覽卻提交不了，
+    // 半互動狀態比不能拖更困惑，改在拖曳一開始就擋下
+    if (!win || busy || drag || !onMove) return
     e.currentTarget.setPointerCapture(e.pointerId)
     setDrag({ id: stopId, startX: e.clientX, deltaMs: 0, pointerId: e.pointerId })
   }
@@ -139,6 +141,10 @@ export default function Timeline({
                   onPointerUp={endDrag}
                   onPointerCancel={cancelDrag}
                   onLostPointerCapture={cancelDrag} // 指標擷取被瀏覽器/系統手勢強制搶走時（未必觸發 pointercancel），一併釋放拖曳，避免卡死
+                  // viewer（!onMove）：beginDrag 一開始就早退，drag 恆為 null，endDrag 內的 onSelect 永遠到不了——
+                  // 點擊選取會整個死掉（唯讀不是不能看）。補一條不經過拖曳流程的 onClick 出口；
+                  // editor 維持原本「按下→放開由 endDrag 判斷位移」流程，onClick 讓給 undefined 不重複觸發
+                  onClick={onMove ? undefined : () => onSelect(stop.id)}
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
                   className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'
@@ -210,7 +216,9 @@ export default function Timeline({
           </div>
         </>
       ) : (
-        <p className="p-2 text-xs text-gray-500">這一天還沒有行程，切到地圖加入停留點吧</p>
+        <p className="p-2 text-xs text-gray-500">
+          {onMove ? '這一天還沒有行程，切到地圖加入停留點吧' : '這一天還沒有行程'}
+        </p>
       )}
     </div>
   )

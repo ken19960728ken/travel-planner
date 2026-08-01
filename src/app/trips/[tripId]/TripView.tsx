@@ -130,12 +130,14 @@ function RevertToAutoButton({ legId, onChanged }: { legId: string; onChanged: ()
 /** 側欄「已脫離順序的交通段」區塊的一列（Important-2 根治）：配對脫離後仍保留資料，
  *  不提供編輯（脫離段沒有時間基準，編輯無意義），只給刪除與改回自動計算兩個出口。 */
 function DetachedLegRow({
-  leg, fromStop, toStop, currency, onChanged,
+  leg, fromStop, toStop, currency, canEdit, onChanged,
 }: {
   leg: Leg
   fromStop: Stop
   toStop: Stop
   currency: string
+  /** viewer 隱藏刪除／改回自動計算鈕——資料仍可見（唯讀不是不能看），只是不給寫入出口 */
+  canEdit: boolean
   onChanged: () => void
 }) {
   const router = useRouter()
@@ -173,23 +175,25 @@ function DetachedLegRow({
         {leg.estimated_cost !== null && ` · ${currency} ${leg.estimated_cost}`}
       </p>
       <p className="text-amber-700">⚠️ 已脫離行程順序，資料保留</p>
-      <div className="mt-1 flex items-center gap-2">
-        {confirmDelete ? (
-          <>
-            <button type="button" className="rounded bg-red-600 px-2 text-white disabled:opacity-50" disabled={busy} onClick={remove}>
-              確認刪除
+      {canEdit && (
+        <div className="mt-1 flex items-center gap-2">
+          {confirmDelete ? (
+            <>
+              <button type="button" className="rounded bg-red-600 px-2 text-white disabled:opacity-50" disabled={busy} onClick={remove}>
+                確認刪除
+              </button>
+              <button type="button" className="rounded border px-2 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(false)}>
+                取消
+              </button>
+            </>
+          ) : (
+            <button type="button" className="rounded border px-2 text-red-600 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(true)}>
+              刪除
             </button>
-            <button type="button" className="rounded border px-2 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(false)}>
-              取消
-            </button>
-          </>
-        ) : (
-          <button type="button" className="rounded border px-2 text-red-600 disabled:opacity-50" disabled={busy} onClick={() => setConfirmDelete(true)}>
-            刪除
-          </button>
-        )}
-        <RevertToAutoButton legId={leg.id} onChanged={onChanged} />
-      </div>
+          )}
+          <RevertToAutoButton legId={leg.id} onChanged={onChanged} />
+        </div>
+      )}
     </li>
   )
 }
@@ -199,11 +203,14 @@ export default function TripView({
   stops,
   stopsError,
   legs,
+  canEdit,
 }: {
   trip: Trip
   stops: Stop[]
   stopsError?: boolean
   legs: Leg[]
+  /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
+  canEdit: boolean
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -238,22 +245,29 @@ export default function TripView({
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null) // I-3：續跑計時器
   const syncNoticeShownRef = useRef(false) // S-1：連線失敗提示只跳一次，避免每輪續跑都打擾使用者
   useEffect(() => {
-    if (syncedRef.current) return
+    // Task 5：canEdit 為 false（viewer）時直接跳過，且不標記 syncedRef——若使用者在同一分頁內被
+    // 升級為 editor（canEdit 由 false 轉 true 觸發這個 effect 重跑），仍能補上這一次掛載同步；
+    // 已經同步過一次後 syncedRef 才鎖住，不會反覆觸發
+    if (!canEdit || syncedRef.current) return
     syncedRef.current = true
     void syncLegs()
     return () => {
       // I-3：unmount 時清掉排隊中的續跑計時器，避免對已卸載的元件觸發後續 setState
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
     }
-    // 只在掛載時觸發一次；syncLegs 透過 closure 讀最新 props/state，不需要讓這個 effect
-    // 隨依賴重跑（M-5）
+    // syncLegs 透過 closure 讀最新 props/state，不需要讓這個 effect 隨它重跑（M-5）；canEdit 是唯一
+    // 需要主動觀察的依賴
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [canEdit])
 
   // 交通段同步：結構比對 + 自動計算都在 server（金鑰不落 client）。
   // 失敗靜默：外部服務失敗不能阻止編輯（spec §6），下次寫入或重新整理會再試（HTTP 非 2xx 例外，S-1 跳一次提示）。
   // isRetry=true 代表這是 I-3 排程的續跑，不重置回合額度；使用者操作觸發的呼叫一律 isRetry=false（全新額度）。
   async function syncLegs(isRetry = false) {
+    // Task 5（Important-4 根治核心）：viewer 從一開始就不打 sync——DB 的 is_trip_editor 早已擋下寫入
+    // 與這支端點（403），但 client 仍主動觸發就會踩到 S-1「交通段暫時無法計算」的誤導提示；
+    // canEdit 由 server 查 trip_members role 算出，直接在源頭掐掉，掛載 effect 與所有寫入後觸發點天然失效
+    if (!canEdit) return
     if (syncInFlightRef.current) {
       syncQueuedRef.current = true // I-2：coalescing——已有請求在跑，這次觸發併入下一次補跑
       return
@@ -263,6 +277,9 @@ export default function TripView({
     try {
       const res = await fetch(`/api/trips/${trip.id}/legs/sync`, { method: 'POST' })
       if (!res.ok) {
+        // 403 防線二：canEdit 理論上已擋在上面，但角色可能在同一分頁 session 中被 owner 調整（尚未 refresh）；
+        // 403 是權限問題不是暫時性故障，靜默處理，不套用 S-1 的錯誤提示（那段文案專指外部服務失敗）
+        if (res.status === 403) return
         if (!syncNoticeShownRef.current) {
           syncNoticeShownRef.current = true
           setNotice({ kind: 'error', text: '交通段暫時無法計算' }) // S-1
@@ -296,6 +313,9 @@ export default function TripView({
   }
 
   async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
+    // Task 5：目前所有呼叫點都已被 canEdit 閘門擋住（PlaceSearch/草稿表單皆不渲染），這裡補一層與
+    // syncLegs 對齊的防線二，避免日後新增呼叫點時繞過閘門
+    if (!canEdit) return false
     if (busyRef.current) return false
     if (stopsError) return false // 讀取失敗時基準不可信，關閉所有寫入入口（含草稿表單）
     busyRef.current = true
@@ -363,6 +383,9 @@ export default function TripView({
 
   // 時間軸拖曳平移提交：呼叫連鎖順延 RPC，後續未鎖定停留點原子化跟著移動（spec §6）
   async function moveStop(stopId: string, deltaMs: number) {
+    // Task 5：目前唯一呼叫點是 Timeline 的 onMove，已由 `canEdit ? moveStop : undefined` 收口，這裡補
+    // 防線二，避免日後新增呼叫點時繞過閘門（與 syncLegs/addStop 對齊）
+    if (!canEdit) return
     if (busyRef.current || stopsError) return
     busyRef.current = true
     setBusy(true)
@@ -483,14 +506,14 @@ export default function TripView({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1">
         <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
-          {apiKey && !stopsError && (
+          {canEdit && apiKey && !stopsError && (
             <PlaceSearch
               onPick={p => addStop({ ...p, isCustom: false })}
               onError={text => setNotice({ kind: 'error', text })}
               disabled={busy}
             />
           )}
-          {draftPin && (
+          {canEdit && draftPin && (
             <form
               className="flex gap-1 rounded border p-2"
               onSubmit={async e => {
@@ -556,7 +579,7 @@ export default function TripView({
                       </span>
                       <span className="font-medium">{stop.name}</span>
                     </button>
-                    {selectedId === stop.id && (
+                    {canEdit && selectedId === stop.id && (
                       <StopEditor
                         key={stop.id}
                         stop={stop}
@@ -586,12 +609,12 @@ export default function TripView({
                           // floor(gap) < requiredMinutes 對整數 requiredMinutes 永遠成立，不等式恆自洽
                           ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分`}
                       </button>
-                      {leg.source === 'manual' && (
+                      {canEdit && leg.source === 'manual' && (
                         <span className="ml-1">
                           <RevertToAutoButton legId={leg.id} onChanged={() => void syncLegs()} />
                         </span>
                       )}
-                      {selectedLegId === leg.id && (
+                      {canEdit && selectedLegId === leg.id && (
                         <LegEditor
                           key={leg.id}
                           leg={leg}
@@ -608,7 +631,11 @@ export default function TripView({
             })}
             {activeDayStops.length === 0 && (
               <li className="text-sm text-gray-500">
-                {stopsError ? '停留點讀取失敗，請重新整理再試' : '還沒有停留點，用上方搜尋加入第一個景點'}
+                {stopsError
+                  ? '停留點讀取失敗，請重新整理再試'
+                  : canEdit
+                    ? '還沒有停留點，用上方搜尋加入第一個景點'
+                    : '這個行程還沒有停留點'}
               </li>
             )}
           </ul>
@@ -629,6 +656,7 @@ export default function TripView({
                       fromStop={from}
                       toStop={to}
                       currency={trip.currency}
+                      canEdit={canEdit}
                       onChanged={() => void syncLegs()}
                     />
                   )
@@ -646,7 +674,7 @@ export default function TripView({
               gestureHandling="greedy"
               disableDefaultUI={false}
               onContextmenu={e => {
-                if (stopsError) return
+                if (!canEdit || stopsError) return
                 const latLng = e.detail.latLng
                 if (latLng) setDraftPin({ lat: latLng.lat, lng: latLng.lng })
               }}
@@ -677,7 +705,7 @@ export default function TripView({
                   </AdvancedMarker>
                 )
               })}
-              {draftPin && (
+              {canEdit && draftPin && (
                 <AdvancedMarker position={draftPin}>
                   <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                 </AdvancedMarker>
@@ -726,7 +754,7 @@ export default function TripView({
         }}
         playheadMs={playheadMs}
         onPlayheadChange={setPlayheadMs}
-        onMove={moveStop}
+        onMove={canEdit ? moveStop : undefined}
         busy={busy}
         playing={playing}
         onTogglePlay={togglePlay}

@@ -27,14 +27,15 @@ function downloadJson(filename: string, data: unknown) {
 
 /** 行程匯出入口（header 掛載）：Excel 下載（Task 2）＋ JSON 匯出／出發！定稿快照（Task 3）。
  *  JSON 匯出與快照共用同一顆 buildTripSnapshot builder——同一份資料，本地下載 vs 落 DB 兩種去處。
- *  「出發！定稿」canEdit 限定：本 Task 時點 page.tsx 尚未查 role，以 owner 本人使用為前提直接顯示，
- *  Task 5 接上 canEdit 後補條件。 */
+ *  「出發！定稿」canEdit 限定（Task 5 接上）：Excel/JSON 是唯讀匯出，viewer 也可用；定稿是寫入動作，
+ *  viewer 隱藏（DB 的 trip_snapshots insert policy 本就要求 editor 以上，這裡是 UI 誠實化）。 */
 export default function ExportButtons({
   tripId,
   trip,
   stops,
   legs,
   disabled = false,
+  canEdit,
 }: {
   tripId: string
   trip: SnapshotTrip
@@ -42,6 +43,8 @@ export default function ExportButtons({
   legs: SnapshotLeg[]
   /** stops/legs 讀取失敗時停用快照與 JSON——空資料定稿會以「已定稿 ✓」覆蓋掉不可重來的出發基準線 */
   disabled?: boolean
+  /** viewer 隱藏「出發！定稿」——寫入動作僅 editor 以上可用 */
+  canEdit: boolean
 }) {
   const router = useRouter()
   const [confirming, setConfirming] = useState(false)
@@ -95,7 +98,7 @@ export default function ExportButtons({
       <button type="button" className="rounded border px-2 py-1 text-sm disabled:opacity-50" disabled={disabled} onClick={exportJson}>
         匯出 JSON
       </button>
-      {confirming ? (
+      {canEdit && (confirming ? (
         <span className="flex items-center gap-1 text-sm">
           <button
             type="button"
@@ -126,8 +129,8 @@ export default function ExportButtons({
         >
           出發！定稿
         </button>
-      )}
-      {disabled && (
+      ))}
+      {canEdit && disabled && (
         <span className="text-sm text-red-600">資料讀取失敗，暫時無法定稿</span>
       )}
     </div>

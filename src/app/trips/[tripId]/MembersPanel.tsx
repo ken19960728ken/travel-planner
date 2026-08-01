@@ -235,7 +235,7 @@ export default function MembersPanel({
     <div className="relative">
       <button
         type="button"
-        className="rounded border px-2 py-1 text-sm"
+        className="shrink-0 whitespace-nowrap rounded border px-2 py-1 text-sm"
         aria-expanded={open}
         onClick={toggleOpen}
       >

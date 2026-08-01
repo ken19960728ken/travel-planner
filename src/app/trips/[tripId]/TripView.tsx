@@ -14,7 +14,7 @@ import PlacePreviewCard from './PlacePreviewCard'
 import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
-import MapErrorBoundary from './MapErrorBoundary'
+import SectionErrorBoundary from './SectionErrorBoundary'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText } from './legUi'
 import tzlookup from '@photostructure/tz-lookup'
@@ -781,7 +781,7 @@ export default function TripView({
         </aside>
         <div className="min-h-0 flex-1">
           {apiKey ? (
-            <MapErrorBoundary>
+            <SectionErrorBoundary message="地圖載入失敗（可能是金鑰或網路問題），行程資料仍可正常編輯">
               <Map
                 defaultCenter={center}
                 defaultZoom={12}
@@ -850,7 +850,7 @@ export default function TripView({
                   bounds={playbackBounds}
                 />
               </Map>
-            </MapErrorBoundary>
+            </SectionErrorBoundary>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-500">
               尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示
@@ -885,12 +885,19 @@ export default function TripView({
 
   // APIProvider 需包住整個側欄 + 地圖：PlaceSearch（側欄）與 Map 都要用 useMapsLibrary/APIProviderContext，
   // 若只包地圖那一側，PlaceSearch 會拿不到 context（React context 不會跨兄弟節點），gmp-select 永遠不會註冊。
+  // I-2：這裡再包一層 SectionErrorBoundary（保留在 APIProvider 內——這樣觸發後 retry 只需要重新渲染
+  // content，不必連 APIProvider 一起卸載重掛，不用重新跑一次 Maps 腳本載入）。跟 <Map> 那顆內層
+  // boundary 是兩顆獨立的 boundary：地圖本身壞了先被內層接住（側欄與時間軸不受影響，維持原本的窄
+  // 範圍承諾）；PlaceSearch 這種位在側欄、跟地圖同層兄弟節點的例外，結構上只有這顆外層才接得到，
+  // 觸發時整個 content（側欄+地圖+時間軸）會被取代，是比 Next 預設全頁崩潰頁更好的防禦性最後防線。
   return apiKey ? (
     <APIProvider
       apiKey={apiKey}
       onError={() => setNotice({ kind: 'error', text: 'Google 地圖載入失敗，請檢查金鑰設定與網路' })}
     >
-      {content}
+      <SectionErrorBoundary message="行程頁部分內容載入失敗，可能是暫時性問題，請按重試或重新整理頁面">
+        {content}
+      </SectionErrorBoundary>
     </APIProvider>
   ) : (
     content

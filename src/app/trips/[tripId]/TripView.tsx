@@ -68,14 +68,18 @@ const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
-/** 鏡頭跟隨：target 變更時平移過去；視野太遠時拉近（需在 APIProvider 內才能拿到 map 實例） */
-function CameraFollow({ target }: { target: { lat: number; lng: number } | null }) {
+/** 鏡頭跟隨：target 變更時平移過去；視野太遠時拉近（需在 APIProvider 內才能拿到 map 實例）。
+ *  I-1（審查更正）：播放中（playing=true）不做「視野太遠就拉近」——PlaybackCamera 已用 fitBounds
+ *  收好整段視野；若使用者這時點側欄或時間軸的停留點觸發這裡的 setCameraTarget，被拉到 zoom 14 會讓
+ *  下一個播放 tick 的位移暴增，重演瞬移灰塊（可達路徑：Timeline 停留點色塊的 onSelect 對 playing
+ *  沒有任何閘門）。panTo 本身仍照常執行——使用者點擊是明確意圖，只是播放中不跟著硬拉縮放。 */
+function CameraFollow({ target, playing }: { target: { lat: number; lng: number } | null; playing: boolean }) {
   const map = useMap()
   useEffect(() => {
     if (!map || !target) return
     map.panTo(target)
-    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
-  }, [map, target])
+    if (!playing && (map.getZoom() ?? 0) < 12) map.setZoom(14)
+  }, [map, target, playing])
   return null
 }
 
@@ -869,7 +873,7 @@ export default function TripView({
                     <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
                   </AdvancedMarker>
                 )}
-                <CameraFollow target={cameraTarget} />
+                <CameraFollow target={cameraTarget} playing={playing} />
                 <PlaybackCamera
                   lat={playheadPos?.lat ?? null}
                   lng={playheadPos?.lng ?? null}

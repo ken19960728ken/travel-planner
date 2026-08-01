@@ -72,15 +72,18 @@ export type ComputedRoute =
 type TransitStepState = 'has_transit' | 'walk_only' | 'unknown'
 
 /** routes[0] 的 steps 資料完整性與 TRANSIT 含量三態判斷（I-1，日本大眾運輸 fallback 偵測）：
- *  - unknown：legs 不是陣列，或所有 leg 都沒有 steps 陣列——看不到任何有效 step 資料，不能斷言
+ *  - unknown：legs 不是陣列，或所有 leg 都沒有非空 steps 陣列——看不到任何有效 step 資料，不能斷言
  *    「這是純步行路線」，交由呼叫端當 bad_response 處理（不快取、留 pending、自動重試），避免誤判
- *    掉一條實際存在但欄位未如預期回傳的大眾運輸路線。
- *  - has_transit／walk_only：確實看到至少一個 leg 帶 steps 陣列，資料足以下結論才回傳這兩種。 */
+ *    掉一條實際存在但欄位未如預期回傳的大眾運輸路線。空陣列（有 steps 欄位但零筆）與完全沒有 steps
+ *    欄位語意相同——都看不到任何 step 證據，同樣歸 unknown（m-9：曾經只檢查 Array.isArray，
+ *    空陣列會誤通過並被 some() 判成 walk_only，把可能真有班次的路線誤標 no_transit_data 快取 30 天）。
+ *  - has_transit／walk_only：確實看到至少一個 leg 帶非空 steps 陣列，資料足以下結論才回傳這兩種。 */
 function transitStepState(route: { legs?: unknown }): TransitStepState {
   const legs = Array.isArray(route.legs) ? route.legs : null
   if (!legs) return 'unknown'
   const legsWithSteps = legs.filter((leg): leg is { steps: unknown[] } =>
-    typeof leg === 'object' && leg !== null && Array.isArray((leg as { steps?: unknown }).steps))
+    typeof leg === 'object' && leg !== null && Array.isArray((leg as { steps?: unknown }).steps) &&
+    (leg as { steps: unknown[] }).steps.length > 0)
   if (legsWithSteps.length === 0) return 'unknown'
   const hasTransit = legsWithSteps.some(leg =>
     leg.steps.some(step => typeof step === 'object' && step !== null && (step as { travelMode?: unknown }).travelMode === 'TRANSIT'))

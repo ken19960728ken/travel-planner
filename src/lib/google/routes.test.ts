@@ -116,6 +116,10 @@ describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit s
     const json = { routes: [{ duration: '600s', legs: [{}, { steps: 'not-an-array' }] }] }
     expect(parseComputeRoutesResponse(json, 'transit')).toEqual({ ok: false, reason: 'bad_response' })
   })
+  it('transit 回應 leg 帶 steps 欄位但為空陣列 → 視為看不到任何 step 證據，同樣是 bad_response（unknown），不可誤判 walk_only（m-9）', () => {
+    const json = { routes: [{ duration: '600s', legs: [{ steps: [] }] }] }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual({ ok: false, reason: 'bad_response' })
+  })
   it('transit 空 routes 仍維持 no_route（不被 no_transit_data/bad_response 取代既有語意）', () => {
     expect(parseComputeRoutesResponse({ routes: [] }, 'transit')).toEqual({ ok: false, reason: 'no_route' })
   })

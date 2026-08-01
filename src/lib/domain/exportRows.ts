@@ -41,9 +41,15 @@ function isNoRoute(leg: ExportLeg): boolean {
   return typeof leg.detail === 'object' && leg.detail !== null && (leg.detail as { no_route?: boolean }).no_route === true
 }
 
-/** 沿 legUi.legDurationText 的文案邏輯（duration null 時區分「待計算」與「查無路線」）。 */
+function isNoTransitData(leg: ExportLeg): boolean {
+  return typeof leg.detail === 'object' && leg.detail !== null &&
+    (leg.detail as { no_transit_data?: boolean }).no_transit_data === true
+}
+
+/** 沿 legUi.legDurationText 的文案邏輯（duration null 時區分「待計算」「查無路線」「無大眾運輸資料」）。 */
 function legDurationText(leg: ExportLeg): string {
   if (leg.duration_minutes !== null) return `${leg.duration_minutes} 分`
+  if (isNoTransitData(leg)) return '無大眾運輸資料'
   return isNoRoute(leg) ? '查無路線' : '待計算'
 }
 

@@ -11,11 +11,19 @@ const Q = {
 }
 
 describe('buildComputeRoutesRequest（官方 v2 格式，2026-07-31 查證）', () => {
-  it('endpoint、金鑰 header 與必填 FieldMask', () => {
+  it('endpoint、金鑰 header 與必填 FieldMask（transit 額外帶 steps.travelMode 供大眾運輸偵測）', () => {
     const r = buildComputeRoutesRequest(Q, 'test-key')
     expect(r.url).toBe('https://routes.googleapis.com/directions/v2:computeRoutes')
     expect(r.headers['X-Goog-Api-Key']).toBe('test-key')
-    expect(r.headers['X-Goog-FieldMask']).toBe('routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline')
+    expect(r.headers['X-Goog-FieldMask']).toBe(
+      'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.travelMode',
+    )
+  })
+
+  it('DRIVE/WALK 的 FieldMask 不擴充（不做步行偵測，維持原樣）', () => {
+    const base = 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline'
+    expect(buildComputeRoutesRequest({ ...Q, mode: 'driving' }, 'k').headers['X-Goog-FieldMask']).toBe(base)
+    expect(buildComputeRoutesRequest({ ...Q, mode: 'walking' }, 'k').headers['X-Goog-FieldMask']).toBe(base)
   })
 
   it('TRANSIT：latLng 結構 + RFC3339 departureTime；不帶 routingPreference', () => {
@@ -47,20 +55,57 @@ describe('parseComputeRoutesResponse', () => {
   it('正常回應："165s" 字串轉分鐘（四捨五入、至少 1 分）', () => {
     expect(parseComputeRoutesResponse({
       routes: [{ duration: '165s', distanceMeters: 820, polyline: { encodedPolyline: 'abc' } }],
-    })).toEqual({ ok: true, durationMinutes: 3, distanceMeters: 820, polyline: 'abc' })
-    expect(parseComputeRoutesResponse({ routes: [{ duration: '10s' }] })).toEqual(
+    }, 'driving')).toEqual({ ok: true, durationMinutes: 3, distanceMeters: 820, polyline: 'abc' })
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '10s' }] }, 'driving')).toEqual(
       { ok: true, durationMinutes: 1, distanceMeters: null, polyline: null },
     )
   })
   it('空 routes = 查無路線（官方：無法計算路線時 routes 為空，非 404）', () => {
-    expect(parseComputeRoutesResponse({ routes: [] })).toEqual({ ok: false, reason: 'no_route' })
-    expect(parseComputeRoutesResponse({})).toEqual({ ok: false, reason: 'no_route' })
+    expect(parseComputeRoutesResponse({ routes: [] }, 'driving')).toEqual({ ok: false, reason: 'no_route' })
+    expect(parseComputeRoutesResponse({}, 'driving')).toEqual({ ok: false, reason: 'no_route' })
   })
   it('duration 格式異常回報 bad_response', () => {
-    expect(parseComputeRoutesResponse({ routes: [{ duration: 'oops' }] })).toEqual({ ok: false, reason: 'bad_response' })
-    expect(parseComputeRoutesResponse(null)).toEqual({ ok: false, reason: 'bad_response' })
+    expect(parseComputeRoutesResponse({ routes: [{ duration: 'oops' }] }, 'driving')).toEqual({ ok: false, reason: 'bad_response' })
+    expect(parseComputeRoutesResponse(null, 'driving')).toEqual({ ok: false, reason: 'bad_response' })
   })
   it('duration 超過 30 天上限（43200 分鐘）視為查無路線（M-4：穩定結論可快取，避免每次重打 Google）', () => {
-    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] })).toEqual({ ok: false, reason: 'no_route' })
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '2592060s' }] }, 'driving')).toEqual({ ok: false, reason: 'no_route' })
+  })
+})
+
+describe('parseComputeRoutesResponse — 日本大眾運輸 fallback（transit steps 偵測）', () => {
+  it('transit 回應含至少一個 TRANSIT step → ok（正常大眾運輸路線，紐約對照組）', () => {
+    const json = {
+      routes: [{
+        duration: '1800s',
+        legs: [{ steps: [{ travelMode: 'WALK' }, { travelMode: 'TRANSIT' }, { travelMode: 'WALK' }] }],
+      }],
+    }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual(
+      { ok: true, durationMinutes: 30, distanceMeters: null, polyline: null },
+    )
+  })
+  it('transit 回應全是 WALK step（無 TRANSIT）→ no_transit_data（福岡實測：Google 回純步行路線）', () => {
+    const json = { routes: [{ duration: '2074s', legs: [{ steps: [{ travelMode: 'WALK' }] }] }] }
+    expect(parseComputeRoutesResponse(json, 'transit')).toEqual({ ok: false, reason: 'no_transit_data' })
+  })
+  it('transit 回應缺少 legs/steps（無資料可判斷）→ 同樣視為 no_transit_data，不誤把步行時長當大眾運輸', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '600s' }] }, 'transit')).toEqual(
+      { ok: false, reason: 'no_transit_data' },
+    )
+  })
+  it('transit 空 routes 仍維持 no_route（不被 no_transit_data 取代既有語意）', () => {
+    expect(parseComputeRoutesResponse({ routes: [] }, 'transit')).toEqual({ ok: false, reason: 'no_route' })
+  })
+  it('walking 模式全是 WALK step 不誤判（步行偵測僅限 transit 請求，WALK 模式本就該是純步行）', () => {
+    const json = { routes: [{ duration: '600s', legs: [{ steps: [{ travelMode: 'WALK' }] }] }] }
+    expect(parseComputeRoutesResponse(json, 'walking')).toEqual(
+      { ok: true, durationMinutes: 10, distanceMeters: null, polyline: null },
+    )
+  })
+  it('driving 模式不受步行偵測影響（即使沒有 legs 欄位也照常判 ok）', () => {
+    expect(parseComputeRoutesResponse({ routes: [{ duration: '600s' }] }, 'driving')).toEqual(
+      { ok: true, durationMinutes: 10, distanceMeters: null, polyline: null },
+    )
   })
 })

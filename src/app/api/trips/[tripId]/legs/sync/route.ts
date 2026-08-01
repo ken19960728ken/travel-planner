@@ -251,12 +251,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
           pending++ // Google 4xx/5xx：leg 維持待計算可重試（錯誤格式 {error:{code,message,status}}，不透傳細節給 client）
           continue
         }
-        result = parseComputeRoutesResponse(await res.json())
+        result = parseComputeRoutesResponse(await res.json(), query.mode)
       } catch {
         pending++
         continue // 網路失敗/逾時同上
       }
-      // 只快取 ok 與 no_route（穩定結論）；bad_response 屬暫時性異常，快取 30 天會毒化該路段
+      // 只快取 ok、no_route、no_transit_data（皆為穩定結論）；bad_response 屬暫時性異常，快取 30 天會毒化該路段
       if (service && result && !(result.ok === false && result.reason === 'bad_response')) {
         await service.from('route_cache').upsert({ cache_key: cacheKey, result, fetched_at: new Date(now).toISOString() })
       }
@@ -299,6 +299,21 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       } else {
         pending++ // M-2：與 R-3 同一種漏記——寫回失敗，leg 仍未真正算完，須計入 pending 才可重試
         console.error('[legs/sync] update no_route leg failed', { tripId, code: error.code, message: error.message })
+      }
+    } else if (result.reason === 'no_transit_data') {
+      // 日本大眾運輸 fallback：鏡像 no_route 的寫回（M-4 前例）——duration 誠實留空，哨兵記在 detail，
+      // 穩定結論可快取（上方快取條件已涵蓋），避免每次 sync 重打 Google
+      const { data, error } = await supabase.from('legs').update({
+        duration_minutes: null, distance_meters: null, polyline: null,
+        detail: { no_transit_data: true },
+        departs_at: new Date(from.endsAt).toISOString(), arrives_at: null,
+        computed_at: new Date(now).toISOString(), stale: false,
+      }).eq('id', item.legId).eq('source', 'auto').select('id')
+      if (!error) {
+        if ((data ?? []).length > 0) changed = true
+      } else {
+        pending++
+        console.error('[legs/sync] update no_transit_data leg failed', { tripId, code: error.code, message: error.message })
       }
     } else {
       pending++

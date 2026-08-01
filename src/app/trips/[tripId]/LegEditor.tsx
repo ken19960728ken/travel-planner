@@ -4,7 +4,7 @@ import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { utcMsToWallInput, wallInputToUtcMs } from '@/lib/domain/tz'
-import { MODE_LABEL, isNoRoute } from './legUi'
+import { MODE_LABEL, isNoRoute, isNoTransitData } from './legUi'
 import type { TablesUpdate } from '@/lib/supabase/database.types'
 import type { Leg, Stop } from './TripView'
 
@@ -156,6 +156,11 @@ export default function LegEditor({
       )}
       {isNoRoute(leg) && (
         <p className="text-xs text-amber-700">查無路線：可改用其他交通方式，或切為航班/自訂手動填寫</p>
+      )}
+      {isNoTransitData(leg) && (
+        <p className="text-xs text-amber-700">
+          無大眾運輸資料：Google 不支援此地區（如日本）或無合適路線——可改開車／步行，或切為航班／自訂手動填寫
+        </p>
       )}
       <label className="flex items-center gap-2 text-xs">
         交通方式

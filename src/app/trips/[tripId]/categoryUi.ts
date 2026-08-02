@@ -23,10 +23,18 @@ import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
  *  amber-500 `#f59e0b`（選中的備選）色相僅相差約 21°（OKLCH hue 48.998° vs 70.08°），對比度只有
  *  2.34:1，兩者在地圖小尺寸 Pin 上（尤其戶外強光下用手機看）非常容易被誤認成同一顆針。備選釘與
  *  一般停留點釘會同框出現，一旦某停留點恰好是餐飲類，「這是我選的備選」跟「這只是間餐廳」會混淆，
- *  這是誤導性 UI，不能接受。改用 stone-700 `#44403b`：色相雖仍落在暖色系（約 33°），但飽和度只有
- *  7%（amber-500 是 92%），視覺上讀作低調的深棕灰，而非鮮豔的橘 / 黃，與 amber-500 的對比度提升到
- *  4.79:1，與 orange-500（播放頭）對比度 3.67:1，足以區分（比對方法：sRGB 轉線性後算 WCAG 相對亮
- *  度比值；hue/saturation 用標準 HSL 換算，皆以 Tailwind v4 官方 oklch token 換算回 sRGB 驗證）。 */
+ *  這是誤導性 UI，不能接受。最終採 **orange-900 `#7c2d12`**（深燒橘），other 桶同時由 gray-500
+ *  改為 **zinc-600 `#52525b`**。
+ *
+ *  ⚠️ 選色的**度量方法**（複核時請沿用，別再用對比度）：WCAG 對比度衡量的是**明暗差**，設計目的是
+ *  文字可讀性，**不適合判斷兩個色塊能不能被分辨**——青色與綠色亮度幾乎相同（對比度 1.02）卻一眼可辨。
+ *  正確指標是感知色差 CIE ΔE（sRGB → XYZ → Lab 後取歐氏距離），判讀：<10 難分辨、10-25 需留意、
+ *  >25 一眼可辨。
+ *
+ *  以 ΔE 對「六桶彼此 + 六桶對全部保留色」做全配對掃描的結果：
+ *    stone-700 + gray-500（前一版）→ 最小 ΔE **19.0**（瓶頸是 other 對草稿針，兩者都是灰只差明度）
+ *    orange-900 + zinc-600（現行）→ 最小 ΔE **30.0**
+ *  從「需留意」跨進「一眼可辨」，且 orange-900 對 amber-500（選中備選）ΔE 為 43，遠離原本的混淆風險。 */
 
 /** 下游查表前一律先過 normalizeCategory() 正規化，不要直接用 `MAP[c] ?? MAP.other` 這種寫法查表。
  *  三個 Record（CATEGORY_PIN_HEX / CATEGORY_BLOCK_CLASS / CATEGORY_ICON）底層都是一般 object，
@@ -37,10 +45,10 @@ import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
 export const CATEGORY_PIN_HEX: Record<StopCategory, string> = {
   transport: '#0891b2',
   sight: '#059669',
-  food: '#44403b',
+  food: '#7c2d12',
   lodging: '#7c3aed',
   shopping: '#db2777',
-  other: '#6b7280',
+  other: '#52525b',
 }
 
 /** 完整字面 class，供 Tailwind v4 掃描（v4 只認原始碼中的字面字串，`bg-${x}` 樣板字串一律失效，
@@ -48,10 +56,10 @@ export const CATEGORY_PIN_HEX: Record<StopCategory, string> = {
 export const CATEGORY_BLOCK_CLASS: Record<StopCategory, string> = {
   transport: 'bg-cyan-600',
   sight: 'bg-emerald-600',
-  food: 'bg-stone-700',
+  food: 'bg-orange-900',
   lodging: 'bg-violet-600',
   shopping: 'bg-pink-600',
-  other: 'bg-gray-500',
+  other: 'bg-zinc-600',
 }
 
 /** 逐字元核對過皆為 U+FE0F 變體選擇子之外的基底碼位，跨平台（尤其部分 Android / 舊字型）

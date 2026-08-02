@@ -9,6 +9,7 @@ import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
 import { adjacentPairs } from '@/lib/domain/legSync'
+import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
 import PlacePreviewCard from './PlacePreviewCard'
 import StopEditor from './StopEditor'
@@ -42,6 +43,7 @@ export type Stop = {
   locked: boolean
   notes: string | null
   estimated_cost: number | null
+  category: StopCategory
 }
 
 export type Leg = {

@@ -154,6 +154,7 @@ export type Database = {
       }
       stops: {
         Row: {
+          category: string
           ends_at: string
           estimated_cost: number | null
           id: string
@@ -172,6 +173,7 @@ export type Database = {
           updated_by: string | null
         }
         Insert: {
+          category?: string
           ends_at: string
           estimated_cost?: number | null
           id?: string
@@ -190,6 +192,7 @@ export type Database = {
           updated_by?: string | null
         }
         Update: {
+          category?: string
           ends_at?: string
           estimated_cost?: number | null
           id?: string

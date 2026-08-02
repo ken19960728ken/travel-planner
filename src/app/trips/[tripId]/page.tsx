@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { notFound, redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import TripView from './TripView'
-import type { Leg } from './TripView'
+import type { Leg, Stop } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
 import type { Candidate } from './CandidatesPanel'
@@ -46,7 +46,7 @@ export default async function TripDetailPage({
     supabase.from('trip_members').select('user_id, role').eq('trip_id', tripId),
     supabase
       .from('stops')
-      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost')
+      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })
@@ -59,7 +59,7 @@ export default async function TripDetailPage({
       .limit(500),
     supabase
       .from('trip_candidates')
-      .select('id, name, lat, lng, place_id, created_at')
+      .select('id, name, lat, lng, place_id, created_at, category')
       .eq('trip_id', tripId)
       .order('created_at', { ascending: true })
       .order('id', { ascending: true })
@@ -138,7 +138,7 @@ export default async function TripDetailPage({
       )}
       <TripView
         trip={trip}
-        stops={stops ?? []}
+        stops={(stops ?? []) as Stop[]}
         stopsError={Boolean(stopsError)}
         legs={(legs ?? []) as Leg[]}
         canEdit={canEdit}

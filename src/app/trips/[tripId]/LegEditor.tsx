@@ -118,6 +118,12 @@ export default function LegEditor({
       const dep = wallInputToUtcMs(departsAt, fromStop.timezone)
       const arr = wallInputToUtcMs(arrivesAt, toStop.timezone)
       if (!(arr > dep)) return setNotice({ kind: 'error', text: '抵達必須晚於出發（注意兩地時區）' })
+      // 起訖導出的 duration 也要吃同一條 30 天上界（審查 Minor）：時長分支有 43200 檢查，
+      // 這條分支原本沒有，custom 段（S-8 後可走此分支）填一組相隔一年的起訖就會寫入約 525600 分鐘，
+      // 遠超 UI 自己宣告的上限，而 DB 的 check 只有 >= 0 擋不住
+      if (arr - dep > 43200 * 60_000) {
+        return setNotice({ kind: 'error', text: '出發與抵達間隔不得超過 30 天' })
+      }
       // Important-4（軟警示，spec §5：警示不阻擋）：出發早於起點停留點結束、或抵達晚於終點停留點開始，
       // 代表班機時刻與停留點時段兜不起來，可能是使用者輸錯——仍允許儲存，只是提示確認
       const outOfWindow = dep < new Date(fromStop.ends_at).getTime() || arr > new Date(toStop.starts_at).getTime()

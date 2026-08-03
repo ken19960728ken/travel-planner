@@ -47,12 +47,25 @@ export function pendingShiftOffsetMs(
   return 0
 }
 
-/** pendingShift 是否已落地：觀察最新 stops，被拖點的 starts_at 是否已追上 baseline + delta。
- *  落地後應清空 pendingShift，讓後續渲染回歸 props 真相。 */
-export function pendingShiftLanded(
+/** pendingShift 是否該被清除。**「已落地」與「不可能再落地」都要清**（2026-08-04 審查 Major）：
+ *  只認落地會讓兩種真實可達的情境永久卡住偏移預覽，此時色塊位置與自己的 tooltip 互相矛盾，
+ *  且跨日切換也不會消失，除了重新整理沒有恢復途徑——
+ *
+ *  1. **被拖點在 RPC 視窗內被協作者刪除**：找不到該點，永遠等不到落地
+ *  2. **client baseline ≠ server baseline**：RPC（cascade_shift_v3）在 advisory lock 內從 DB 讀
+ *     v_changed_start，呼叫端用的是 client 端 stops prop 的值。協作者在視窗內動過同一個點，
+ *     落地值就不會等於 client baseline + delta。本產品主打多人共編，這個視窗真實存在。
+ *
+ *  情境 2 無法從「值」上區分於「還沒落地」，故呼叫端另備逾時保險；本函式負責 1 與正常落地。
+ *
+ *  精確 `===` 比對是刻意的，成立條件是三處性質的合成：Timeline 把 delta 吸附成 SNAP_MS 的倍數 →
+ *  呼叫端 Math.round(deltaMs / 1000) 為 no-op → RPC 加的是整數秒。任一處改動（如吸附粒度改成
+ *  非整秒）此處需改為容差比對。 */
+export function pendingShiftResolved(
   pending: PendingShift,
   stops: Pick<StopSchedule, 'id' | 'startsAt'>[],
 ): boolean {
   const stop = stops.find(s => s.id === pending.changedStopId)
-  return stop !== undefined && stop.startsAt === pending.baselineStartMs + pending.deltaMs
+  if (stop === undefined) return true // 被拖點已不存在：不可能再落地，清掉
+  return stop.startsAt === pending.baselineStartMs + pending.deltaMs
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cascadeShift, pendingShiftOffsetMs, pendingShiftLanded, type PendingShift } from './schedule'
+import { cascadeShift, pendingShiftOffsetMs, pendingShiftResolved, type PendingShift } from './schedule'
 import type { StopSchedule } from './types'
 
 const HOUR = 60 * 60 * 1000
@@ -74,18 +74,20 @@ describe('pendingShiftOffsetMs', () => {
   })
 })
 
-describe('pendingShiftLanded', () => {
+describe('pendingShiftResolved', () => {
   const pending: PendingShift = { changedStopId: 'a', deltaMs: HOUR, baselineStartMs: 9 * HOUR }
 
-  it('被拖點的 starts_at 尚未追上 baseline+delta 時未落地', () => {
-    expect(pendingShiftLanded(pending, [{ id: 'a', startsAt: 9 * HOUR }])).toBe(false)
+  it('被拖點的 starts_at 尚未追上 baseline+delta 時不清除', () => {
+    expect(pendingShiftResolved(pending, [{ id: 'a', startsAt: 9 * HOUR }])).toBe(false)
   })
 
-  it('被拖點的 starts_at 已等於 baseline+delta 時已落地', () => {
-    expect(pendingShiftLanded(pending, [{ id: 'a', startsAt: 10 * HOUR }])).toBe(true)
+  it('被拖點的 starts_at 已等於 baseline+delta 時清除（正常落地）', () => {
+    expect(pendingShiftResolved(pending, [{ id: 'a', startsAt: 10 * HOUR }])).toBe(true)
   })
 
-  it('找不到被拖點（已被刪除）時視為未落地', () => {
-    expect(pendingShiftLanded(pending, [{ id: 'other', startsAt: 10 * HOUR }])).toBe(false)
+  it('找不到被拖點（協作者已刪除）時也要清除——不可能再落地', () => {
+    // 舊版把這個情境當成「尚未落地」而回 false，會讓偏移預覽永久卡住（2026-08-04 審查 Major）
+    expect(pendingShiftResolved(pending, [{ id: 'other', startsAt: 10 * HOUR }])).toBe(true)
+    expect(pendingShiftResolved(pending, [])).toBe(true)
   })
 })

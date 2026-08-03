@@ -10,7 +10,7 @@ import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { decodePolyline, greatCirclePoints, pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { adjacentPairs } from '@/lib/domain/legSync'
-import { pendingShiftLanded, type PendingShift } from '@/lib/domain/schedule'
+import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
 import PlacePreviewCard from './PlacePreviewCard'
@@ -83,6 +83,10 @@ const SEGMENT_MAX_ZOOM: Record<Leg['mode'], number> = {
 }
 const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
 const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
+// M-1 逾時保險：拖曳偏移預覽最多維持這麼久。RPC + router.refresh() 正常在 1-2 秒內落地，
+// 5 秒足以涵蓋慢速網路；超過就代表落地值對不上 client baseline（協作者同時改了同一點），
+// 此時寧可讓色塊跳回真值，也不要長期顯示不存在的時間
+const PENDING_SHIFT_TIMEOUT_MS = 5_000
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
@@ -378,8 +382,11 @@ export default function TripView({
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   // M-1：拖曳提交（cascade_shift_stops RPC）成功到 refresh 落地間的過渡偏移預覽；moveStop 於 RPC 前設定，
-  // 下面的 useEffect 觀察 stops 落地後清空（pendingShiftLanded），傳給 Timeline 算色塊 offset
+  // 下面的 render 期比對觀察 stops 落地後清空（pendingShiftResolved），傳給 Timeline 算色塊 offset
   const [pendingShift, setPendingShift] = useState<PendingShift | null>(null)
+  // 逾時保險用（見 moveStop）：generation 讓後到的拖曳作廢前一次計時器
+  const shiftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const shiftGenerationRef = useRef(0)
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
   const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
   // autoPlay 初始值以第一天視窗推導：視窗不存在（行程還沒有停留點）則保持暫停，播放頭留 null
@@ -431,7 +438,7 @@ export default function TripView({
     setPrevStopsForShift(stops)
     if (
       pendingShift &&
-      pendingShiftLanded(pendingShift, stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+      pendingShiftResolved(pendingShift, stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
     ) {
       setPendingShift(null)
     }
@@ -686,6 +693,15 @@ export default function TripView({
       const changedStop = stops.find(s => s.id === stopId)
       if (changedStop) {
         setPendingShift({ changedStopId: stopId, deltaMs, baselineStartMs: new Date(changedStop.starts_at).getTime() })
+        // 逾時保險（審查 Major）：pendingShiftResolved 只認得出「已落地」與「被拖點消失」，認不出
+        // 「client baseline 與 server 讀到的 v_changed_start 不同」——協作者在 RPC 視窗內動過同一個
+        // 點就會這樣，落地值永遠對不上。沒有這道保險，時間軸會長期顯示不存在的時間且只能靠重新整理。
+        // 用 generation 讓後到的拖曳作廢前一次的計時器，避免舊 timer 清掉新的 pendingShift。
+        const generation = ++shiftGenerationRef.current
+        if (shiftTimerRef.current) clearTimeout(shiftTimerRef.current)
+        shiftTimerRef.current = setTimeout(() => {
+          if (shiftGenerationRef.current === generation) setPendingShift(null)
+        }, PENDING_SHIFT_TIMEOUT_MS)
       }
       const supabase = createClient()
       const { error } = await supabase.rpc('cascade_shift_stops', {

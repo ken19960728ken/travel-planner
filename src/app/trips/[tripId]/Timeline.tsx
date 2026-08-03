@@ -47,6 +47,11 @@ export default function Timeline({
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
+  // M-6 右標籤用：win.end = max(endsAt) + 1h，故時區要取「結束最晚」那筆，不是排序後的最後一筆
+  const endStop =
+    dayStops.length > 0
+      ? dayStops.reduce((a, b) => (new Date(b.ends_at).getTime() > new Date(a.ends_at).getTime() ? b : a))
+      : null
   const span = win ? win.end - win.start : 1
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100
   // playheadMs 可能因資料變動（拖曳/刪除後 win 縮小）落在視窗外；畫線/滑桿/文字一律用夾回視窗內的值，避免互相矛盾
@@ -229,8 +234,10 @@ export default function Timeline({
                 : ''}
             </span>
             <span>
-              {dayStops[dayStops.length - 1] &&
-                formatLocalTime(win.end, dayStops[dayStops.length - 1].timezone)}
+              {/* 右標籤取「結束最晚」那筆的時區，不是「開始最晚」那筆（審查 Minor）：filterDayStops
+                  依 starts_at 排序，但 win.end 取的是 max(endsAt)——重疊行程或長時間住宿的情況下
+                  兩者不是同一筆，用陣列最後一筆的時區去格式化就會犯 M-6 本身要修的錯 */}
+              {endStop && formatLocalTime(win.end, endStop.timezone)}
             </span>
           </div>
         </>

@@ -81,6 +81,18 @@ docker exec -i supabase_db_traval psql -U postgres -v ON_ERROR_STOP=1 \
 
 正式環境為 Vercel（前端 + API routes）+ Supabase 雲端；一般流程是 migration 推上雲端後需在 Vercel 專案設定補上 `GOOGLE_MAPS_SERVER_API_KEY` 與 `SUPABASE_SERVICE_ROLE_KEY` 再重新部署。出事時的回滾路徑（Vercel Instant Rollback、Plan 4 以前的 migration 純新增免 down；Plan 5b 的 GRANT 收緊見下段、`stops_mark_manual_legs_stale` trigger 應急停用）見 [`docs/superpowers/plans/2026-07-31-travel-planner-transit.md`](docs/superpowers/plans/2026-07-31-travel-planner-transit.md) Task 10 Step 4。
 
+### ⚠️ migration 與程式碼的部署順序：兩種相反的情況，必須先判斷是哪一種
+
+**這條規則是 2026-08-03 線上故障後補的。** 當時新程式碼開始讀 `stops.category`，但那支 migration 漏推雲端 → 查詢整個失敗 → 使用者手機上看到「停留點讀取失敗」。錯在把「資料修正型」的順序規則誤套到「新增欄位型」上。
+
+| 變更類型 | 正確順序 | 為什麼 |
+|---|---|---|
+| **新程式碼要讀新欄位／新表** | **migration 先，程式碼後** | 欄位不存在時查詢直接失敗，整頁功能掛掉 |
+| **修正既有資料**（UPDATE 既有列） | **程式碼先，migration 後** | 順序反了的話，空窗期舊程式碼會把資料寫回錯的值（見下方 20260803000002 的例子） |
+| 純新增表（舊碼零引用） | 任一順序皆可 | 舊程式碼看不到它 |
+
+**每次 merge 後必做**：`supabase migration list --linked`，確認 local 與 remote 全部對齊。CI 沒有這道檢查，漏推不會有任何告警，只會在使用者打開頁面時炸。
+
 **`supabase/migrations/20260803000002_transit_recompute.sql` 的部署順序與上述一般流程相反**：必須等 Vercel 完成本次功能部署（transit steps 三態偵測新邏輯上線）之後，才能對 Supabase 雲端執行這支 migration。新程式碼先上線本身無害——它沿用既有 TTL／`computed_at` 判準運作，不會誤寫任何資料；但若這支 migration 先套用、Vercel 還沒部署，這段空窗期只要有人開一次行程頁，仍在線上跑的舊版 sync 邏輯就會用舊 parse 邏輯把這批 `computed_at=null` 的段重算，寫回同樣錯誤的步行時長、新的 `computed_at`，並改寫 `departs_at`——導致 `moved` 判準永遠為 false、TTL 30 天在出發前不會到期，這批壞資料自此不會再被正確邏輯修正，且整個過程沒有任何告警（M-1，2026-08-01 複審）。
 
 **回滾主路徑是 Vercel Instant Rollback，但這個「單獨執行即安全，不需要任何資料庫動作」的保證只涵蓋 `20260803000002_transit_recompute.sql` 之前的 migration**——舊版程式碼完全不寫 `trips`（只有 SELECT 與 INSERT）、也不碰 `trip_members` / `trip_invites`，與 `20260803000000` 之後的 schema 完全相容。`20260803000002_transit_recompute.sql` 是本專案第一支資料 migration（UPDATE 既有列，非純 DDL 新增），一旦套用過就不再滿足這個假設：若在它套用之後才對 Vercel 做 Instant Rollback，回滾回去的舊版程式碼一樣會在使用者開行程頁時把這批 `computed_at=null` 的段用舊 parse 邏輯重算、寫回相同的錯誤值，等於讓這次 migration 白做——因此只有確認新程式碼已穩定運作、不需要回滾時才執行這支 migration；一旦回滾，在重新部署新程式碼前不要再套用/重跑它。

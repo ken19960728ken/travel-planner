@@ -165,7 +165,13 @@ function CandidateRow({
       </button>
       {canEdit && (
         <div className="mt-1 flex flex-wrap items-center gap-2">
-          <select className="rounded border p-1" value={day} onChange={e => setDayOverride(e.target.value)} disabled={saving || busy}>
+          <select
+            aria-label="拼入哪一天"
+            className="rounded border p-1"
+            value={day}
+            onChange={e => setDayOverride(e.target.value)}
+            disabled={saving || busy}
+          >
             {dayKeys.map(k => (
               <option key={k} value={k}>
                 {k}
@@ -173,6 +179,7 @@ function CandidateRow({
             ))}
           </select>
           <select
+            aria-label="備選分類"
             className="rounded border p-1"
             value={candidate.category}
             onChange={e => changeCategory(e.target.value as StopCategory)}

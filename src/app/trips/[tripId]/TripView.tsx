@@ -539,8 +539,8 @@ export default function TripView({
       lng: c.lng,
       placeId: c.place_id,
       isCustom: false,
-      // TODO(Plan 7 後續任務)：Candidate 型別尚無 category 欄位，該任務補上後這裡改傳 c.category
-      category: 'other',
+      // 沿用備選自己的分類：使用者存入備選時已經確認過一次，拼入行程不該把它重設回 other
+      category: c.category,
       targetDay: day,
     })
     if (!ok) return false // addStop 已設好 notice

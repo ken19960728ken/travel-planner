@@ -3,6 +3,7 @@
 import { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { safeNextPath } from '@/lib/domain/safeNext'
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
@@ -17,6 +18,8 @@ function LoginForm() {
       : null,
   )
   const [busy, setBusy] = useState(false)
+  // Step 4：next 回跳目標（例如邀請接受頁），只接受站內相對路徑白名單，其餘一律退回 /trips
+  const next = safeNextPath(searchParams.get('next')) ?? '/trips'
 
   async function signIn(e: React.FormEvent) {
     e.preventDefault()
@@ -28,7 +31,7 @@ function LoginForm() {
       setNotice({ kind: 'error', text: '登入失敗，請確認 Email 與密碼' })
       return
     }
-    router.push('/trips')
+    router.push(next)
     router.refresh()
   }
 
@@ -51,7 +54,7 @@ function LoginForm() {
       return
     }
     if (data.session) {
-      router.push('/trips')
+      router.push(next)
       router.refresh()
       return
     }
@@ -61,9 +64,11 @@ function LoginForm() {
   async function signInWithGoogle() {
     setBusy(true)
     const supabase = createClient()
+    // Step 4：next 帶到 OAuth callback 一併轉發（僅站內相對路徑，safeNextPath 已在上面驗證過一次；
+    // callback route 收到後仍會用同一份白名單再驗一次，不信任任何跨請求傳遞的值）
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: `${location.origin}/auth/callback` },
+      options: { redirectTo: `${location.origin}/auth/callback?next=${encodeURIComponent(next)}` },
     })
     if (error) {
       setBusy(false)

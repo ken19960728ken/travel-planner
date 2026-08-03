@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import type { Stop } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
+import { pendingShiftOffsetMs, type PendingShift } from '@/lib/domain/schedule'
 import type { DayView } from './dayView'
 import { MODE_ICON, MODE_LABEL, legDurationText, legDurationShortText } from './legUi'
 import { CATEGORY_BLOCK_CLASS, CATEGORY_ICON } from './categoryUi'
@@ -23,6 +24,8 @@ export type TimelineProps = {
   onPlayheadChange: (ms: number | null) => void
   onMove?: (stopId: string, deltaMs: number) => Promise<void> // 拖曳提交：await 完成後才清空預覽偏移，避免回彈
   busy?: boolean // 上層寫入中：擋新拖曳、軌道降低透明度提示
+  /** M-1：RPC 成功到 refresh 落地間的過渡偏移預覽（TripView 的 moveStop 設定、觀察 stops 落地後清空） */
+  pendingShift?: PendingShift | null
   playing: boolean
   onTogglePlay: () => void
   dayView: DayView
@@ -40,10 +43,15 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
-  playing, onTogglePlay, dayView, selectedLegId, onSelectLeg,
+  playing, onTogglePlay, dayView, selectedLegId, onSelectLeg, pendingShift,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
+  // M-6 右標籤用：win.end = max(endsAt) + 1h，故時區要取「結束最晚」那筆，不是排序後的最後一筆
+  const endStop =
+    dayStops.length > 0
+      ? dayStops.reduce((a, b) => (new Date(b.ends_at).getTime() > new Date(a.ends_at).getTime() ? b : a))
+      : null
   const span = win ? win.end - win.start : 1
   const pct = (t: number) => ((t - (win?.start ?? 0)) / span) * 100
   // playheadMs 可能因資料變動（拖曳/刪除後 win 縮小）落在視窗外；畫線/滑桿/文字一律用夾回視窗內的值，避免互相矛盾
@@ -70,7 +78,8 @@ export default function Timeline({
     if (!drag || e.pointerId !== drag.pointerId) return
     const { id, deltaMs } = drag
     if (Math.abs(deltaMs) >= SNAP_MS && onMove) {
-      // 等 RPC 完成才清 drag（縮短回彈窗口；refresh 落地前仍有短暫跳動，完整消除需 pendingDelta 機制，記入 Plan 4）
+      // 等 RPC 完成才清 drag：onMove（TripView.moveStop）在發出 RPC 前已設定 pendingShift，drag 清空的
+      // 瞬間 pendingShift 已經頂上同樣的偏移量，色塊位置無縫接手，直到 refresh 落地才回歸 props 真相（M-1）
       // finally 保證任何例外都不會讓 drag 卡死（否則 beginDrag 會永久擋住後續拖曳）
       try {
         await onMove(id, deltaMs)
@@ -130,8 +139,11 @@ export default function Timeline({
             {dayStops.map(stop => {
               const s = new Date(stop.starts_at).getTime()
               const e = new Date(stop.ends_at).getTime()
-              // 拖曳中的色塊用偏移後的時間預覽位置，放開才真正提交
-              const offset = drag?.id === stop.id ? drag.deltaMs : 0
+              // 拖曳中的色塊用偏移後的時間預覽位置，放開才真正提交；放開後（drag 已清空）
+              // 交給 pendingShift 接手預覽，直到 refresh 落地（M-1，語義對齊 cascade RPC）
+              const offset = drag?.id === stop.id
+                ? drag.deltaMs
+                : pendingShiftOffsetMs({ id: stop.id, startsAt: s, locked: stop.locked }, pendingShift ?? null)
               return (
                 <button
                   key={stop.id}
@@ -213,13 +225,20 @@ export default function Timeline({
             aria-label="時間軸播放頭"
           />
           <div className="flex justify-between text-xs text-gray-400">
+            {/* M-6：左標籤用起點時區、右標籤改用終點時區（跨時區日程的當日視窗起訖各自對齊自己的地點），
+                播放頭標籤維持起點時區並以 title 註記，避免和右標籤的時區不一致造成誤解 */}
             <span>{dayStops[0] && formatLocalTime(win.start, dayStops[0].timezone)}</span>
-            <span>
+            <span title={dayStops[0] ? `播放頭時間以起點時區（${dayStops[0].timezone}）顯示` : undefined}>
               {ph !== null && dayStops[0]
                 ? `▶ ${formatLocalTime(ph, dayStops[0].timezone)}`
                 : ''}
             </span>
-            <span>{dayStops[0] && formatLocalTime(win.end, dayStops[0].timezone)}</span>
+            <span>
+              {/* 右標籤取「結束最晚」那筆的時區，不是「開始最晚」那筆（審查 Minor）：filterDayStops
+                  依 starts_at 排序，但 win.end 取的是 max(endsAt)——重疊行程或長時間住宿的情況下
+                  兩者不是同一筆，用陣列最後一筆的時區去格式化就會犯 M-6 本身要修的錯 */}
+              {endStop && formatLocalTime(win.end, endStop.timezone)}
+            </span>
           </div>
         </>
       ) : (

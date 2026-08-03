@@ -34,14 +34,14 @@ export default async function InvitePage({
     data: { user },
   } = await supabase.auth.getUser()
 
-  // 降級方案定案（審查 M-6）：未登入不做 next 回跳（login 頁與 OAuth callback 的 redirect
-  // 白名單改動屬回國後範圍，見 README 已知限制），請使用者登入後重新開啟這個邀請連結。
+  // Step 4：未登入導向登入頁並帶 next，登入完成（含 Google OAuth 往返）後自動回跳這個邀請頁，
+  // 不需要使用者手動重新開啟連結
   if (!user) {
     return (
       <main className="mx-auto mt-24 w-96 text-center">
         <h1 className="mb-2 text-xl font-bold">請先登入</h1>
-        <p className="mb-4 text-sm text-gray-500">登入後請重新開啟這個邀請連結。</p>
-        <Link href="/login" className="text-sm underline">前往登入</Link>
+        <p className="mb-4 text-sm text-gray-500">登入後將自動回到這個邀請頁面。</p>
+        <Link href={`/login?next=/invite/${token}`} className="text-sm underline">前往登入</Link>
       </main>
     )
   }

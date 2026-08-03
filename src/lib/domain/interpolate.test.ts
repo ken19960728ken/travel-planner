@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { interpolatePosition } from './interpolate'
+import { interpolatePosition, segmentAt } from './interpolate'
 
 const HOUR = 60 * 60 * 1000
 const stop = (id: string, s: number, e: number, lat: number, lng: number) => ({
@@ -47,5 +47,30 @@ describe('interpolatePosition', () => {
   it('背靠背停留點（前者結束＝後者開始）交界時刻回傳前一點', () => {
     const backToBack = [stop('a', 9, 10, 1.0, 1.0), stop('b', 10, 11, 2.0, 2.0)]
     expect(interpolatePosition(backToBack, 10 * HOUR)).toEqual({ lat: 1.0, lng: 1.0 })
+  })
+})
+
+describe('segmentAt', () => {
+  const stops = [
+    { id: 'a', startsAt: 1000, endsAt: 2000, lat: 0, lng: 0 },
+    { id: 'b', startsAt: 3000, endsAt: 4000, lat: 1, lng: 1 },
+  ]
+  it('停留中回 stay', () => {
+    expect(segmentAt(stops, 1500)).toEqual({ kind: 'stay', stopId: 'a' })
+  })
+  it('空檔回 travel + progress', () => {
+    expect(segmentAt(stops, 2500)).toEqual({ kind: 'travel', fromStopId: 'a', toStopId: 'b', progress: 0.5 })
+  })
+  it('界外回端點 stay', () => {
+    expect(segmentAt(stops, 500)).toEqual({ kind: 'stay', stopId: 'a' })
+    expect(segmentAt(stops, 9999)).toEqual({ kind: 'stay', stopId: 'b' })
+  })
+  it('空陣列回 null；重疊取開始最早者（與 interpolatePosition 同語義）', () => {
+    expect(segmentAt([], 1500)).toBeNull()
+    const overlap = [
+      { id: 'x', startsAt: 1000, endsAt: 3000, lat: 0, lng: 0 },
+      { id: 'y', startsAt: 1200, endsAt: 2000, lat: 5, lng: 5 },
+    ]
+    expect(segmentAt(overlap, 1500)).toEqual({ kind: 'stay', stopId: 'x' })
   })
 })

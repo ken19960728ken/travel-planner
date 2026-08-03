@@ -426,6 +426,7 @@ export default function TripView({
     lng: number
     placeId: string | null
     isCustom: boolean
+    category: StopCategory
     /** 目標日；省略時為當前 Day。備選庫的「拼入行程」會指定任意日期 */
     targetDay?: string
   }): Promise<boolean> {
@@ -461,6 +462,7 @@ export default function TripView({
         lng: p.lng,
         place_id: p.placeId,
         is_custom: p.isCustom,
+        category: p.category,
         timezone,
         starts_at: new Date(slot.startsAt).toISOString(),
         ends_at: new Date(slot.endsAt).toISOString(),
@@ -486,7 +488,7 @@ export default function TripView({
 
   /** 存入備選：不寫 stops、不佔時間軸，只把地點收進 trip_candidates 待日後決定。
    *  三重閘門與 addStop 對齊（canEdit 防線二、busyRef 同步 guard 防連點、stopsError 讀取失敗即關閉寫入）。 */
-  async function saveCandidate(name: string): Promise<boolean> {
+  async function saveCandidate(name: string, category: StopCategory): Promise<boolean> {
     if (!canEdit) return false
     if (busyRef.current) return false
     if (stopsError) return false
@@ -495,13 +497,14 @@ export default function TripView({
     setBusy(true)
     try {
       const supabase = createClient()
-      // 五欄，一個都不能多：created_by / created_at / id 不在欄位級 INSERT 白名單內，帶了會 42501
+      // 六欄，一個都不能多：created_by / created_at / id 不在欄位級 INSERT 白名單內，帶了會 42501
       const { error } = await supabase.from('trip_candidates').insert({
         trip_id: trip.id,
         name,
         lat: searchPreview.lat,
         lng: searchPreview.lng,
         place_id: searchPreview.place.id ?? '',
+        category,
       })
       if (error) {
         // 錯誤碼翻成人話：使用者看到「23505」不知道那是什麼意思
@@ -536,6 +539,8 @@ export default function TripView({
       lng: c.lng,
       placeId: c.place_id,
       isCustom: false,
+      // 沿用備選自己的分類：使用者存入備選時已經確認過一次，拼入行程不該把它重設回 other
+      category: c.category,
       targetDay: day,
     })
     if (!ok) return false // addStop 已設好 notice
@@ -728,16 +733,18 @@ export default function TripView({
               key={searchPreview.seq}
               place={searchPreview.place}
               initialName={searchPreview.name}
+              initialCategory={searchPreview.category}
               lat={searchPreview.lat}
               lng={searchPreview.lng}
               busy={busy}
-              onAdd={async name => {
+              onAdd={async (name, category) => {
                 const ok = await addStop({
                   name,
                   lat: searchPreview.lat,
                   lng: searchPreview.lng,
                   placeId: searchPreview.place.id,
                   isCustom: false,
+                  category,
                 })
                 if (ok) setSearchPreview(null) // 成功後清掉預覽；失敗維持原樣讓使用者能重試
                 return ok
@@ -753,7 +760,8 @@ export default function TripView({
                 e.preventDefault()
                 const name = draftName.trim()
                 if (!name) return
-                const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
+                // 地圖右鍵自訂地點沒有 Google 分類資料可推導，一律歸類 other
+                const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true, category: 'other' })
                 if (ok) {
                   setDraftPin(null)
                   setDraftName('')

@@ -5,6 +5,8 @@ import tzlookup from '@photostructure/tz-lookup'
 import { localWeekMinute } from '@/lib/domain/tz'
 import { isOpenNow, type OpeningPeriod } from '@/lib/domain/openNow'
 import { isRatableCategory, priceLevelLabel, googleMapsSearchUrl } from '@/lib/domain/placePreview'
+import type { StopCategory } from '@/lib/domain/placeCategory'
+import { CATEGORY_ICON, CATEGORY_LABEL, CATEGORY_ORDER } from './categoryUi'
 
 // Enterprise 批次（rating/userRatingCount/priceLevel/regularOpeningHours）分頁生命週期記憶體快取：
 // 同一個 place 在同一次瀏覽中重複預覽（例如取消後再選回同一景點）不必重打。宣告在模組作用域，
@@ -69,10 +71,18 @@ type DetailStatus = 'idle' | 'loading' | 'loaded' | 'error'
  *  評分/營業時間/價位等 Enterprise 資料只活在本元件 state（含上面的模組快取），卸載即消失——
  *  onAdd 只會把使用者編輯後的名稱交給父層的 addStop，絕不把這些欄位帶出這個元件。
  *  onSaveCandidate（存入備選）同樣只交出使用者編輯後的名稱字串，一樣禁止把 detail/place 的
- *  Enterprise 欄位帶出這個元件。 */
+ *  Enterprise 欄位帶出這個元件。
+ *
+ *  分類（Plan 7 Task 4）：initialCategory 是父層用 place.types/primaryType 推導出的預填值，
+ *  在這裡是「使用者送出前可確認、可改的自有標記」而非快取的 Google 屬性——Google ToS 只允許永久
+ *  保存 place_id，分類之所以能落 DB，前提就是它已被使用者過目確認過。所以下拉必須在按下
+ *  「加入行程」／「存入備選」之前就可見可改，不能做成靜默自動填。onAdd/onSaveCandidate 送出時只
+ *  帶六值 slug（StopCategory）本身，place.types／place.primaryType／detail 的任何欄位一律不得
+ *  離開這個元件。 */
 export default function PlacePreviewCard({
   place,
   initialName,
+  initialCategory,
   lat,
   lng,
   busy,
@@ -82,14 +92,16 @@ export default function PlacePreviewCard({
 }: {
   place: google.maps.places.Place
   initialName: string
+  initialCategory: StopCategory
   lat: number
   lng: number
   busy: boolean
-  onAdd: (name: string) => Promise<boolean>
-  onSaveCandidate?: (name: string) => Promise<boolean>
+  onAdd: (name: string, category: StopCategory) => Promise<boolean>
+  onSaveCandidate?: (name: string, category: StopCategory) => Promise<boolean>
   onCancel: () => void
 }) {
   const [name, setName] = useState(initialName)
+  const [category, setCategory] = useState<StopCategory>(initialCategory)
   const [detail, setDetail] = useState<PlaceDetail | null>(null)
   const [detailStatus, setDetailStatus] = useState<DetailStatus>('idle')
   const cancelledRef = useRef(false)
@@ -187,41 +199,56 @@ export default function PlacePreviewCard({
       )}
       {detailStatus === 'loading' && <span className="text-xs text-gray-400">評分載入中…</span>}
       <form
-        className="flex gap-1"
+        className="flex flex-col gap-1"
         onSubmit={e => {
           e.preventDefault()
           const trimmed = name.trim()
           if (!trimmed) return
-          void onAdd(trimmed)
+          void onAdd(trimmed, category)
         }}
       >
-        <input
-          className="min-w-0 flex-1 rounded border p-1 text-sm"
-          value={name}
-          onChange={e => setName(e.target.value)}
-          autoFocus
-          maxLength={200}
-        />
-        <button className="rounded bg-foreground px-2 text-sm text-background disabled:opacity-50" type="submit" disabled={busy}>
-          加入行程
-        </button>
-        {onSaveCandidate && (
-          <button
-            className="rounded border px-2 text-sm disabled:opacity-50"
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              const trimmed = name.trim()
-              if (!trimmed) return
-              void onSaveCandidate(trimmed)
-            }}
+        <div className="flex gap-1">
+          <input
+            className="min-w-0 flex-1 rounded border p-1 text-sm"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            autoFocus
+            maxLength={200}
+          />
+          <select
+            className="rounded border p-1 text-sm"
+            value={category}
+            onChange={e => setCategory(e.target.value as StopCategory)}
           >
-            存入備選
+            {CATEGORY_ORDER.map(c => (
+              <option key={c} value={c}>
+                {CATEGORY_ICON[c]} {CATEGORY_LABEL[c]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex gap-1">
+          <button className="rounded bg-foreground px-2 text-sm text-background disabled:opacity-50" type="submit" disabled={busy}>
+            加入行程
           </button>
-        )}
-        <button className="rounded border px-2 text-sm disabled:opacity-50" type="button" disabled={busy} onClick={onCancel}>
-          取消
-        </button>
+          {onSaveCandidate && (
+            <button
+              className="rounded border px-2 text-sm disabled:opacity-50"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                const trimmed = name.trim()
+                if (!trimmed) return
+                void onSaveCandidate(trimmed, category)
+              }}
+            >
+              存入備選
+            </button>
+          )}
+          <button className="rounded border px-2 text-sm disabled:opacity-50" type="button" disabled={busy} onClick={onCancel}>
+            取消
+          </button>
+        </div>
       </form>
       <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="self-start text-xs text-blue-600 underline">
         在 Google Maps 開啟

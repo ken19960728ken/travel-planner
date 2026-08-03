@@ -24,7 +24,13 @@ const STOP_KEYS = [
 ].sort()
 const LEG_KEYS = [
   'id', 'from_stop_id', 'to_stop_id', 'mode', 'duration_minutes', 'distance_meters',
-  'detail', 'source', 'stale', 'departs_at', 'arrives_at', 'estimated_cost', 'updated_at',
+  'detail',
+  // polyline：migration 20260804000000 補回白名單（總審 C-1）——播放視覺（RoutePolylines/
+  // PlaybackTrail）起分享頁需要路線資料渲染，notes 仍刻意排除（純外洩，無任何唯讀渲染路徑）。
+  // jsonb_build_object('polyline', l.polyline) 即使該筆資料 polyline 為 null 仍會產生這個 key
+  // （value 是 JSON null，key 本身存在），所以測試資料不含 polyline 也必須把它列進白名單
+  'polyline',
+  'source', 'stale', 'departs_at', 'arrives_at', 'estimated_cost', 'updated_at',
 ].sort()
 
 // ⚠️ 這組全等斷言是分享白名單的**唯一自動守門**——它會抓到任何多出或少掉的欄位。

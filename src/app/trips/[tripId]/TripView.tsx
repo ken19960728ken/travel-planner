@@ -1,13 +1,14 @@
 'use client'
 
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { defaultSlotForDay, stayMsForCategory } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
-import { interpolatePosition } from '@/lib/domain/interpolate'
+import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
+import { decodePolyline, greatCirclePoints, pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { adjacentPairs } from '@/lib/domain/legSync'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
@@ -23,6 +24,8 @@ import CandidatesPanel, { type Candidate } from './CandidatesPanel'
 import CostSummary from './CostSummary'
 import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
 import { normalizeCategory } from '@/lib/domain/placeCategory'
+import RoutePolylines from './RoutePolylines'
+import PlaybackTrail from './PlaybackTrail'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -72,6 +75,11 @@ export type Leg = {
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
 const PLAYBACK_MAX_ZOOM = 15 // 起播 fitBounds 的縮放上限：單點/近距離日程會被拉到最大縮放，需夾住
+/** 換段取景的縮放上限（分 mode）：步行段 fitBounds 天然拉到 18-19，夾 16 保留街廓脈絡；
+ *  其餘沿用整日取景的 15。flight 遠距離 fitBounds 天然落在 6-9，上限實際不生效，統一寫上避免特例 */
+const SEGMENT_MAX_ZOOM: Record<Leg['mode'], number> = {
+  walking: 16, transit: 15, driving: 15, flight: 15, custom: 15,
+}
 const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
 const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
@@ -103,7 +111,7 @@ function CameraFollow({ target, playing }: { target: { lat: number; lng: number 
  *  不會做任何事——若 mobile 版面把地圖面板用 `hidden` class 藏起來，這裡的 fitBounds 會靜默失效，
  *  合併前請檢查手機版面下播放是否仍會收整段視野。 */
 function PlaybackCamera({
-  lat, lng, active, bounds,
+  lat, lng, active, bounds, daySessionKey, segmentFitKey, segmentPath, segmentMaxZoom,
 }: {
   lat: number | null
   lng: number | null
@@ -112,6 +120,19 @@ function PlaybackCamera({
    *  故不放進下面 effect 的 deps，改用 ref 讀最新值（同 L468 playheadMsRef 的作法：ref 寫入也要放進
    *  effect 裡，不能在 render 期間直接賦值，否則違反 react-hooks/refs） */
   bounds: { lat: number; lng: number }[] | null
+  /** `${activeDay}:${播放 session 序號}`（2026-08-04 總審 M-3）：判斷整日 fitBounds 該不該重來的
+   *  依據。序號只在「從頭開始播放」時遞增（TripView 的 togglePlay），暫停後恢復不遞增——同一
+   *  session 已經 fit 過整日全景就不再重複，鏡頭留在暫停當下的位置（可能已被分段取景收到某段路線），
+   *  不會彈回全景。切 Day 因為 key 前綴帶 activeDay，天然視為新 session */
+  daySessionKey: string
+  /** travel 段才有值（`travel:${fromStopId}`），stay 段為 null：分段取景只在交通段觸發一次
+   *  fitBounds，停留期間鏡頭不動（2026-08-03 設計拍板 (a)）。deps 只看這個 key，同一段內 progress
+   *  逐秒變動不得觸發 refit */
+  segmentFitKey: string | null
+  /** 進行中交通段的完整路徑：travel 段才有值，缺料（地面段沒有 polyline）由呼叫端退回兩點直線 */
+  segmentPath: { lat: number; lng: number }[] | null
+  /** 該段 mode 對應的 fitBounds 縮放上限（SEGMENT_MAX_ZOOM） */
+  segmentMaxZoom: number
 }) {
   const map = useMap()
   const boundsRef = useRef(bounds)
@@ -122,6 +143,9 @@ function PlaybackCamera({
   // 若接著讀 map.getBounds() 可能拿到 fitBounds 套用前的舊視窗（見下方 C-1 說明的同一個啟發式
   // 時序問題），在舊座標系下誤判邊緣、跟 fitBounds 的動畫互搶。用這個旗標讓跟隨 effect 那輪跳過一次。
   const justFittedRef = useRef(false)
+  // 2026-08-04 總審 M-3：記錄「已經 fit 過整日全景」的 session key，暫停恢復（daySessionKey 不變）
+  // 時跳過重 fit，只有真正的新 session（從頭播放或切 Day）才收一次全景
+  const fittedSessionRef = useRef<string | null>(null)
   // 起播時（active 由 false→true）把當日整段收進視野，取代原本「zoom<12 才拉近單點」的邏輯——
   // 遠距離日程（如福岡→鹿兒島 200km）不會再被單點 setZoom(14) 強拉到超出容器涵蓋範圍。
   // 這裡用逐點 extend 建構 LatLngBounds 而非在呼叫端 Math.min/max 化簡座標，是因為 Math.min/max
@@ -129,24 +153,56 @@ function PlaybackCamera({
   // google.maps 腳本已載入後呼叫（map 非 null 時保證已載入），render 期間（含 SSR）不能碰 google 全域
   useEffect(() => {
     if (!map || !active) return
-    const b = boundsRef.current
-    if (!b || b.length === 0) return
-    // C-1（審查更正，race-free 修復）：原本 fitBounds 後立刻 getZoom() 判斷要不要夾縮放上限，
-    // 但 @types/google.maps 的 fitBounds 文件明載「是否套用動畫由內部啟發式決定」——呼叫後立刻讀到
-    // 的可能是套用前的舊值。用「按播放前的 zoom」去判斷「fitBounds 之後該不該夾」是競態、行為不可
-    // 決定（實測：使用者先手動放大到 z17 再播放 → 誤讀舊值 17 → 才誤觸發夾成 15，但若舊 zoom 本來
-    // 就 <15 則完全不會觸發，該夾的單點/近距離日程反而夾不到）。改用 maxZoom 選項讓 fitBounds 在
-    // 套用當下就不會超過上限，沒有「事後讀值」這個步驟，天生不會有時序競態。
+    // maxZoom 夾制放在 session 守門之外、只要 active 就套用（複審 🔵-4/5）：
+    // (a) dev 的 StrictMode 雙跑會 setup→cleanup→setup，第二次 setup 因 session 已記錄而跳過 fit——
+    //     若夾制也在守門內，cleanup 清掉的 maxZoom 就沒人補回，fitBounds 的延遲套用可能逃過夾制；
+    // (b) 暫停恢復（跳過 fit 的路徑）也一樣要把 cleanup 清掉的 maxZoom 補回，維持「播放中一律夾住」語義
     map.setOptions({ maxZoom: PLAYBACK_MAX_ZOOM })
-    const latLngBounds = new google.maps.LatLngBounds()
-    for (const p of b) latLngBounds.extend(p)
-    map.fitBounds(latLngBounds, 60)
-    justFittedRef.current = true
+    if (fittedSessionRef.current !== daySessionKey) {
+      const b = boundsRef.current
+      if (b && b.length > 0) {
+        // C-1（審查更正，race-free 修復）：原本 fitBounds 後立刻 getZoom() 判斷要不要夾縮放上限，
+        // 但 @types/google.maps 的 fitBounds 文件明載「是否套用動畫由內部啟發式決定」——呼叫後立刻讀到
+        // 的可能是套用前的舊值。用「按播放前的 zoom」去判斷「fitBounds 之後該不該夾」是競態、行為不可
+        // 決定（實測：使用者先手動放大到 z17 再播放 → 誤讀舊值 17 → 才誤觸發夾成 15，但若舊 zoom 本來
+        // 就 <15 則完全不會觸發，該夾的單點/近距離日程反而夾不到）。改用 maxZoom 選項讓 fitBounds 在
+        // 套用當下就不會超過上限，沒有「事後讀值」這個步驟，天生不會有時序競態。
+        const latLngBounds = new google.maps.LatLngBounds()
+        for (const p of b) latLngBounds.extend(p)
+        map.fitBounds(latLngBounds, 60)
+        justFittedRef.current = true
+        fittedSessionRef.current = daySessionKey
+      }
+    }
+    // cleanup 與「這輪是否真的 fit 了」無關，一律註冊：M-3 讓 fit 可能被跳過（同一 session 暫停恢復），
+    // 但 maxZoom 的還原不能跟著被跳過，否則分段取景（下面 effect）在跳過整日 fit 的 session 中設過的
+    // maxZoom 會在暫停後卡住手動縮放（審查 Task 4 Step 3 的既有壓力點 #3，M-3 不得使其回歸）
     return () => {
       // active 轉 false（暫停/停止）時還原，不永久限制使用者手動縮放
       map.setOptions({ maxZoom: null })
     }
-  }, [map, active])
+  }, [map, active, daySessionKey])
+  // 分段取景（2026-08-03 設計拍板）：播放推進到 travel 段時，以該段完整路徑 fitBounds 一次
+  // （瞬間切換，不做連續縮放——zoom 6↔16 的過渡動畫會穿越大量中間層級圖磚，是灰塊事故溫床）。
+  // stay 段 segmentFitKey 為 null，不動鏡頭（維持前一段的框，設計拍板 (a)）。
+  // deps 只看 segmentFitKey：同一段內 progress 逐秒變動不得觸發 refit。
+  // path/maxZoom 用 ref 讀最新值（同 boundsRef 模式——陣列參照每 render 都新）
+  const segmentPathRef = useRef(segmentPath)
+  const segmentMaxZoomRef = useRef(segmentMaxZoom)
+  useEffect(() => {
+    segmentPathRef.current = segmentPath
+    segmentMaxZoomRef.current = segmentMaxZoom
+  }, [segmentPath, segmentMaxZoom])
+  useEffect(() => {
+    if (!map || !active || !segmentFitKey) return
+    const path = segmentPathRef.current
+    if (!path || path.length === 0) return
+    map.setOptions({ maxZoom: segmentMaxZoomRef.current })
+    const b = new google.maps.LatLngBounds()
+    for (const p of path) b.extend(p)
+    map.fitBounds(b, 60)
+    justFittedRef.current = true
+  }, [map, active, segmentFitKey])
   useEffect(() => {
     if (!map || !active || lat === null || lng === null) return
     if (justFittedRef.current) {
@@ -628,30 +684,117 @@ export default function TripView({
   const selectedCandidate = candidates.find(c => c.id === selectedCandidateId) ?? null
   // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
   const activeDayStops = filterDayStops(stops, activeDay)
+
+  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
+  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
+  // （Task 3：宣告上移到 activeDayStops 之後，供下方分段推導使用——純常量推導，只依賴 stops/legs
+  //  props，上移不改變任何既有語義，中間沒有其他程式碼在此之前用到它們）
+  // useMemo（非普通宣告，2026-08-04 總審 M-2）：下面 routeLegs 的 useMemo 把 nextByStopId 列進
+  // deps，若這裡每次 render 都給新的 Map 參照，routeLegs 會跟著每次 render（含每秒播放 tick）重建
+  // 新陣列，RoutePolylines 收到新的 legs prop 參照又會觸發它內部 effect 全量拆建 overlays——
+  // 只在 stops 真的變動時才重建，理由與下面 stopById 相同
+  const nextByStopId = useMemo(
+    () => new globalThis.Map(
+      adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+        .map(([f, t]) => [f.id, t.id]),
+    ),
+    [stops],
+  )
+  // useMemo（非普通宣告）：下面 travelPath 的 useMemo 把 stopById 列進 deps，若這裡每次 render 都給
+  // 新的 Map 參照，travelPath 會跟著每秒重算、失去「長 polyline 不逐秒重解」的 memo 效果（本來就是
+  // 這顆 memo 存在的目的）；只在 stops 真的變動時才重建
+  const stopById = useMemo(() => new globalThis.Map(stops.map(s => [s.id, s])), [stops])
+  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+
+  // 選中日地圖路線只畫「仍在行程順序中」的段：配對脫離（插入停留點/調整順序後）的 legs 不該畫上地圖，
+  // 否則 flight 脫離段會畫成橫跨畫面、與正常段無法區分的紫色弧虛線（側欄 807 行的 detachedLegs 用同一
+  // 相鄰性判準 nextByStopId.get(from)===to 定義脫離段，這裡對齊）。deps 只用穩定的 legs/stops/activeDay/
+  // nextByStopId（皆已是 props 或上面的 memo），播放 tick 期間不變 → routeLegs 參照不變 → RoutePolylines
+  // 的 legs prop 不換新參照 → 其內部 effect 不會每秒重跑、全量拆建 overlays（2026-08-04 總審 M-2）
+  const routeLegs = useMemo(() => {
+    const activeDayStopIds = new Set(filterDayStops(stops, activeDay).map(s => s.id))
+    return legs.filter(l => activeDayStopIds.has(l.from_stop_id) && nextByStopId.get(l.from_stop_id) === l.to_stop_id)
+  }, [legs, stops, activeDay, nextByStopId])
+
   const win = dayWindow(activeDayStops)
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
   // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
   const clampedPlayheadMs = playheadMs === null || !win ? null : Math.min(Math.max(playheadMs, win.start), win.end)
+  // posStops 抽成共用：播放位置（interpolatePosition）與分段判定（segmentAt）同吃一份，不各自 map 一次
+  const posStops = activeDayStops.map(s => ({
+    id: s.id,
+    lat: s.lat,
+    lng: s.lng,
+    startsAt: new Date(s.starts_at).getTime(),
+    endsAt: new Date(s.ends_at).getTime(),
+  }))
   // 播放位置提到 component body：地圖「我」標記與 PlaybackCamera（M-7 鏡頭跟隨）共用同一份，不各算一次
-  const playheadPos =
-    clampedPlayheadMs === null
-      ? null
-      : interpolatePosition(
-          activeDayStops.map(s => ({
-            id: s.id,
-            lat: s.lat,
-            lng: s.lng,
-            startsAt: new Date(s.starts_at).getTime(),
-            endsAt: new Date(s.ends_at).getTime(),
-          })),
-          clampedPlayheadMs,
-        )
+  const playheadPos = clampedPlayheadMs === null ? null : interpolatePosition(posStops, clampedPlayheadMs)
+
+  // 當前播放分段：stay（停留中）或 travel（交通中）。travel 時查對應 leg 取 mode 與 polyline，
+  // 位置沿路線取位（有 polyline 走實路徑、flight 走大圓弧、其餘直線），取代單純兩點直線內插
+  const segment = clampedPlayheadMs === null ? null : segmentAt(posStops, clampedPlayheadMs)
+  // travel 段的識別 key：下面 segmentKey（completedPaths 的 memo key）與呼叫 PlaybackCamera 的
+  // segmentFitKey prop 共用同一份拼接，不在兩處各自手打 `travel:${fromStopId}`（2026-08-04 總審建議）
+  const travelFitKey = segment?.kind === 'travel' ? `travel:${segment.fromStopId}` : null
+  const travelLeg =
+    segment?.kind === 'travel' ? (legByPair.get(`${segment.fromStopId}→${segment.toStopId}`) ?? null) : null
+  // 路徑解碼在 render body 每秒發生一次，長 polyline 需 memo（key：leg id + 座標端點）
+  const travelPath = useMemo(() => {
+    if (!travelLeg) return null
+    if (travelLeg.polyline) return decodePolyline(travelLeg.polyline)
+    const from = stopById.get(travelLeg.from_stop_id)
+    const to = stopById.get(travelLeg.to_stop_id)
+    if (!from || !to) return null
+    if (travelLeg.mode === 'flight') {
+      return greatCirclePoints({ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng })
+    }
+    return null // 無 polyline 的地面段維持直線內插（資料就沒有路線）
+  }, [travelLeg, stopById])
+  const travelPos = segment?.kind === 'travel' && travelPath ? pathPosition(travelPath, segment.progress) : null
+  const playheadDisplayPos = travelPos ?? playheadPos // travelPos 缺料時退回既有直線內插
+
+  // 進行中交通段的完整路徑：PlaybackCamera 分段取景（Task 4）與 PlaybackTrail 進行中紅線（Task 3）
+  // 共用同一份，避免兩處各自重複同一段 fallback（缺 polyline 的地面段退回兩點直線，與
+  // playheadDisplayPos 的直線內插語義一致）
+  const currentTravelPath =
+    segment?.kind === 'travel'
+      ? (travelPath ??
+          (() => {
+            const f = stopById.get(segment.fromStopId)
+            const t = stopById.get(segment.toStopId)
+            return f && t ? [{ lat: f.lat, lng: f.lng }, { lat: t.lat, lng: t.lng }] : null
+          })())
+      : null
 
   // 播放鏡頭 fitBounds 用的當日停留點座標（M-7 修復）：只傳原始點陣列，不在這裡用 Math.min/max 化簡成
   // min/max——跨 180 度經線時 min/max 會反向算出錯誤的框。真正安全的 LatLngBounds 建構（逐點 extend）
   // 只能在 google.maps 腳本載入後執行，這裡是 render 期間（含 SSR）碰不到 google 全域，故挪到
   // PlaybackCamera 的 effect 裡處理
   const playbackBounds = activeDayStops.length > 0 ? activeDayStops.map(s => ({ lat: s.lat, lng: s.lng })) : null
+
+  // 已走完的段落路徑：當日順序中，結束時刻早於當前分段起點的每一段。逐秒重算浪費（每段路徑固定），
+  // memo key 取「當前所在分段的識別」——換段才重算
+  // travelFitKey! 安全：這個分支已由 segment.kind !== 'stay'（PlaybackSegment 只有 stay/travel 兩種）
+  // 縮限到 segment.kind === 'travel'，travelFitKey 的判斷式與此同條件，保證非 null
+  const segmentKey =
+    segment === null ? 'none' : segment.kind === 'stay' ? `stay:${segment.stopId}` : travelFitKey!
+  const completedPaths = useMemo(() => {
+    if (clampedPlayheadMs === null) return []
+    const ordered = [...posStops].sort((a, b) => a.startsAt - b.startsAt)
+    const out: LatLng[][] = []
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const from = ordered[i]
+      const to = ordered[i + 1]
+      if (to.startsAt > clampedPlayheadMs) break // 這段還沒走完（含進行中——由 currentPath 負責）
+      const leg = legByPair.get(`${from.id}→${to.id}`)
+      if (leg?.polyline) out.push(decodePolyline(leg.polyline))
+      else if (leg?.mode === 'flight') out.push(greatCirclePoints(from, to))
+      else out.push([{ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng }])
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 逐秒變動的 clampedPlayheadMs 刻意不入 deps，換段（segmentKey）才需要重算
+  }, [segmentKey, activeDay, stops, legs])
 
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
@@ -685,6 +828,14 @@ export default function TripView({
     return () => clearInterval(timer)
   }, [playing, stops, activeDay])
 
+  // 播放 session 序號（2026-08-04 總審 M-3）：只在「從頭開始播放」（播放頭原本是 null，或即將
+  // wrap 回視窗起點）時遞增，暫停後恢復（播放頭停在原地繼續）不遞增。傳給 PlaybackCamera 的
+  // daySessionKey（`${activeDay}:${序號}`）讓它判斷整日 fitBounds 該不該重來——同一 session 已經
+  // fit 過全景，暫停恢復時鏡頭應該留在原地（可能已被分段取景收到某段路線），不是彈回全景。
+  // 切 Day 天然是新 session，不需要在 changeDay/promoteCandidate 額外遞增：key 的 activeDay
+  // 前綴本身就會換掉
+  const playSessionRef = useRef(0)
+
   // 播放/暫停切換：暫停中按下才可能開始播放。起播時一律把播放頭夾回目前視窗內，
   // 已在（或超過）視窗尾端則歸零到視窗起點——不論播放頭是初次設定、還是資料變動後落在視窗外，
   // 畫面都立刻對齊即將播放的位置，不必等下一次 tick 才收斂。
@@ -695,18 +846,11 @@ export default function TripView({
     }
     if (!win) return
     const clamped = playheadMs === null ? win.start : Math.min(Math.max(playheadMs, win.start), win.end)
-    setPlayheadMs(clamped + PLAY_STEP_MS > win.end ? win.start : clamped)
+    const wrapped = clamped + PLAY_STEP_MS > win.end
+    if (playheadMs === null || wrapped) playSessionRef.current += 1
+    setPlayheadMs(wrapped ? win.start : clamped)
     setPlaying(true)
   }
-
-  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
-  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
-  const nextByStopId = new globalThis.Map(
-    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-      .map(([f, t]) => [f.id, t.id]),
-  )
-  const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
-  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
 
   // Important-2 根治：配對脫離（插入停留點/調整順序）的 legs 不再出現在上面的正常交通列（legByPair
   // 命中不到），過去因此從畫面消失；改收進側欄專屬區塊，過濾出 from 停留點屬 activeDay 者（歸屬規則同 M-4）
@@ -1039,21 +1183,60 @@ export default function TripView({
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
                 )}
-                {playheadPos && (
+                {playheadDisplayPos && (
                   // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
                   // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
                   // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
                   // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
-                  <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
-                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                  <AdvancedMarker position={playheadDisplayPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                    {travelLeg && travelLeg.mode === 'flight' ? (
+                      // SVG 飛機（emoji ✈️ 是 U+2708+FE0F，跨平台朝向不一且會退化黑白字元；SVG 朝向可控）。
+                      // viewBox 內機頭朝上（北），rotate 直接用方位角。填色沿用 RoutePolylines 的 flight 色
+                      // （#6b21a8，2026-08-04 總審 m-6 的 ΔE 重掃結果，見 RoutePolylines.tsx 註解）
+                      <svg
+                        width="28" height="28" viewBox="0 0 24 24"
+                        style={{ transform: `rotate(${Math.round(travelPos?.headingDeg ?? 0)}deg)` }}
+                        className="drop-shadow"
+                      >
+                        <path
+                          d="M12 2 L14 9 L21 12 L14 13.5 L14 19 L16 21.5 L12 20 L8 21.5 L10 19 L10 13.5 L3 12 L10 9 Z"
+                          fill="#6b21a8" stroke="#fff" strokeWidth="1"
+                        />
+                      </svg>
+                    ) : travelLeg && travelLeg.mode !== 'custom' ? (
+                      // 地面模式：emoji 徽章不旋轉（旋轉的行人/列車違反直覺）。🚇🚶🚗 預設 emoji 呈現，無 FE0F 問題
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-white text-base shadow">
+                        {MODE_ICON[travelLeg.mode]}
+                      </div>
+                    ) : (
+                      <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                    )}
                   </AdvancedMarker>
                 )}
+                <RoutePolylines
+                  legs={routeLegs}
+                  stops={stops}
+                  selectedLegId={selectedLegId}
+                />
+                <PlaybackTrail
+                  completedPaths={completedPaths}
+                  currentPath={currentTravelPath}
+                  progress={segment?.kind === 'travel' ? segment.progress : 0}
+                  // 2026-08-04 總審 m-4 拍板：紅線的存續改綁「播放頭是否有值」而非「是否正在播放」——
+                  // 暫停就是為了看路線，線消失是反直覺的；拖曳 Timeline 播放頭（未按播放）也該同步顯示。
+                  // 只有切 Day（playheadMs 歸 null，clampedPlayheadMs 隨之為 null）才清除
+                  active={clampedPlayheadMs !== null}
+                />
                 <CameraFollow target={cameraTarget} playing={playing} />
                 <PlaybackCamera
-                  lat={playheadPos?.lat ?? null}
-                  lng={playheadPos?.lng ?? null}
+                  lat={playheadDisplayPos?.lat ?? null}
+                  lng={playheadDisplayPos?.lng ?? null}
                   active={playing}
                   bounds={playbackBounds}
+                  daySessionKey={`${activeDay}:${playSessionRef.current}`}
+                  segmentFitKey={playing ? travelFitKey : null}
+                  segmentPath={currentTravelPath}
+                  segmentMaxZoom={SEGMENT_MAX_ZOOM[travelLeg?.mode ?? 'custom']}
                 />
               </Map>
             </SectionErrorBoundary>
@@ -1077,7 +1260,13 @@ export default function TripView({
           if (s) setCameraTarget({ lat: s.lat, lng: s.lng })
         }}
         playheadMs={playheadMs}
-        onPlayheadChange={setPlayheadMs}
+        onPlayheadChange={ms => {
+          // 暫停態手動拖曳播放頭 = 新的播放起點（複審 🟡-1）：bump session 讓下次起播重收整日全景，
+          // 否則鏡頭會卡在前一段的街廓級取景。播放中拖曳不 bump——daySessionKey 在 E1 deps 裡，
+          // 播放中 bump 會讓每次拖動都彈回整日全景（複審明示的天真寫法陷阱）
+          if (!playing) playSessionRef.current += 1
+          setPlayheadMs(ms)
+        }}
         onMove={canEdit ? moveStop : undefined}
         busy={busy}
         playing={playing}

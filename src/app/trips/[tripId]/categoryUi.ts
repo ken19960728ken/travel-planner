@@ -14,6 +14,13 @@ import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
  *    bg-red-600             時間衝突色塊（時間軸）
  *    red-100 / red-700      趕不上連接條（時間軸）
  *
+ *  RoutePolylines.tsx 的 MODE_COLOR（選中日路線色，2026-08-04 總審 m-6 重掃）——同樣不得挪用：
+ *    #1e3a8a  transit（深藍）    #166534  walking（深綠）    #a16207  driving（琥珀棕）
+ *    #6b21a8  flight（深紫，TripView.tsx 的 SVG 飛機填色沿用同一值）
+ *    #1e293b  custom（石板灰）
+ *  五色彼此 pairwise 最小 ΔE 37.3；對本表六桶色 + 上列全部保留色最小 ΔE 20.3（custom vs other），
+ *  零 exact 碰撞（此前 transit 曾與「選取」#2563eb exact 碰撞、walking/flight 曾挪用 sight/lodging）。
+ *
  *  例外一（刻意重疊，非漏比對）：bg-emerald-600 在 Timeline.tsx 目前是「一般色塊」的預設 fallback
  *  （非選取、非衝突時的色塊底色）。本表把 emerald-600 重新賦義為「景點」——因為 Timeline 那個
  *  fallback 本身就是未分類前的佔位色，Plan 7 後續任務接上分類後，這格會被换成依分類上色，屆時

@@ -5,14 +5,18 @@ import { useMap } from '@vis.gl/react-google-maps'
 import { decodePolyline, greatCirclePoints } from '@/lib/domain/polyline'
 import type { Leg, Stop } from './TripView'
 
-// walking/flight 改用 #16a34a/#8b5cf6（非 #059669/#7c3aed）：後兩者是 categoryUi.ts 的六桶分類色
-// （sight/lodging），若挪用會讓地圖同時出現「景點分類色」與「路線色」撞成同一個色碼，違反保留色約束
+// 2026-08-04 總審 m-6：CIE ΔE（sRGB→XYZ→Lab 歐氏距離，方法同 categoryUi.ts）全配對掃描結果——
+// 五色彼此 pairwise 最小 ΔE 37.3（transit vs flight）；五色對全部保留色（六桶分類色 + #2563eb 選取 +
+// #9ca3af 草稿針 + #f59e0b 選中備選 + #f97316 播放頭 + #dc2626 紅線）最小 ΔE 20.3（custom vs
+// other #52525b），零 exact 碰撞。此前版本 transit=#2563eb 與「選取」exact 碰撞（ΔE=0）、
+// walking/flight 曾挪用 sight/lodging 的六桶色，本輪一併換掉。色相對應：transit 深藍、walking 深綠、
+// driving 琥珀棕（為了與 food #7c2d12 拉開距離，比一般「橘」更偏黃棕）、flight 深紫、custom 石板灰
 const MODE_COLOR: Record<Leg['mode'], string> = {
-  transit: '#2563eb', walking: '#16a34a', driving: '#d97706', flight: '#8b5cf6', custom: '#6b7280',
+  transit: '#1e3a8a', walking: '#166534', driving: '#a16207', flight: '#6b21a8', custom: '#1e293b',
 }
 
-/** 選中日的交通段路線：有 polyline（Google 衍生）解碼實線；無 polyline（flight/manual）畫大圓弧虛線。
- *  google.maps.Polyline 非 React 元件，用 effect 管生命週期，cleanup 全量移除。 */
+/** 選中日的交通段路線：有 polyline（Google 衍生）解碼實線；無 polyline 者（flight／manual／無資料的
+ *  transit）畫大圓弧虛線。google.maps.Polyline 非 React 元件，用 effect 管生命週期，cleanup 全量移除。 */
 export default function RoutePolylines({
   legs, stops, selectedLegId,
 }: {

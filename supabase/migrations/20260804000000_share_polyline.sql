@@ -6,13 +6,18 @@ begin;
 -- 分享頁缺它會整頁退化成直線虛線。ToS 面不變：polyline 屬 Google 衍生、30 天 TTL 快取，
 -- 對匿名訪客渲染與對成員渲染同一合規類別；仍然不進 snapshot/匯出（snapshot.ts 明文排除，未動）。
 -- notes 維持剔除（純外洩，無任何唯讀渲染路徑）。
--- payload 影響：polyline 單段實測數十到數百字元、極端 2KB；500 legs 上限下最壞多約 1MB，
--- 仍在 20260803000005 記載的頻寬護欄（limit 500）承受範圍內。
+-- payload 影響（2026-08-04 總審 m-7 更正）：legs.polyline 這欄原本沒有長度上限——editor 可經
+-- PostgREST 直寫任意長字串（不像 title/name 那類欄位有 check constraint 把關），本地實測 Google
+-- Routes 回傳的 polyline 最長 662 字元，遠低於任何「極端」推測值，但沒有硬上限就不能假設它有界。
+-- 下面補一條 20000 字元的 check constraint（給足餘裕，遠高於實測值，同時排除惡意/異常超長字串把
+-- payload 撐爆的風險）；500 legs 上限下最壞情況約 500 * 20000 = 10MB，超出 20260803000005 記載的
+-- 頻寬護欄假設，但這是「有硬上限」對「無上限」的改善，不是新增風險——原本無上限時最壞情況無界。
 --
 -- create or replace 保留既有 ACL（先前的 revoke from public + grant anon/authenticated 不受影響），
 -- 文末仍重申一次以自我文件化。
 -- 回滾：重跑 20260803000005 的 create function 內容（即移除 polyline 欄），或整顆
 -- drop function public.get_shared_trip(uuid);（應急停用分享，語義同「連結已失效」）。
+-- constraint 回滾：alter table public.legs drop constraint if exists legs_polyline_len;
 create or replace function public.get_shared_trip(p_token uuid) returns jsonb
 language sql security definer stable set search_path = public, pg_temp as $$
   select jsonb_build_object(
@@ -40,4 +45,8 @@ language sql security definer stable set search_path = public, pg_temp as $$
 $$;
 revoke execute on function public.get_shared_trip(uuid) from public;
 grant execute on function public.get_shared_trip(uuid) to anon, authenticated;
+
+alter table public.legs
+  add constraint legs_polyline_len check (polyline is null or length(polyline) <= 20000);
+
 commit;

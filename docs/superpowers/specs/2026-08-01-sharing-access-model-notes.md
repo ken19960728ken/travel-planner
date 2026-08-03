@@ -16,7 +16,7 @@
 分享連結的權限判斷是**一句 SQL**：
 
 ```sql
--- supabase/migrations/20260806000000_share_rpc.sql（分支 plan5/task8-share，尚未合併）
+-- supabase/migrations/20260803000005_share_rpc.sql（分支 plan5/task8-share，尚未合併）
 create function public.get_shared_trip(p_token uuid) returns jsonb
 language sql security definer stable set search_path = public as $$
   select jsonb_build_object(...)
@@ -140,7 +140,7 @@ Google Docs/Sheets **其實允許匿名編輯**（「匿名的水豚」那些）
 
 ## 相關檔案
 
-- `supabase/migrations/20260806000000_share_rpc.sql`（分支 `plan5/task8-share`）
+- `supabase/migrations/20260803000005_share_rpc.sql`（分支 `plan5/task8-share`）
 - `supabase/migrations/20260730000000_init.sql:57-80`（三顆 RLS helper）
 - `supabase/migrations/20260803000000_invites_and_grants.sql:84-97`（`regenerate_share_token`）
 - `src/app/trips/[tripId]/MembersPanel.tsx:129-133`（團隊自訂的「不 fail-open」原則）、`:222-250`（`removeMember`）

@@ -20,6 +20,109 @@ function expiryLabel(expiresAt: string): string {
   return `剩餘 ${Math.ceil(hours / 24)} 天`
 }
 
+/** 分享連結（Task 8）：成員皆可見並複製唯讀連結；owner 另可重新產生（舊連結立即失效，
+ *  regenerate_share_token 是 owner-only RPC）。獨立開關狀態，與成員面板互不干擾。 */
+function ShareButton({ tripId, shareToken, isOwner }: { tripId: string; shareToken: string; isOwner: boolean }) {
+  const router = useRouter()
+  const [open, setOpen] = useState(false)
+  const [token, setToken] = useState(shareToken)
+  const [busy, setBusy] = useState(false)
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false)
+  const [notice, setNotice] = useState<Notice>(null)
+
+  async function copyLink() {
+    const link = `${location.origin}/share/${token}`
+    try {
+      await navigator.clipboard.writeText(link)
+      setNotice({ kind: 'success', text: '連結已複製 ✓' })
+    } catch {
+      // clipboard 權限被拒或非安全情境（http）：連結直接顯示在提示裡，仍可手動複製
+      setNotice({ kind: 'success', text: `分享連結：${link}` })
+    }
+  }
+
+  async function regenerate() {
+    if (busy) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.rpc('regenerate_share_token', { p_trip_id: tripId })
+      if (error || !data) {
+        setNotice({ kind: 'error', text: '重新產生連結失敗，請稍後再試' })
+        return
+      }
+      setToken(data)
+      setNotice({ kind: 'success', text: '已產生新連結，舊連結已失效 ✓' })
+      router.refresh()
+    } finally {
+      setBusy(false)
+      setConfirmRegenerate(false)
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        className="rounded border px-2 py-1 text-sm"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen(o => !o)
+          setNotice(null)
+          setConfirmRegenerate(false)
+        }}
+      >
+        分享
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded border bg-background p-3 text-sm shadow-lg">
+          {notice && (
+            <p className={`mb-2 text-xs ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
+          )}
+          <p className="mb-2 break-all text-xs text-gray-500">{`${location.origin}/share/${token}`}</p>
+          <div className="flex items-center gap-2">
+            <button type="button" className="rounded border px-2 py-1 text-xs" onClick={copyLink}>
+              複製連結
+            </button>
+            {isOwner && (
+              confirmRegenerate ? (
+                <span className="inline-flex flex-wrap items-center gap-1 text-amber-700">
+                  舊連結將立即失效
+                  <button
+                    type="button"
+                    className="rounded bg-amber-600 px-1 text-white disabled:opacity-50"
+                    disabled={busy}
+                    onClick={regenerate}
+                  >
+                    確認
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border px-1 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => setConfirmRegenerate(false)}
+                  >
+                    取消
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="rounded border px-2 py-1 text-xs text-amber-700"
+                  onClick={() => setConfirmRegenerate(true)}
+                >
+                  重新產生連結
+                </button>
+              )
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** 成員面板（Task 7）：owner 視角管理成員角色/移除、產生與撤銷邀請連結；非 owner 成員可自行退出。
  *  trip_members 與 profiles 無 FK（page.tsx 已用兩段查詢併好 displayName），這裡只做展示與寫入。
  *
@@ -35,6 +138,7 @@ export default function MembersPanel({
   isOwner,
   members,
   invites,
+  shareToken,
   loadError = false,
 }: {
   tripId: string
@@ -43,6 +147,8 @@ export default function MembersPanel({
   members: Member[]
   /** 僅 owner 會收到非空陣列——其餘角色的 trip_invites RLS select 本就回 0 列，page.tsx 直接省查 */
   invites: Invite[]
+  /** Task 8：trips.share_token 恆非 null，型別維持可選僅為與呼叫端資料來源慣例一致——分享鈕以此欄位存在為顯示條件 */
+  shareToken?: string
   /** page.tsx 讀 trip_members/profiles/trip_invites 任一失敗時設 true：面板仍可開合，但不假裝資料完整 */
   loadError?: boolean
 }) {
@@ -129,6 +235,19 @@ export default function MembersPanel({
         setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未移除成員，請稍後再試' })
         return
       }
+      // 審查 I-2（兩位審查員獨立查到）：原本只撤邀請、完全沒碰 share_token，但 ShareButton 對
+      // 所有成員（含 viewer）無條件顯示——被移除者手上那條唯讀連結永久有效，而 UI 卻寫「已一併撤銷」。
+      // 這正是同檔上方「唯一不會 fail-open 的作法」那段拒絕過的模式。分享連結一併重新產生，
+      // 舊的立刻失效。只有 owner 能呼叫此 RPC，非 owner 移除成員時文案必須誠實說明分享連結未變。
+      let shareRegenerated = false
+      if (isOwner) {
+        const { error: regenErr } = await supabase.rpc('regenerate_share_token', { p_trip_id: tripId })
+        if (regenErr) {
+          setNotice({ kind: 'error', text: '分享連結重新產生失敗，尚未移除成員，請稍後再試' })
+          return
+        }
+        shareRegenerated = true
+      }
       const { data, error } = await supabase
         .from('trip_members').delete().eq('trip_id', tripId).eq('user_id', userId).select('user_id')
       if (error) {
@@ -141,7 +260,12 @@ export default function MembersPanel({
         router.refresh()
         return
       }
-      setNotice({ kind: 'success', text: '已移除 ✓（該行程所有邀請連結已一併撤銷，如需再邀請請重新產生）' })
+      setNotice({
+        kind: 'success',
+        text: shareRegenerated
+          ? '已移除 ✓（邀請連結與分享連結均已失效，如需再分享請重新產生）'
+          : '已移除 ✓（邀請連結已全部撤銷；分享連結不受影響，請聯繫擁有者重新產生）',
+      })
       router.refresh()
     } finally {
       busyRef.current = false
@@ -232,7 +356,9 @@ export default function MembersPanel({
   }
 
   return (
-    <div className="relative">
+    <>
+      {shareToken && <ShareButton key={shareToken} tripId={tripId} shareToken={shareToken} isOwner={isOwner} />}
+      <div className="relative">
       <button
         type="button"
         className="shrink-0 whitespace-nowrap rounded border px-2 py-1 text-sm"
@@ -385,5 +511,6 @@ export default function MembersPanel({
         </div>
       )}
     </div>
+    </>
   )
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextDefaultSlot, defaultSlotForDay } from './slot'
+import { nextDefaultSlot, defaultSlotForDay, stayMsForCategory } from './slot'
 import type { StopSchedule } from './types'
 import { wallInputToUtcMs } from './tz'
 
@@ -106,5 +106,39 @@ describe('defaultSlotForDay', () => {
       startsAt: expectedStart,
       endsAt: expectedStart + HOUR,
     })
+  })
+})
+
+describe('stayMsForCategory（Plan 7 Task 11）', () => {
+  it('交通站 15 分、景點 90 分，其餘維持 60 分', () => {
+    expect(stayMsForCategory('transport')).toBe(15 * 60_000)
+    expect(stayMsForCategory('sight')).toBe(90 * 60_000)
+    for (const c of ['food', 'lodging', 'shopping', 'other'] as const) {
+      expect(stayMsForCategory(c)).toBe(60 * 60_000)
+    }
+  })
+})
+
+describe('stayMs 參數（可選，向下相容）', () => {
+  it('nextDefaultSlot 空排程時套用指定時長', () => {
+    const t = Date.UTC(2026, 7, 10, 1, 0)
+    expect(nextDefaultSlot([], t, 15 * 60_000)).toEqual({ startsAt: t, endsAt: t + 15 * 60_000 })
+  })
+
+  it('nextDefaultSlot 接續時同樣套用（間隔仍為 30 分）', () => {
+    const end = Date.UTC(2026, 7, 10, 3, 0)
+    const r = nextDefaultSlot([{ id: 'a', startsAt: end - 3_600_000, endsAt: end, locked: false }], 0, 90 * 60_000)
+    expect(r.startsAt).toBe(end + 30 * 60_000)
+    expect(r.endsAt - r.startsAt).toBe(90 * 60_000)
+  })
+
+  it('defaultSlotForDay 傳遞 stayMs 到底層', () => {
+    const r = defaultSlotForDay([], '2026-08-10', null, 'Asia/Tokyo', 90 * 60_000)
+    expect(r.endsAt - r.startsAt).toBe(90 * 60_000)
+  })
+
+  it('不傳 stayMs 時維持 1 小時（既有呼叫端零行為變化）', () => {
+    const r = defaultSlotForDay([], '2026-08-10', null, 'Asia/Tokyo')
+    expect(r.endsAt - r.startsAt).toBe(60 * 60_000)
   })
 })

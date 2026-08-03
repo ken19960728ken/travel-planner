@@ -28,7 +28,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
   const [{ data: stopRows, error: stopsErr }, { data: legRows, error: legsErr }] = await Promise.all([
     supabase
       .from('stops')
-      .select('id, name, timezone, starts_at, ends_at, estimated_cost, notes')
+      .select('id, name, timezone, starts_at, ends_at, estimated_cost, notes, category')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })
@@ -49,6 +49,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
   sheet.columns = [
     { header: '時間', key: 'time', width: 16 },
     { header: '項目', key: 'item', width: 32 },
+    { header: '分類', key: 'category', width: 10 },
     { header: '分鐘', key: 'minutes', width: 8 },
     { header: `花費（${trip.currency}）`, key: 'cost', width: 14 },
     { header: '備註', key: 'notes', width: 32 },
@@ -61,16 +62,20 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
   // （不同於沒有型別資訊的 CSV 匯出，那類格式才有公式注入攻擊面）。
   for (const row of rows) {
     if (row.kind === 'day') {
-      const r = sheet.addRow({ time: '', item: row.label, minutes: '', cost: '', notes: '' })
+      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: '', notes: '' })
       r.font = { bold: true }
       r.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } } })
     } else if (row.kind === 'stop') {
-      sheet.addRow({ time: row.time, item: row.name, minutes: row.stayMinutes, cost: row.cost ?? '', notes: row.notes ?? '' })
+      sheet.addRow({ time: row.time, item: row.name, category: row.category, minutes: row.stayMinutes, cost: row.cost ?? '', notes: row.notes ?? '' })
     } else if (row.kind === 'leg') {
       const item = `${row.modeLabel} ${row.durationText}${row.crossDay ?? ''}${row.detached ? '（已脫離順序）' : ''}`
-      sheet.addRow({ time: '', item, minutes: '', cost: row.cost ?? '', notes: '' })
+      sheet.addRow({ time: '', item, category: '', minutes: '', cost: row.cost ?? '', notes: '' })
+    } else if (row.kind === 'categoryTotal') {
+      // 分類小計：淺灰底與 Day 標題區隔（Day 是深灰 E0E0E0），不加粗以免與總計混淆
+      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: row.cost, notes: '' })
+      r.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } } })
     } else {
-      const r = sheet.addRow({ time: '', item: '總計', minutes: '', cost: row.cost, notes: '' })
+      const r = sheet.addRow({ time: '', item: '總計', category: '', minutes: '', cost: row.cost, notes: '' })
       r.font = { bold: true }
     }
   }

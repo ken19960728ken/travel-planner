@@ -4,6 +4,9 @@ import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { utcMsToWallInput, wallInputToUtcMs } from '@/lib/domain/tz'
+import type { StopCategory } from '@/lib/domain/placeCategory'
+import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
+import { CATEGORY_ICON } from './categoryUi'
 import type { Stop } from './TripView'
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
@@ -21,6 +24,7 @@ export default function StopEditor({
 }) {
   const router = useRouter()
   const [name, setName] = useState(stop.name)
+  const [category, setCategory] = useState(stop.category)
   const [startsAt, setStartsAt] = useState(utcMsToWallInput(new Date(stop.starts_at).getTime(), stop.timezone))
   const [endsAt, setEndsAt] = useState(utcMsToWallInput(new Date(stop.ends_at).getTime(), stop.timezone))
   const [notes, setNotes] = useState(stop.notes ?? '')
@@ -52,6 +56,7 @@ export default function StopEditor({
           notes: notes.trim() || null,
           estimated_cost: cost === '' ? null : Number(cost),
           locked,
+          category,
         })
         // 樂觀鎖：以「當下 props 值」比對 starts_at/ends_at，防的是本分頁尚未觀察到的
         // 外部改動（跨分頁／協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫。
@@ -107,6 +112,11 @@ export default function StopEditor({
     <div className="mt-2 flex flex-col gap-2 rounded border p-2 text-sm">
       <p className="text-xs text-gray-400">{stop.timezone}</p>
       <input className="rounded border p-1" value={name} onChange={e => setName(e.target.value)} maxLength={200} />
+      <select className="rounded border p-1" value={category} onChange={e => setCategory(e.target.value as StopCategory)}>
+        {CATEGORY_ORDER.map(c => (
+          <option key={c} value={c}>{`${CATEGORY_ICON[c]} ${CATEGORY_LABEL[c]}`}</option>
+        ))}
+      </select>
       <label className="flex flex-col gap-1">
         開始（當地時間）
         <input className="rounded border p-1" type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)} />

@@ -20,6 +20,9 @@ import { shouldPanCamera } from './cameraGeometry'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText, isNoTransitData } from './legUi'
 import CandidatesPanel, { type Candidate } from './CandidatesPanel'
+import CostSummary from './CostSummary'
+import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
+import { normalizeCategory } from '@/lib/domain/placeCategory'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -826,6 +829,7 @@ export default function TripView({
                       <span className="mr-1 text-xs text-gray-400">
                         {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
                       </span>
+                      <span className="mr-1">{CATEGORY_ICON[normalizeCategory(stop.category)]}</span>
                       <span className="font-medium">{stop.name}</span>
                     </button>
                     {canEdit && selectedId === stop.id && (
@@ -893,6 +897,12 @@ export default function TripView({
               </li>
             )}
           </ul>
+          {/* 花費分類摘要（Plan 7 Task 8 的元件，此處掛載）：全行程七桶，不只當日 */}
+          <CostSummary
+            stops={stops.map(s => ({ category: normalizeCategory(s.category), estimatedCost: s.estimated_cost }))}
+            legs={legs.map(l => ({ estimatedCost: l.estimated_cost }))}
+            currency={trip.currency}
+          />
           {detachedLegs.length > 0 && (
             <details className="mt-2 rounded border p-2" open>
               <summary className="cursor-pointer text-sm font-medium">
@@ -983,10 +993,14 @@ export default function TripView({
                       }}
                       title={stop.name}
                     >
+                      {/* 狀態 × 分類雙重編碼（Plan 7 Task 6）：background 讓給分類色之後，原本靠它
+                          承載的「選取／當日／他日」三態必須換載體——選取改用藍框、當日他日改用大小與
+                          序號。序號是既有的順序資訊，不可因為改配色就弄丟。 */}
                       <Pin
-                        background={selectedId === stop.id ? '#2563eb' : inActiveDay ? '#ef4444' : '#d1d5db'}
+                        background={CATEGORY_PIN_HEX[normalizeCategory(stop.category)]}
                         glyphColor="#fff"
-                        borderColor="#fff"
+                        borderColor={selectedId === stop.id ? '#2563eb' : '#fff'}
+                        scale={selectedId === stop.id ? 1.3 : inActiveDay ? 1.0 : 0.7}
                       >
                         {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
                       </Pin>

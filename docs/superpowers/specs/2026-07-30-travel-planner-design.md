@@ -321,7 +321,7 @@ flowchart LR
 | 產品命名 | 已定 travel-planner（GitHub repo 名）；對外品牌名可再議 | 上線前 |
 | 帳號刪除語義 | trips.owner_id 為 on delete set null：owner 刪帳號後行程保留給其他成員，無 owner 的行程暫無人可管理（轉移擁有權功能屬後續迭代） | 共編功能上線前 |
 | updated_by / created_by 無 FK | 使用者刪除後這些欄位殘留孤兒 uuid，UI 需 fallback 顯示「已離開的成員」 | Plan 3 UI 實作時 |
-| Realtime DELETE 事件不套 RLS | Supabase 官方行為：DELETE 廣播給所有訂閱者（payload 僅剩 PK），client 須以「本地有此 id 才移除」冪等處理，且不可依賴 payload 中的 trip_id | Plan 5 共編實作時 |
+| Realtime DELETE 事件不套 RLS | Supabase 官方行為：DELETE 廣播給所有訂閱者（RLS 啟用時 payload 僅剩 PK，即使 replica identity 為 full 亦然），client 已依「本地 stops/legs id 集合命中才 refresh」冪等處理落地（`TripRealtime.tsx`），不依賴 payload 中的其他欄位 | Plan 5 共編實作時（已落地） |
 | 本機 supabase db reset 故障 | CLI 2.110.0 報 LegacyDbBootstrapError；本機重建 schema 的替代指令：drop schema public cascade 後以 psql 重跑 migration | CLI 修復後移除 workaround |
 | Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |
 | Playwright reuseExistingServer 寫死 true | 導入 CI 時需改為 !process.env.CI 並評估 retries/trace，否則 CI 可能對過期 server 跑出假綠燈 | 導入 CI 時 |
@@ -333,7 +333,9 @@ flowchart LR
 | 路線代理限流為實例級記憶體 | Vercel serverless 每實例獨立視窗，護欄弱化；成本主防線是 route_cache + 單次 sync 分批上限 | 商用前換集中式（Upstash/DB）限流 |
 | legs 鎖序不變量 | stale trigger 以 order by id for update 決定性鎖序；sync 刻意逐列寫入；未來單一交易內多列寫 legs 必須同樣按 id 排序取鎖（legs 表註解） | 每次新增 legs 批次寫入時 |
 | 跨夜配對交通段的顯示歸屬 | 跨夜配對照常建立與計算，UI 歸屬出發日（M-4 規則），隔日視角無延續視覺、當日衝突偵測不涵蓋跨日尾段 | 時間軸後續迭代 |
-| 多 editor 同開重複 sync | 每個 editor 開頁都觸發 sync；快取命中與 create 撞 unique 的靜默略過吸收大部分重複，但仍有重複 Google 呼叫的窗口 | Plan 5 Realtime 上線後指定單一觸發者（spec §6 原則） |
+| 多 editor 同開重複 sync | Realtime 上線後（Plan 5 Task 11）他人變更僅觸發 refresh、不觸發 sync——sync 觸發者＝編輯者本人，spec §6「重算由編輯者觸發」原則已落地；殘留窗口＝多 editor 同時「開頁」各自的掛載 sync（非他人變更觸發），快取命中與 create 撞 unique 的靜默略過吸收大部分重複 | 記錄即可 |
+| postgres_changes 規模化限制 | 官方建議規模化場景改用 Broadcast from Database（`realtime.broadcast_changes` DB trigger + private channel）：postgres_changes 對每個訂閱者逐一做授權檢查，吞吐隨訂閱者數縮放，經驗門檻約數千（~3000）併發訂閱者時「每事件 × 每訂閱者」的授權檢查成為瓶頸；DELETE 事件不套 RLS、全量廣播給該表所有訂閱者，同樣隨訂閱者數放大成本。本產品現階段訂閱者＝同行旅伴個位數，成本可忽略 | 商用前遷 Broadcast from Database（官方建議路徑） |
+| 本地 Realtime 引擎併發 join 的訂閱註冊競態 | 實測發現（Plan 5 Task 11）：兩個 client 幾乎同時 join 同一 channel 時，本地 Supabase CLI 的 realtime 容器（v2.113.4）偶發讓其中一條 postgres_changes 綁定（隨機命中 stops/legs/trips 任一張表，非固定）於 join 後非同步收到 `system` extension=postgres_changes status=error（"invalid column for filter X"，X 為該綁定實際存在且有權限的欄位——已用 `pg_catalog.has_column_privilege` 手動重現驗證檢查邏輯本身正確，判斷為引擎內部 `subscription_check_filters` trigger 在併發註冊下的競態瑕疵，非本專案 filter 語法錯誤）；channel 仍回報 SUBSCRIBED，但該綁定完全收不到後續事件。`TripRealtime.tsx` 已加上收到此 system 錯誤時整條 channel 拆掉重建（3 次重試、指數退避）的緩解——雙 context E2E／人工實測穩定通過，惟重試耗盡（極低機率）時該次連線仍會有一條綁定失效直到下次掛載 | 商用前確認雲端環境是否有同一瑕疵（本地 CLI 特有可能性高）；若有則需向 Supabase 回報或改採 Broadcast from Database |
 | auto leg 冷資料逾期殘留 | 超過 30 天未被開啟的行程，其 auto 段的 polyline/duration 逾期後仍留在 legs 直到下次開啟才重算——ToS 曝險殘留 | 商用前補背景清理 job（與 spec §4「行程被開啟時重算」的既有語義一致） |
 | TRANSIT departureTime 夾限 | 出發時間離現在超過 100 天的行程，transit 以夾限後時間查詢，結果可能與實際班表有偏差 | 記錄即可（超前規劃 100 天以上屬邊緣） |
 | sync 每人每分鐘 30 次上限的實務含意 | GOOGLE_CALL_LIMIT=30／RATE_WINDOW_MS=60s 為每一 serverless 實例、每使用者的滑動視窗計數（快取命中不計）；單次開頁若一分鐘內連續觸發 sync，該實例內最多算出約 30 段新交通資訊，其餘留 pending 待下次 sync（單次 sync 另受 MAX_GOOGLE_CALLS_PER_SYNC=5 次要上限與 30 秒牆鐘預算約束，兩層護欄各自獨立生效） | 與「路線代理限流為實例級記憶體」同批商用前處理 |

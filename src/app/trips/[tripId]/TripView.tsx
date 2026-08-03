@@ -28,6 +28,7 @@ import { normalizeCategory } from '@/lib/domain/placeCategory'
 import RoutePolylines from './RoutePolylines'
 import PlaybackTrail from './PlaybackTrail'
 import tzlookup from '@photostructure/tz-lookup'
+import TripRealtime, { type PresencePeer } from './TripRealtime'
 
 export type Trip = {
   id: string
@@ -359,6 +360,8 @@ export default function TripView({
   stopsError,
   legs,
   canEdit,
+  currentUserId,
+  displayName,
   autoPlay = false,
   candidates,
   candidatesError,
@@ -369,6 +372,10 @@ export default function TripView({
   legs: Leg[]
   /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
   canEdit: boolean
+  /** Task 11：目前登入者的 id/顯示名稱，供 TripRealtime 忽略自己的寫入事件與 presence track。
+   *  canEdit=false（viewer/分享頁）不掛載 TripRealtime 時不會用到，宣告為可選讓分享頁沿用既有呼叫方式 */
+  currentUserId?: string
+  displayName?: string
   /** Task 8（spec §5「分享連結預設進播放模式」）：分享頁掛載時直接進播放模式。惰性 useState 初始化
    *  （避免 set-state-in-effect lint——本專案已兩度踩過），不開額外 effect */
   autoPlay?: boolean
@@ -381,6 +388,13 @@ export default function TripView({
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  // Task 11：Realtime 斷線狀態與在線成員——TripRealtime 是純邏輯元件，透過這兩個回呼把狀態交回
+  // TripView 渲染（presence 頭像、斷線橫幅）與接線（寫入入口關閉，見下方 writesBlocked）
+  const [disconnected, setDisconnected] = useState(false)
+  const [peers, setPeers] = useState<PresencePeer[]>([])
+  // 既有「讀取失敗即關閉寫入入口」通道（stopsError）與斷線暫停編輯共用同一條通道，不另造一套：
+  // 兩者都代表「目前的本地基準不可信任/收不到旁人變動」，關閉寫入入口的理由相同
+  const writesBlocked = Boolean(stopsError) || disconnected
   // M-1：拖曳提交（cascade_shift_stops RPC）成功到 refresh 落地間的過渡偏移預覽；moveStop 於 RPC 前設定，
   // 下面的 render 期比對觀察 stops 落地後清空（pendingShiftResolved），傳給 Timeline 算色塊 offset
   const [pendingShift, setPendingShift] = useState<PendingShift | null>(null)
@@ -539,7 +553,7 @@ export default function TripView({
     // syncLegs 對齊的防線二，避免日後新增呼叫點時繞過閘門
     if (!canEdit) return false
     if (busyRef.current) return false
-    if (stopsError) return false // 讀取失敗時基準不可信，關閉所有寫入入口（含草稿表單）
+    if (writesBlocked) return false // 讀取失敗或 Realtime 斷線時基準不可信/收不到旁人變動，關閉所有寫入入口（含草稿表單）
     busyRef.current = true
     setBusy(true)
     try {
@@ -606,11 +620,11 @@ export default function TripView({
   }
 
   /** 存入備選：不寫 stops、不佔時間軸，只把地點收進 trip_candidates 待日後決定。
-   *  三重閘門與 addStop 對齊（canEdit 防線二、busyRef 同步 guard 防連點、stopsError 讀取失敗即關閉寫入）。 */
+   *  三重閘門與 addStop 對齊（canEdit 防線二、busyRef 同步 guard 防連點、writesBlocked 讀取失敗/斷線即關閉寫入）。 */
   async function saveCandidate(name: string, category: StopCategory): Promise<boolean> {
     if (!canEdit) return false
     if (busyRef.current) return false
-    if (stopsError) return false
+    if (writesBlocked) return false
     if (!searchPreview) return false
     busyRef.current = true
     setBusy(true)
@@ -688,7 +702,7 @@ export default function TripView({
       setNotice({ kind: 'error', text: '另一項操作進行中，請稍候再拖曳' })
       return
     }
-    if (stopsError) return // 讀取失敗時基準不可信，寫入入口本來就整組關閉，維持靜默
+    if (writesBlocked) return // 讀取失敗或 Realtime 斷線時，寫入入口本來就整組關閉，維持靜默
     busyRef.current = true
     setBusy(true)
     try {
@@ -766,6 +780,9 @@ export default function TripView({
   // 這顆 memo 存在的目的）；只在 stops 真的變動時才重建
   const stopById = useMemo(() => new globalThis.Map(stops.map(s => [s.id, s])), [stops])
   const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+  // Task 11：TripRealtime 的 DELETE 冪等比對用——本地已知 id 集合，只在 stops/legs 參照真的變動時重建
+  const stopIdSet = useMemo(() => new Set(stops.map(s => s.id)), [stops])
+  const legIdSet = useMemo(() => new Set(legs.map(l => l.id)), [legs])
 
   // 選中日地圖路線只畫「仍在行程順序中」的段：配對脫離（插入停留點/調整順序後）的 legs 不該畫上地圖，
   // 否則 flight 脫離段會畫成橫跨畫面、與正常段無法區分的紫色弧虛線（側欄 807 行的 detachedLegs 用同一
@@ -934,12 +951,45 @@ export default function TripView({
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Task 11：viewer/分享頁（canEdit=false）不掛載——唯讀者用手動刷新即可，省 anon realtime 授權面
+          （spec §6 Step 3）。TripRealtime 是純邏輯元件，presence/斷線狀態透過回呼交回這裡渲染 */}
+      {canEdit && currentUserId && displayName && (
+        <TripRealtime
+          tripId={trip.id}
+          userId={currentUserId}
+          displayName={displayName}
+          stopIds={stopIdSet}
+          legIds={legIdSet}
+          onDisconnectedChange={setDisconnected}
+          onPeersChange={setPeers}
+        />
+      )}
+      {disconnected && (
+        <p className="border-b bg-amber-50 p-2 text-sm text-amber-700">
+          ⚠️ 連線中斷，他人改動暫時看不到，編輯功能已暫停
+        </p>
+      )}
+      {peers.length > 0 && (
+        <div className="flex items-center gap-1 border-b p-2">
+          {peers.map(p => (
+            <span
+              key={p.userId}
+              title={p.displayName}
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
+            >
+              {/* C-1 止血第二層防禦：peers 在 TripRealtime 已過型別守衛，這裡是渲染端再退一步，
+                  即使上游守衛日後被誤改壞也不會讓整頁崩潰 */}
+              {(p.displayName || '?').slice(0, 1)}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* 手機（< md）上下堆疊：側欄改滿寬、上限 38vh 內部捲動（overflow-y-auto 已存在），
             讓 flex-1 的地圖區塊自動吃下剩餘高度，不需要另外幫地圖寫死高度（見下方地圖容器）。
             桌機（md 以上）維持原本 320px 固定寬側欄 + 左右並排，外觀與行為完全不變。 */}
         <aside className="max-h-[38vh] w-full overflow-y-auto border-b p-3 md:max-h-none md:w-80 md:shrink-0 md:border-b-0 md:border-r">
-          {canEdit && apiKey && !stopsError && (
+          {canEdit && apiKey && !writesBlocked && (
             <PlaceSearch
               onPick={p => {
                 previewSeqRef.current += 1
@@ -952,7 +1002,7 @@ export default function TripView({
               disabled={busy}
             />
           )}
-          {canEdit && searchPreview && !stopsError && (
+          {canEdit && searchPreview && !writesBlocked && (
             <PlacePreviewCard
               key={searchPreview.seq}
               place={searchPreview.place}
@@ -977,7 +1027,7 @@ export default function TripView({
               onCancel={() => setSearchPreview(null)}
             />
           )}
-          {canEdit && draftPin && !stopsError && (
+          {canEdit && draftPin && !writesBlocked && (
             <form
               className="flex gap-1 rounded border p-2"
               onSubmit={async e => {
@@ -1052,7 +1102,10 @@ export default function TripView({
                       <span className="mr-1">{CATEGORY_ICON[normalizeCategory(stop.category)]}</span>
                       <span className="font-medium">{stop.name}</span>
                     </button>
-                    {canEdit && selectedId === stop.id && (
+                    {/* M-3（critic 審查）：writesBlocked 走同一條 canEdit 通道——斷線/讀取失敗時整顆
+                        編輯器連同任何已開啟的「確認刪除」狀態一併卸載，寫入路徑物理上不可能被觸發，
+                        不需要在 StopEditor 內部另加守衛 */}
+                    {canEdit && !writesBlocked && selectedId === stop.id && (
                       <StopEditor
                         key={stop.id}
                         stop={stop}
@@ -1087,12 +1140,12 @@ export default function TripView({
                             isNoTransitData(leg) ? '（步行估算）' : ''
                           }`}
                       </button>
-                      {canEdit && leg.source === 'manual' && (
+                      {canEdit && !writesBlocked && leg.source === 'manual' && (
                         <span className="ml-1">
                           <RevertToAutoButton legId={leg.id} onChanged={() => void syncLegs()} />
                         </span>
                       )}
-                      {canEdit && selectedLegId === leg.id && (
+                      {canEdit && !writesBlocked && selectedLegId === leg.id && (
                         <LegEditor
                           key={leg.id}
                           leg={leg}
@@ -1140,7 +1193,7 @@ export default function TripView({
                       fromStop={from}
                       toStop={to}
                       currency={trip.currency}
-                      canEdit={canEdit}
+                      canEdit={canEdit && !writesBlocked}
                       onChanged={() => void syncLegs()}
                     />
                   )
@@ -1151,7 +1204,7 @@ export default function TripView({
           <CandidatesPanel
             candidates={candidates}
             loadError={Boolean(candidatesError)}
-            canEdit={canEdit}
+            canEdit={canEdit && !writesBlocked}
             busy={busy}
             dayKeys={dayKeys}
             activeDay={activeDay}
@@ -1189,7 +1242,7 @@ export default function TripView({
                 gestureHandling="greedy"
                 disableDefaultUI={false}
                 onContextmenu={e => {
-                  if (!canEdit || stopsError) return
+                  if (!canEdit || writesBlocked) return
                   const latLng = e.detail.latLng
                   if (latLng) {
                     setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
@@ -1227,7 +1280,7 @@ export default function TripView({
                     </AdvancedMarker>
                   )
                 })}
-                {canEdit && !stopsError && draftPin && (
+                {canEdit && !writesBlocked && draftPin && (
                   <AdvancedMarker position={draftPin}>
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
@@ -1239,7 +1292,7 @@ export default function TripView({
                     <Pin background="#f59e0b" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
                 )}
-                {canEdit && !stopsError && searchPreview && (
+                {canEdit && !writesBlocked && searchPreview && (
                   <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
@@ -1328,7 +1381,9 @@ export default function TripView({
           if (!playing) playSessionRef.current += 1
           setPlayheadMs(ms)
         }}
-        onMove={canEdit ? moveStop : undefined}
+        // Task 11：斷線時 onMove 一併收回（不只在 moveStop 內部靜默 return）——否則 Timeline 會出現
+        // 拖曳預覽但提交不了的半互動狀態，與 Task 5 對 viewer 的既有處理一致
+        onMove={canEdit && !writesBlocked ? moveStop : undefined}
         busy={busy}
         pendingShift={pendingShift}
         playing={playing}

@@ -75,6 +75,11 @@ export type Leg = {
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
 const PLAYBACK_MAX_ZOOM = 15 // 起播 fitBounds 的縮放上限：單點/近距離日程會被拉到最大縮放，需夾住
+/** 換段取景的縮放上限（分 mode）：步行段 fitBounds 天然拉到 18-19，夾 16 保留街廓脈絡；
+ *  其餘沿用整日取景的 15。flight 遠距離 fitBounds 天然落在 6-9，上限實際不生效，統一寫上避免特例 */
+const SEGMENT_MAX_ZOOM: Record<string, number> = {
+  walking: 16, transit: 15, driving: 15, flight: 15, custom: 15,
+}
 const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
 const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
@@ -106,7 +111,7 @@ function CameraFollow({ target, playing }: { target: { lat: number; lng: number 
  *  不會做任何事——若 mobile 版面把地圖面板用 `hidden` class 藏起來，這裡的 fitBounds 會靜默失效，
  *  合併前請檢查手機版面下播放是否仍會收整段視野。 */
 function PlaybackCamera({
-  lat, lng, active, bounds,
+  lat, lng, active, bounds, segmentFitKey, segmentPath, segmentMaxZoom,
 }: {
   lat: number | null
   lng: number | null
@@ -115,6 +120,14 @@ function PlaybackCamera({
    *  故不放進下面 effect 的 deps，改用 ref 讀最新值（同 L468 playheadMsRef 的作法：ref 寫入也要放進
    *  effect 裡，不能在 render 期間直接賦值，否則違反 react-hooks/refs） */
   bounds: { lat: number; lng: number }[] | null
+  /** travel 段才有值（`travel:${fromStopId}`），stay 段為 null：分段取景只在交通段觸發一次
+   *  fitBounds，停留期間鏡頭不動（2026-08-03 設計拍板 (a)）。deps 只看這個 key，同一段內 progress
+   *  逐秒變動不得觸發 refit */
+  segmentFitKey: string | null
+  /** 進行中交通段的完整路徑：travel 段才有值，缺料（地面段沒有 polyline）由呼叫端退回兩點直線 */
+  segmentPath: { lat: number; lng: number }[] | null
+  /** 該段 mode 對應的 fitBounds 縮放上限（SEGMENT_MAX_ZOOM） */
+  segmentMaxZoom: number
 }) {
   const map = useMap()
   const boundsRef = useRef(bounds)
@@ -150,6 +163,27 @@ function PlaybackCamera({
       map.setOptions({ maxZoom: null })
     }
   }, [map, active])
+  // 分段取景（2026-08-03 設計拍板）：播放推進到 travel 段時，以該段完整路徑 fitBounds 一次
+  // （瞬間切換，不做連續縮放——zoom 6↔16 的過渡動畫會穿越大量中間層級圖磚，是灰塊事故溫床）。
+  // stay 段 segmentFitKey 為 null，不動鏡頭（維持前一段的框，設計拍板 (a)）。
+  // deps 只看 segmentFitKey：同一段內 progress 逐秒變動不得觸發 refit。
+  // path/maxZoom 用 ref 讀最新值（同 boundsRef 模式——陣列參照每 render 都新）
+  const segmentPathRef = useRef(segmentPath)
+  const segmentMaxZoomRef = useRef(segmentMaxZoom)
+  useEffect(() => {
+    segmentPathRef.current = segmentPath
+    segmentMaxZoomRef.current = segmentMaxZoom
+  }, [segmentPath, segmentMaxZoom])
+  useEffect(() => {
+    if (!map || !active || !segmentFitKey) return
+    const path = segmentPathRef.current
+    if (!path || path.length === 0) return
+    map.setOptions({ maxZoom: segmentMaxZoomRef.current })
+    const b = new google.maps.LatLngBounds()
+    for (const p of path) b.extend(p)
+    map.fitBounds(b, 60)
+    justFittedRef.current = true
+  }, [map, active, segmentFitKey])
   useEffect(() => {
     if (!map || !active || lat === null || lng === null) return
     if (justFittedRef.current) {
@@ -1145,6 +1179,9 @@ export default function TripView({
                   lng={playheadDisplayPos?.lng ?? null}
                   active={playing}
                   bounds={playbackBounds}
+                  segmentFitKey={playing && segment?.kind === 'travel' ? `travel:${segment.fromStopId}` : null}
+                  segmentPath={currentTravelPath}
+                  segmentMaxZoom={SEGMENT_MAX_ZOOM[travelLeg?.mode ?? 'custom']}
                 />
               </Map>
             </SectionErrorBoundary>

@@ -143,6 +143,7 @@ export default async function TripDetailPage({
         stopsError={Boolean(stopsError)}
         legs={(legs ?? []) as Leg[]}
         canEdit={canEdit}
+        currentUserId={user.id}
         candidates={(candidateRows ?? []) as Candidate[]}
         candidatesError={Boolean(candidatesError)}
       />

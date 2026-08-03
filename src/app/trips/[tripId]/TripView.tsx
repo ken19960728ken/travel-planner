@@ -28,6 +28,7 @@ import { normalizeCategory } from '@/lib/domain/placeCategory'
 import RoutePolylines from './RoutePolylines'
 import PlaybackTrail from './PlaybackTrail'
 import tzlookup from '@photostructure/tz-lookup'
+import TripRealtime from './TripRealtime'
 
 export type Trip = {
   id: string
@@ -359,6 +360,7 @@ export default function TripView({
   stopsError,
   legs,
   canEdit,
+  currentUserId,
   autoPlay = false,
   candidates,
   candidatesError,
@@ -369,6 +371,9 @@ export default function TripView({
   legs: Leg[]
   /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
   canEdit: boolean
+  /** Task 11：目前登入者的 id，供 TripRealtime 忽略自己的寫入事件。canEdit=false（viewer/分享頁）
+   *  不掛載 TripRealtime 時不會用到，宣告為可選讓分享頁沿用既有呼叫方式 */
+  currentUserId?: string
   /** Task 8（spec §5「分享連結預設進播放模式」）：分享頁掛載時直接進播放模式。惰性 useState 初始化
    *  （避免 set-state-in-effect lint——本專案已兩度踩過），不開額外 effect */
   autoPlay?: boolean
@@ -766,6 +771,9 @@ export default function TripView({
   // 這顆 memo 存在的目的）；只在 stops 真的變動時才重建
   const stopById = useMemo(() => new globalThis.Map(stops.map(s => [s.id, s])), [stops])
   const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+  // Task 11：TripRealtime 的 DELETE 冪等比對用——本地已知 id 集合，只在 stops/legs 參照真的變動時重建
+  const stopIdSet = useMemo(() => new Set(stops.map(s => s.id)), [stops])
+  const legIdSet = useMemo(() => new Set(legs.map(l => l.id)), [legs])
 
   // 選中日地圖路線只畫「仍在行程順序中」的段：配對脫離（插入停留點/調整順序後）的 legs 不該畫上地圖，
   // 否則 flight 脫離段會畫成橫跨畫面、與正常段無法區分的紫色弧虛線（側欄 807 行的 detachedLegs 用同一
@@ -934,6 +942,11 @@ export default function TripView({
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Task 11：viewer/分享頁（canEdit=false）不掛載——唯讀者用手動刷新即可，省 anon realtime 授權面
+          （spec §6 Step 3）。TripRealtime 是純邏輯元件，不渲染畫面 */}
+      {canEdit && currentUserId && (
+        <TripRealtime tripId={trip.id} userId={currentUserId} stopIds={stopIdSet} legIds={legIdSet} />
+      )}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* 手機（< md）上下堆疊：側欄改滿寬、上限 38vh 內部捲動（overflow-y-auto 已存在），
             讓 flex-1 的地圖區塊自動吃下剩餘高度，不需要另外幫地圖寫死高度（見下方地圖容器）。

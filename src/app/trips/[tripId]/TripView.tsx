@@ -977,7 +977,9 @@ export default function TripView({
               title={p.displayName}
               className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
             >
-              {p.displayName.slice(0, 1)}
+              {/* C-1 止血第二層防禦：peers 在 TripRealtime 已過型別守衛，這裡是渲染端再退一步，
+                  即使上游守衛日後被誤改壞也不會讓整頁崩潰 */}
+              {(p.displayName || '?').slice(0, 1)}
             </span>
           ))}
         </div>
@@ -1100,7 +1102,10 @@ export default function TripView({
                       <span className="mr-1">{CATEGORY_ICON[normalizeCategory(stop.category)]}</span>
                       <span className="font-medium">{stop.name}</span>
                     </button>
-                    {canEdit && selectedId === stop.id && (
+                    {/* M-3（critic 審查）：writesBlocked 走同一條 canEdit 通道——斷線/讀取失敗時整顆
+                        編輯器連同任何已開啟的「確認刪除」狀態一併卸載，寫入路徑物理上不可能被觸發，
+                        不需要在 StopEditor 內部另加守衛 */}
+                    {canEdit && !writesBlocked && selectedId === stop.id && (
                       <StopEditor
                         key={stop.id}
                         stop={stop}
@@ -1135,12 +1140,12 @@ export default function TripView({
                             isNoTransitData(leg) ? '（步行估算）' : ''
                           }`}
                       </button>
-                      {canEdit && leg.source === 'manual' && (
+                      {canEdit && !writesBlocked && leg.source === 'manual' && (
                         <span className="ml-1">
                           <RevertToAutoButton legId={leg.id} onChanged={() => void syncLegs()} />
                         </span>
                       )}
-                      {canEdit && selectedLegId === leg.id && (
+                      {canEdit && !writesBlocked && selectedLegId === leg.id && (
                         <LegEditor
                           key={leg.id}
                           leg={leg}
@@ -1188,7 +1193,7 @@ export default function TripView({
                       fromStop={from}
                       toStop={to}
                       currency={trip.currency}
-                      canEdit={canEdit}
+                      canEdit={canEdit && !writesBlocked}
                       onChanged={() => void syncLegs()}
                     />
                   )
@@ -1199,7 +1204,7 @@ export default function TripView({
           <CandidatesPanel
             candidates={candidates}
             loadError={Boolean(candidatesError)}
-            canEdit={canEdit}
+            canEdit={canEdit && !writesBlocked}
             busy={busy}
             dayKeys={dayKeys}
             activeDay={activeDay}

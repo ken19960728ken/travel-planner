@@ -120,8 +120,12 @@ export default function LegEditor({
       if (!(arr > dep)) return setNotice({ kind: 'error', text: '抵達必須晚於出發（注意兩地時區）' })
       // 起訖導出的 duration 也要吃同一條 30 天上界（審查 Minor）：時長分支有 43200 檢查，
       // 這條分支原本沒有，custom 段（S-8 後可走此分支）填一組相隔一年的起訖就會寫入約 525600 分鐘，
-      // 遠超 UI 自己宣告的上限，而 DB 的 check 只有 >= 0 擋不住
-      if (arr - dep > 43200 * 60_000) {
+      // 遠超 UI 自己宣告的上限，而 DB 的 check 只有 >= 0 擋不住。
+      // 驗「導出值本身」而非毫秒差（複審 Suggestion）：寫進 DB 的是這個值，驗它才與時長分支等價
+      // （比毫秒會在「30 天 + 未滿 30 秒」這個帶多擋掉一批四捨五入後仍為 43200 的合法值）。
+      // 附帶行為變更：flight 段先前無上界，現在同受此限——沒有合法航班會超過 30 天。
+      const derivedMinutes = Math.max(1, Math.round((arr - dep) / 60_000))
+      if (derivedMinutes > 43200) {
         return setNotice({ kind: 'error', text: '出發與抵達間隔不得超過 30 天' })
       }
       // Important-4（軟警示，spec §5：警示不阻擋）：出發早於起點停留點結束、或抵達晚於終點停留點開始，
@@ -131,7 +135,7 @@ export default function LegEditor({
         mode, source: 'manual',
         departs_at: new Date(dep).toISOString(),
         arrives_at: new Date(arr).toISOString(),
-        duration_minutes: Math.max(1, Math.round((arr - dep) / 60_000)),
+        duration_minutes: derivedMinutes,
         distance_meters: null, polyline: null, detail: null, computed_at: null,
         stale: false, estimated_cost: costNum,
       }, outOfWindow

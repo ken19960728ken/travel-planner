@@ -17,15 +17,27 @@
  *
  *  **輸出必須再驗一次**（審查修法本身的殘留洞，實測補上）：`/..//evil.com` 解析時 origin 仍是
  *  sentinel（通過第一關），但正規化後的 pathname 是 `//evil.com`——呼叫端 `router.push` 再解析
- *  一次就變成 `https://evil.com/`。單靠「輸入解析結果同源」不足，必須確認**輸出字串**自己重新
- *  解析時也還在同源，才是真正的不動點。實測受影響的還有 `/./..//evil.com`、`/a/../..//evil.com`。 */
+ *  一次就變成 `https://evil.com/`。單靠「輸入解析結果同源」不足。實測受影響的還有
+ *  `/./..//evil.com`、`/a/../..//evil.com`。
+ *
+ *  **輸出端用形狀檢查而非再解析一次**（複審再修）：曾用「把輸出丟進另一個 probe origin 重新解析、
+ *  要求仍同源」，但那是自我指涉的——輸出若正規化成 `//safe-next-probe.invalid/x`，在 probe 下解析
+ *  出來的 origin 正好就是 probe，檢查通過卻仍會在真實站點外流（50 萬樣本模糊測試找到 196 個）。
+ *  改為檢查正規化後的字串是否以 `//` 開頭。這與初版「對原始輸入做前綴比對」不是同一類判斷：
+ *  `url.pathname` 是解析器的產物，原始反斜線已轉成 `/`、TAB/LF/CR 已被移除（實測 `/a\b` → `/a/b`、
+ *  `/a<TAB>b` → `/ab`），所以能讓呼叫端逃逸的形狀只剩前導 `//`（含 `///`，同樣被涵蓋）。
+ *  gate 1 的 origin 檢查不能當獨立防線——攻擊者猜中 sentinel 主機名就能滿足它。 */
 const SENTINEL_ORIGIN = 'https://safe-next.invalid'
-const OUTPUT_PROBE_ORIGIN = 'https://safe-next-probe.invalid'
 
 export function safeNextPath(next: string | null): string | null {
-  // 仍要求輸入以 `/` 開頭：URL 解析會把裸相對路徑（`trips`）正規化成 `/trips`，雖然同源不危險，
-  // 但那不是這個參數的契約（呼叫端傳的一律是絕對路徑），收窄輸入面沒有成本
-  if (!next || !next.startsWith('/')) return null
+  // 輸入面收窄（縱深防禦，不是唯一防線）：
+  // - 要求 `/` 開頭：URL 解析會把裸相對路徑（`trips`）正規化成 `/trips`，雖然同源不危險，
+  //   但那不是這個參數的契約（呼叫端傳的一律是絕對路徑）
+  // - 明確拒絕 `//` 開頭：這種輸入是 protocol-relative，合法的站內路徑永遠不長這樣。不擋的話，
+  //   攻擊者猜中下面 sentinel 的主機名（public repo 讀得到）就能讓 `//safe-next.invalid/x`
+  //   通過 origin 檢查並被靜默改寫成 `/x`——輸出雖同源不外流，但「拒絕 protocol-relative」的
+  //   契約沒有成立，且把安全性繫在一個常數上
+  if (!next || !next.startsWith('/') || next.startsWith('//')) return null
   let url: URL
   try {
     url = new URL(next, SENTINEL_ORIGIN)
@@ -35,11 +47,8 @@ export function safeNextPath(next: string | null): string | null {
   // 任何解析結果落在 sentinel 以外的 origin，都代表這個值有能力把使用者帶離本站
   if (url.origin !== SENTINEL_ORIGIN) return null
   const path = url.pathname + url.search + url.hash
-  // 二次驗證：輸出字串本身在另一個 origin 下重新解析，仍必須是站內相對路徑
-  try {
-    if (new URL(path, OUTPUT_PROBE_ORIGIN).origin !== OUTPUT_PROBE_ORIGIN) return null
-  } catch {
-    return null
-  }
+  // 二次驗證：正規化後的字串不得是 protocol-relative（`//host` / `///host`），否則呼叫端再解析
+  // 一次就會外流。此處前綴比對可靠的前提見檔頭——pathname 不可能含原始反斜線或控制字元
+  if (path.startsWith('//')) return null
   return path
 }

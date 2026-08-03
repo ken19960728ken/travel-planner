@@ -387,6 +387,11 @@ export default function TripView({
   // 逾時保險用（見 moveStop）：generation 讓後到的拖曳作廢前一次計時器
   const shiftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const shiftGenerationRef = useRef(0)
+  // 卸載時清掉未觸發的計時器：React 19 已移除「unmounted component setState」警告，不清也不會有
+  // console 噪音，但沒必要留一個最多 5 秒的 closure 在背景
+  useEffect(() => () => {
+    if (shiftTimerRef.current) clearTimeout(shiftTimerRef.current)
+  }, [])
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
   const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
   // autoPlay 初始值以第一天視窗推導：視窗不存在（行程還沒有停留點）則保持暫停，播放頭留 null

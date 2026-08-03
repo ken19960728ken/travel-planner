@@ -62,4 +62,15 @@ describe('safeNextPath', () => {
   it('回傳正規化後的路徑而非原始字串', () => {
     expect(safeNextPath('/trips/../invite/abc')).toBe('/invite/abc')
   })
+
+  // 這批專打「輸出端驗證自我指涉」的殘留洞：曾用「輸出丟進 probe origin 再解析、要求同源」，
+  // 而輸出若正規化成 `//<probe 主機>/x`，在 probe 下解析出來的 origin 正好就是 probe → 誤放行。
+  // 改成形狀檢查後這些必須全擋。主機名故意寫成當初的兩個常數，鎖住這個具體失效模式。
+  it('拒絕正規化後成為 protocol-relative 的值（含指向驗證用主機者）', () => {
+    expect(safeNextPath('/..//safe-next-probe.invalid/x')).toBeNull()
+    expect(safeNextPath('/./..//safe-next-probe.invalid/')).toBeNull()
+    expect(safeNextPath('/.\\//safe-next-probe.invalid')).toBeNull()
+    expect(safeNextPath('//safe-next.invalid/x')).toBeNull()
+    expect(safeNextPath('/..///evil.com')).toBeNull()
+  })
 })

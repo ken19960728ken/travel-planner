@@ -69,16 +69,21 @@ test('雙 context 冒煙：A 插入停留點 → B 免手動 reload 看到；A �
   // 寬鬆等待，實測本地環境完成遠快於此
   await editorPage.waitForTimeout(2000)
 
-  // ---- A 插入停留點（模擬旅伴透過 admin/其他分頁寫入）：B 不手動 reload，靠 Realtime debounce
-  // refresh 自動看到——寬鬆 timeout 容忍 500ms debounce + Realtime 連線延遲 ----
-  const mk = (h: number) => new Date(Date.UTC(2026, 11, 1, h)).toISOString()
-  const { error: insertErr } = await admin.from('stops').insert({
-    trip_id: createdTripId!, name: 'E2E即時停留點', lat: 33.59, lng: 130.4,
-    timezone: 'Asia/Tokyo', starts_at: mk(1), ends_at: mk(2),
-  })
-  expect(insertErr).toBeNull()
+  // ---- A 用真實 UI（地圖右鍵 + 表單）新增停留點——不再走 admin 直插，覆蓋真實寫入路徑的
+  // updated_by 歸屬（真實 UI 寫入的 updated_by = A 自己，admin 直插的 updated_by 恆為 null，
+  // 兩者對 handleRowEvent 是不同的程式碼路徑，改真實 UI 才算真正覆蓋到）。
+  // B 不手動 reload，靠 Realtime debounce refresh 自動看到——寬鬆 timeout 容忍 500ms debounce +
+  // max-wait 2s + Realtime 連線延遲
+  const map = ownerPage.locator('.gm-style').first()
+  await expect(map).toBeVisible({ timeout: 20_000 })
+  const box = (await map.boundingBox())!
+  await ownerPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: 'right' })
+  await ownerPage.getByPlaceholder('自訂地點名稱').fill('E2E即時停留點')
+  await ownerPage.getByRole('button', { name: '加入', exact: true }).click()
   // 側欄清單與 Timeline 拖曳色塊都會渲染停留點名稱，locator 需限定在側欄（aside）才不會撞上兩處同名
   // 文字造成 strict mode violation（審查時實測發現的既有 UI 事實，非本次改動引入）
+  await expect(ownerPage.locator('aside').getByText('E2E即時停留點')).toBeVisible({ timeout: 10_000 })
+
   const sidebarStopName = editorPage.locator('aside').getByText('E2E即時停留點')
   await expect(sidebarStopName).toBeVisible({ timeout: 15_000 })
 

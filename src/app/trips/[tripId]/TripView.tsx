@@ -1,13 +1,14 @@
 'use client'
 
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
 import { defaultSlotForDay, stayMsForCategory } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
-import { interpolatePosition } from '@/lib/domain/interpolate'
+import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
+import { decodePolyline, greatCirclePoints, pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { adjacentPairs } from '@/lib/domain/legSync'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
@@ -24,6 +25,7 @@ import CostSummary from './CostSummary'
 import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
 import { normalizeCategory } from '@/lib/domain/placeCategory'
 import RoutePolylines from './RoutePolylines'
+import PlaybackTrail from './PlaybackTrail'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -629,30 +631,95 @@ export default function TripView({
   const selectedCandidate = candidates.find(c => c.id === selectedCandidateId) ?? null
   // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
   const activeDayStops = filterDayStops(stops, activeDay)
+
+  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
+  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
+  // （Task 3：宣告上移到 activeDayStops 之後，供下方分段推導使用——純常量推導，只依賴 stops/legs
+  //  props，上移不改變任何既有語義，中間沒有其他程式碼在此之前用到它們）
+  const nextByStopId = new globalThis.Map(
+    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+      .map(([f, t]) => [f.id, t.id]),
+  )
+  // useMemo（非普通宣告）：下面 travelPath 的 useMemo 把 stopById 列進 deps，若這裡每次 render 都給
+  // 新的 Map 參照，travelPath 會跟著每秒重算、失去「長 polyline 不逐秒重解」的 memo 效果（本來就是
+  // 這顆 memo 存在的目的）；只在 stops 真的變動時才重建
+  const stopById = useMemo(() => new globalThis.Map(stops.map(s => [s.id, s])), [stops])
+  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+
   const win = dayWindow(activeDayStops)
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
   // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
   const clampedPlayheadMs = playheadMs === null || !win ? null : Math.min(Math.max(playheadMs, win.start), win.end)
+  // posStops 抽成共用：播放位置（interpolatePosition）與分段判定（segmentAt）同吃一份，不各自 map 一次
+  const posStops = activeDayStops.map(s => ({
+    id: s.id,
+    lat: s.lat,
+    lng: s.lng,
+    startsAt: new Date(s.starts_at).getTime(),
+    endsAt: new Date(s.ends_at).getTime(),
+  }))
   // 播放位置提到 component body：地圖「我」標記與 PlaybackCamera（M-7 鏡頭跟隨）共用同一份，不各算一次
-  const playheadPos =
-    clampedPlayheadMs === null
-      ? null
-      : interpolatePosition(
-          activeDayStops.map(s => ({
-            id: s.id,
-            lat: s.lat,
-            lng: s.lng,
-            startsAt: new Date(s.starts_at).getTime(),
-            endsAt: new Date(s.ends_at).getTime(),
-          })),
-          clampedPlayheadMs,
-        )
+  const playheadPos = clampedPlayheadMs === null ? null : interpolatePosition(posStops, clampedPlayheadMs)
+
+  // 當前播放分段：stay（停留中）或 travel（交通中）。travel 時查對應 leg 取 mode 與 polyline，
+  // 位置沿路線取位（有 polyline 走實路徑、flight 走大圓弧、其餘直線），取代單純兩點直線內插
+  const segment = clampedPlayheadMs === null ? null : segmentAt(posStops, clampedPlayheadMs)
+  const travelLeg =
+    segment?.kind === 'travel' ? (legByPair.get(`${segment.fromStopId}→${segment.toStopId}`) ?? null) : null
+  // 路徑解碼在 render body 每秒發生一次，長 polyline 需 memo（key：leg id + 座標端點）
+  const travelPath = useMemo(() => {
+    if (!travelLeg) return null
+    if (travelLeg.polyline) return decodePolyline(travelLeg.polyline)
+    const from = stopById.get(travelLeg.from_stop_id)
+    const to = stopById.get(travelLeg.to_stop_id)
+    if (!from || !to) return null
+    if (travelLeg.mode === 'flight') {
+      return greatCirclePoints({ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng })
+    }
+    return null // 無 polyline 的地面段維持直線內插（資料就沒有路線）
+  }, [travelLeg, stopById])
+  const travelPos = segment?.kind === 'travel' && travelPath ? pathPosition(travelPath, segment.progress) : null
+  const playheadDisplayPos = travelPos ?? playheadPos // travelPos 缺料時退回既有直線內插
+
+  // 進行中交通段的完整路徑：PlaybackCamera 分段取景（Task 4）與 PlaybackTrail 進行中紅線（Task 3）
+  // 共用同一份，避免兩處各自重複同一段 fallback（缺 polyline 的地面段退回兩點直線，與
+  // playheadDisplayPos 的直線內插語義一致）
+  const currentTravelPath =
+    segment?.kind === 'travel'
+      ? (travelPath ??
+          (() => {
+            const f = stopById.get(segment.fromStopId)
+            const t = stopById.get(segment.toStopId)
+            return f && t ? [{ lat: f.lat, lng: f.lng }, { lat: t.lat, lng: t.lng }] : null
+          })())
+      : null
 
   // 播放鏡頭 fitBounds 用的當日停留點座標（M-7 修復）：只傳原始點陣列，不在這裡用 Math.min/max 化簡成
   // min/max——跨 180 度經線時 min/max 會反向算出錯誤的框。真正安全的 LatLngBounds 建構（逐點 extend）
   // 只能在 google.maps 腳本載入後執行，這裡是 render 期間（含 SSR）碰不到 google 全域，故挪到
   // PlaybackCamera 的 effect 裡處理
   const playbackBounds = activeDayStops.length > 0 ? activeDayStops.map(s => ({ lat: s.lat, lng: s.lng })) : null
+
+  // 已走完的段落路徑：當日順序中，結束時刻早於當前分段起點的每一段。逐秒重算浪費（每段路徑固定），
+  // memo key 取「當前所在分段的識別」——換段才重算
+  const segmentKey =
+    segment === null ? 'none' : segment.kind === 'stay' ? `stay:${segment.stopId}` : `travel:${segment.fromStopId}`
+  const completedPaths = useMemo(() => {
+    if (clampedPlayheadMs === null) return []
+    const ordered = [...posStops].sort((a, b) => a.startsAt - b.startsAt)
+    const out: LatLng[][] = []
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const from = ordered[i]
+      const to = ordered[i + 1]
+      if (to.startsAt > clampedPlayheadMs) break // 這段還沒走完（含進行中——由 currentPath 負責）
+      const leg = legByPair.get(`${from.id}→${to.id}`)
+      if (leg?.polyline) out.push(decodePolyline(leg.polyline))
+      else if (leg?.mode === 'flight') out.push(greatCirclePoints(from, to))
+      else out.push([{ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng }])
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 逐秒變動的 clampedPlayheadMs 刻意不入 deps，換段（segmentKey）才需要重算
+  }, [segmentKey, activeDay, stops, legs])
 
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
@@ -699,15 +766,6 @@ export default function TripView({
     setPlayheadMs(clamped + PLAY_STEP_MS > win.end ? win.start : clamped)
     setPlaying(true)
   }
-
-  // leg 歸屬「from 停留點所屬日」：後繼者取全行程順序，跨夜段顯示在出發日末尾（M-4）
-  // 用 globalThis.Map：本檔已從 @vis.gl/react-google-maps import 了元件 Map，會遮蔽內建建構子
-  const nextByStopId = new globalThis.Map(
-    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-      .map(([f, t]) => [f.id, t.id]),
-  )
-  const stopById = new globalThis.Map(stops.map(s => [s.id, s]))
-  const legByPair = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
 
   // Important-2 根治：配對脫離（插入停留點/調整順序）的 legs 不再出現在上面的正常交通列（legByPair
   // 命中不到），過去因此從畫面消失；改收進側欄專屬區塊，過濾出 from 停留點屬 activeDay 者（歸屬規則同 M-4）
@@ -1040,13 +1098,34 @@ export default function TripView({
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
                 )}
-                {playheadPos && (
+                {playheadDisplayPos && (
                   // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
                   // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
                   // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
                   // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
-                  <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
-                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                  <AdvancedMarker position={playheadDisplayPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                    {travelLeg && travelLeg.mode === 'flight' ? (
+                      // SVG 飛機（emoji ✈️ 是 U+2708+FE0F，跨平台朝向不一且會退化黑白字元；SVG 朝向可控）。
+                      // viewBox 內機頭朝上（北），rotate 直接用方位角。填色沿用 RoutePolylines 的 flight 色
+                      // （#8b5cf6，非 categoryUi.ts 的 lodging 保留色 #7c3aed）
+                      <svg
+                        width="28" height="28" viewBox="0 0 24 24"
+                        style={{ transform: `rotate(${Math.round(travelPos?.headingDeg ?? 0)}deg)` }}
+                        className="drop-shadow"
+                      >
+                        <path
+                          d="M12 2 L14 9 L21 12 L14 13.5 L14 19 L16 21.5 L12 20 L8 21.5 L10 19 L10 13.5 L3 12 L10 9 Z"
+                          fill="#8b5cf6" stroke="#fff" strokeWidth="1"
+                        />
+                      </svg>
+                    ) : travelLeg && travelLeg.mode !== 'custom' ? (
+                      // 地面模式：emoji 徽章不旋轉（旋轉的行人/列車違反直覺）。🚇🚶🚗 預設 emoji 呈現，無 FE0F 問題
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-white text-base shadow">
+                        {MODE_ICON[travelLeg.mode]}
+                      </div>
+                    ) : (
+                      <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                    )}
                   </AdvancedMarker>
                 )}
                 <RoutePolylines
@@ -1054,10 +1133,16 @@ export default function TripView({
                   stops={stops}
                   selectedLegId={selectedLegId}
                 />
+                <PlaybackTrail
+                  completedPaths={completedPaths}
+                  currentPath={currentTravelPath}
+                  progress={segment?.kind === 'travel' ? segment.progress : 0}
+                  active={playing}
+                />
                 <CameraFollow target={cameraTarget} playing={playing} />
                 <PlaybackCamera
-                  lat={playheadPos?.lat ?? null}
-                  lng={playheadPos?.lng ?? null}
+                  lat={playheadDisplayPos?.lat ?? null}
+                  lng={playheadDisplayPos?.lng ?? null}
                   active={playing}
                   bounds={playbackBounds}
                 />

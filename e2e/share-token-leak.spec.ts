@@ -52,7 +52,10 @@ test('C-1 迴歸：開啟分享連結後，網址與所有送往 Google Maps 的
 
   await page.goto(`/share/${shareToken}`)
   // 舊連結轉址後應落在 /share/view，網址列從此不再帶 token（C-1 修復的直接可觀察結果）
-  await expect(page).toHaveURL(/\/share\/view$/, { timeout: 10_000 })
+  // C-1 修復後的落地網址是 /share/view?k=<sha256(token) 前 16 碼>——`k` 是查表用的雜湊鍵，不是 token
+  // 本身（token 放在 HttpOnly cookie）。原本的 `$` 錨點沒算到這個 query，讓這條**安全迴歸測試**在
+  // main 上一直紅著、底下真正的「請求不含 token」斷言從來沒跑到。順帶把 k 的形狀也鎖住。
+  await expect(page).toHaveURL(/\/share\/view\?k=[0-9a-f]{16}$/, { timeout: 10_000 })
   await expect(page.getByText('e2e-share-leak- 迴歸測試行程')).toBeVisible({ timeout: 10_000 })
 
   // 給地圖腳本足夠時間完成載入與內部呼叫（GetViewportInfo 等 $rpc 請求發生在腳本載入後）

@@ -92,7 +92,9 @@ test('存入備選 → 面板顯示 → 拼入行程落地為停留點 → viewe
   // ---- 選第 2 天 → 拼入行程 → 該備選列消失、側欄第 2 天出現同名停留點 ----
   const dayKeys = ['2026-12-01', '2026-12-02', '2026-12-03']
   const rowA = candidatesPanel.locator('li').filter({ hasText: candidateNameA })
-  await rowA.locator('select').selectOption(dayKeys[1])
+  // 用 aria-label 指名日期下拉：Plan 7 在同一列加了分類下拉，裸 locator('select') 會命中兩個而違反
+  // strict mode（這條測試因此在 main 上紅了一段時間沒被發現）
+  await rowA.getByLabel('拼入哪一天').selectOption(dayKeys[1])
   await rowA.getByRole('button', { name: '拼入行程' }).click()
 
   await expect(candidateAButton).toHaveCount(0, { timeout: 10_000 })

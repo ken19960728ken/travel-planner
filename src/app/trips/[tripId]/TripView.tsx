@@ -153,6 +153,11 @@ function PlaybackCamera({
   // google.maps 腳本已載入後呼叫（map 非 null 時保證已載入），render 期間（含 SSR）不能碰 google 全域
   useEffect(() => {
     if (!map || !active) return
+    // maxZoom 夾制放在 session 守門之外、只要 active 就套用（複審 🔵-4/5）：
+    // (a) dev 的 StrictMode 雙跑會 setup→cleanup→setup，第二次 setup 因 session 已記錄而跳過 fit——
+    //     若夾制也在守門內，cleanup 清掉的 maxZoom 就沒人補回，fitBounds 的延遲套用可能逃過夾制；
+    // (b) 暫停恢復（跳過 fit 的路徑）也一樣要把 cleanup 清掉的 maxZoom 補回，維持「播放中一律夾住」語義
+    map.setOptions({ maxZoom: PLAYBACK_MAX_ZOOM })
     if (fittedSessionRef.current !== daySessionKey) {
       const b = boundsRef.current
       if (b && b.length > 0) {
@@ -162,7 +167,6 @@ function PlaybackCamera({
         // 決定（實測：使用者先手動放大到 z17 再播放 → 誤讀舊值 17 → 才誤觸發夾成 15，但若舊 zoom 本來
         // 就 <15 則完全不會觸發，該夾的單點/近距離日程反而夾不到）。改用 maxZoom 選項讓 fitBounds 在
         // 套用當下就不會超過上限，沒有「事後讀值」這個步驟，天生不會有時序競態。
-        map.setOptions({ maxZoom: PLAYBACK_MAX_ZOOM })
         const latLngBounds = new google.maps.LatLngBounds()
         for (const p of b) latLngBounds.extend(p)
         map.fitBounds(latLngBounds, 60)
@@ -1256,7 +1260,13 @@ export default function TripView({
           if (s) setCameraTarget({ lat: s.lat, lng: s.lng })
         }}
         playheadMs={playheadMs}
-        onPlayheadChange={setPlayheadMs}
+        onPlayheadChange={ms => {
+          // 暫停態手動拖曳播放頭 = 新的播放起點（複審 🟡-1）：bump session 讓下次起播重收整日全景，
+          // 否則鏡頭會卡在前一段的街廓級取景。播放中拖曳不 bump——daySessionKey 在 E1 deps 裡，
+          // 播放中 bump 會讓每次拖動都彈回整日全景（複審明示的天真寫法陷阱）
+          if (!playing) playSessionRef.current += 1
+          setPlayheadMs(ms)
+        }}
         onMove={canEdit ? moveStop : undefined}
         busy={busy}
         playing={playing}

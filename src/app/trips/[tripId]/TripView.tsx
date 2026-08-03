@@ -23,6 +23,7 @@ import CandidatesPanel, { type Candidate } from './CandidatesPanel'
 import CostSummary from './CostSummary'
 import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
 import { normalizeCategory } from '@/lib/domain/placeCategory'
+import RoutePolylines from './RoutePolylines'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -1048,6 +1049,11 @@ export default function TripView({
                     <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
                   </AdvancedMarker>
                 )}
+                <RoutePolylines
+                  legs={legs.filter(l => activeDayStops.some(s => s.id === l.from_stop_id))}
+                  stops={stops}
+                  selectedLegId={selectedLegId}
+                />
                 <CameraFollow target={cameraTarget} playing={playing} />
                 <PlaybackCamera
                   lat={playheadPos?.lat ?? null}

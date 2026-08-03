@@ -154,6 +154,7 @@ export type Database = {
       }
       stops: {
         Row: {
+          category: string
           ends_at: string
           estimated_cost: number | null
           id: string
@@ -172,6 +173,7 @@ export type Database = {
           updated_by: string | null
         }
         Insert: {
+          category?: string
           ends_at: string
           estimated_cost?: number | null
           id?: string
@@ -190,6 +192,7 @@ export type Database = {
           updated_by?: string | null
         }
         Update: {
+          category?: string
           ends_at?: string
           estimated_cost?: number | null
           id?: string
@@ -210,6 +213,50 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "stops_trip_id_fkey"
+            columns: ["trip_id"]
+            isOneToOne: false
+            referencedRelation: "trips"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      trip_candidates: {
+        Row: {
+          category: string
+          created_at: string
+          created_by: string | null
+          id: string
+          lat: number
+          lng: number
+          name: string
+          place_id: string
+          trip_id: string
+        }
+        Insert: {
+          category?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lat: number
+          lng: number
+          name: string
+          place_id: string
+          trip_id: string
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lat?: number
+          lng?: number
+          name?: string
+          place_id?: string
+          trip_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trip_candidates_trip_id_fkey"
             columns: ["trip_id"]
             isOneToOne: false
             referencedRelation: "trips"

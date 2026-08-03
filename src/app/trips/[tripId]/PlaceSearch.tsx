@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import { useMap, useMapsLibrary } from '@vis.gl/react-google-maps'
+import { categorize, type StopCategory } from '@/lib/domain/placeCategory'
 
 // 搜尋選中先預覽不寫入 DB：帶出 place 物件本身（而非拆散成純資料），讓 PlacePreviewCard
 // 需要時能對同一個 Place 實例再 fetchFields 一次抓 Enterprise 批次（評分/營業時間等）
@@ -10,6 +11,9 @@ export type PlacePick = {
   name: string
   lat: number
   lng: number
+  /** 由 Google types/primaryType 推導的預填分類，使用者在 PlacePreviewCard 送出前仍可改——
+   *  place.types/primaryType 本身不會離開這個檔案，只有這個推導後的六值 slug 會往外傳 */
+  category: StopCategory
 }
 
 export default function PlaceSearch({
@@ -39,7 +43,16 @@ export default function PlaceSearch({
   useEffect(() => {
     if (!places || !containerRef.current) return
     const container = containerRef.current
-    const el = new places.PlaceAutocompleteElement()
+    let el: google.maps.places.PlaceAutocompleteElement
+    try {
+      el = new places.PlaceAutocompleteElement()
+    } catch {
+      // I-2：金鑰缺 Places (New) 權限等情況下這裡已知會拋出；攔下改走既有的降級提示路徑，避免這個
+      // useEffect 內的例外冒泡到最近的 error boundary，把整個行程頁打崩（原本沒有 try/catch 時就是
+      // 這樣：只有地圖區塊有 boundary，PlaceSearch 位在側欄，例外會一路冒泡到 Next 的路由層預設崩潰頁）
+      onErrorRef.current?.('地點搜尋服務目前無法使用')
+      return
+    }
     el.style.width = '100%'
     elementRef.current = el
     container.appendChild(el)
@@ -60,6 +73,7 @@ export default function PlaceSearch({
         name: place.displayName ?? '未命名地點',
         lat: place.location.lat(),
         lng: place.location.lng(),
+        category: categorize(place.types ?? [], place.primaryType ?? null),
       })
       el.value = '' // 連續加入多個景點：選取後清空輸入框
     }

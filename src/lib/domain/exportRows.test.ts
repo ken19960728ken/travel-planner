@@ -6,7 +6,7 @@ const trip = (over: Partial<ExportTrip> = {}): ExportTrip => ({
   start_date: '2026-08-01', end_date: '2026-08-03', ...over,
 })
 const mkStop = (over: Partial<ExportStop> & { id: string; startsAt: number; endsAt: number }): ExportStop => ({
-  name: over.id, timezone: TZ, estimated_cost: null, notes: null,
+  name: over.id, timezone: TZ, estimated_cost: null, notes: null, category: 'other',
   starts_at: new Date(over.startsAt).toISOString(), ends_at: new Date(over.endsAt).toISOString(),
   ...over,
 })
@@ -70,6 +70,14 @@ describe('buildItineraryRows', () => {
     expect(rows.find(r => r.kind === 'leg')).toMatchObject({ durationText: '查無路線' })
   })
 
+  it('detail.no_transit_data 時顯示「無大眾運輸資料（步行約 N 分）」（I-2 方案 a：保留步行時長）', () => {
+    const a = mkStop({ id: 'A', startsAt: Date.UTC(2026, 7, 1, 0, 0), endsAt: Date.UTC(2026, 7, 1, 1, 0) })
+    const b = mkStop({ id: 'B', startsAt: Date.UTC(2026, 7, 1, 3, 0), endsAt: Date.UTC(2026, 7, 1, 4, 0) })
+    const leg = mkLeg({ id: 'L', from_stop_id: 'A', to_stop_id: 'B', duration_minutes: 35, detail: { no_transit_data: true } })
+    const rows = buildItineraryRows(trip(), [a, b], [leg])
+    expect(rows.find(r => r.kind === 'leg')).toMatchObject({ durationText: '無大眾運輸資料（步行約 35 分）' })
+  })
+
   it('脫離配對的 leg 列在該日末尾標 detached: true（Task 1 轉存後仍存在）', () => {
     const a = mkStop({ id: 'A', startsAt: Date.UTC(2026, 7, 1, 0, 0), endsAt: Date.UTC(2026, 7, 1, 1, 0) })
     const b = mkStop({ id: 'B', startsAt: Date.UTC(2026, 7, 1, 2, 0), endsAt: Date.UTC(2026, 7, 1, 3, 0) })
@@ -79,8 +87,9 @@ describe('buildItineraryRows', () => {
     const normalLeg = mkLeg({ id: 'L2', from_stop_id: 'B', to_stop_id: 'C' })
     const rows = buildItineraryRows(trip(), [a, b, c], [detachedLeg, normalLeg])
     const kinds = rows.map(r => r.kind)
-    // day, A, B, leg(B→C), C, leg(A→C detached), total
-    expect(kinds).toEqual(['day', 'stop', 'stop', 'leg', 'stop', 'leg', 'total'])
+    // day, A, B, leg(B→C), C, leg(A→C detached), 交通段小計, total
+    // （categoryTotal 由 Plan 7 Task 9 新增：脫離段帶 500 花費，故「交通段」桶非 0 而出列）
+    expect(kinds).toEqual(['day', 'stop', 'stop', 'leg', 'stop', 'leg', 'categoryTotal', 'total'])
     expect(rows[5]).toMatchObject({ kind: 'leg', detached: true, cost: 500 })
     expect(rows[3]).toMatchObject({ kind: 'leg', detached: false })
   })
@@ -91,5 +100,64 @@ describe('buildItineraryRows', () => {
     const leg = mkLeg({ id: 'L', from_stop_id: 'A', to_stop_id: 'B', estimated_cost: 200 })
     const rows = buildItineraryRows(trip(), [a, b], [leg])
     expect(rows.at(-1)).toEqual({ kind: 'total', cost: 1200 })
+  })
+})
+
+describe('分類欄與分類小計（Plan 7 Task 9）', () => {
+  const t = trip()
+  const day1 = Date.UTC(2026, 7, 1, 0, 0) // 09:00 JST
+
+  it('stop 列帶繁中分類標籤（不用 emoji，避免 Excel 跨平台字型問題）', () => {
+    const rows = buildItineraryRows(
+      t,
+      [mkStop({ id: 'a', startsAt: day1, endsAt: day1 + 3_600_000, category: 'food' })],
+      [],
+    )
+    const stop = rows.find(r => r.kind === 'stop')
+    expect(stop).toMatchObject({ category: '餐飲' })
+    expect(JSON.stringify(rows)).not.toMatch(/🍜|🚉|🗼|🏨|🛒|📍/)
+  })
+
+  it('不變量：所有 categoryTotal 的 cost 總和 === total 列的 cost', () => {
+    const rows = buildItineraryRows(
+      t,
+      [
+        mkStop({ id: 'a', startsAt: day1, endsAt: day1 + 3_600_000, category: 'food', estimated_cost: 800 }),
+        mkStop({ id: 'b', startsAt: day1 + 7_200_000, endsAt: day1 + 10_800_000, category: 'sight', estimated_cost: 1200 }),
+        mkStop({ id: 'c', startsAt: day1 + 14_400_000, endsAt: day1 + 18_000_000, category: 'food', estimated_cost: 200 }),
+      ],
+      [mkLeg({ id: 'l1', from_stop_id: 'a', to_stop_id: 'b', estimated_cost: 340 })],
+    )
+    const subtotals = rows.filter(r => r.kind === 'categoryTotal')
+    const total = rows.find(r => r.kind === 'total')
+    expect(subtotals.length).toBeGreaterThan(0)
+    expect(subtotals.reduce((s, r) => s + (r.kind === 'categoryTotal' ? r.cost : 0), 0))
+      .toBe(total?.kind === 'total' ? total.cost : -1)
+  })
+
+  it('小計排在總計之前', () => {
+    const rows = buildItineraryRows(
+      t, [mkStop({ id: 'a', startsAt: day1, endsAt: day1 + 3_600_000, category: 'food', estimated_cost: 500 })], [],
+    )
+    expect(rows.findIndex(r => r.kind === 'categoryTotal')).toBeLessThan(rows.findIndex(r => r.kind === 'total'))
+  })
+
+  it('全部花費為 null 時不產生任何 categoryTotal 列', () => {
+    const rows = buildItineraryRows(t, [mkStop({ id: 'a', startsAt: day1, endsAt: day1 + 3_600_000 })], [])
+    expect(rows.filter(r => r.kind === 'categoryTotal')).toEqual([])
+  })
+
+  it('legs 自成「交通段」桶，不併進交通站', () => {
+    const rows = buildItineraryRows(
+      t,
+      [
+        mkStop({ id: 'a', startsAt: day1, endsAt: day1 + 3_600_000, category: 'transport', estimated_cost: 50 }),
+        mkStop({ id: 'b', startsAt: day1 + 7_200_000, endsAt: day1 + 10_800_000, category: 'transport' }),
+      ],
+      [mkLeg({ id: 'l1', from_stop_id: 'a', to_stop_id: 'b', estimated_cost: 1200 })],
+    )
+    const labels = rows.filter(r => r.kind === 'categoryTotal').map(r => (r.kind === 'categoryTotal' ? `${r.label}:${r.cost}` : ''))
+    expect(labels).toContain('交通站:50')
+    expect(labels).toContain('交通段:1200')
   })
 })

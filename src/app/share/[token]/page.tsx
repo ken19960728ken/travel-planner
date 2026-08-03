@@ -71,7 +71,10 @@ export default async function SharedTripPage({
           👁 分享檢視
         </span>
       </header>
-      <TripView trip={data.trip} stops={data.stops} legs={data.legs} canEdit={false} autoPlay />
+      <TripView trip={data.trip} stops={data.stops} legs={data.legs} canEdit={false}
+      // 備選庫刻意不給匿名訪客：那是規劃中的內部討論材料，不是要分享的成品行程。
+      // get_shared_trip 的白名單也沒有 candidates，此處傳空陣列是同一個決定的兩端。
+      candidates={[]} autoPlay />
     </main>
   )
 }

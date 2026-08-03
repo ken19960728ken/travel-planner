@@ -1,27 +1,23 @@
-/** 評分白名單分類（Places API (New) type 字串，經官方 Table A/B 核對）：命中任一即代表「值得多打一次
- *  Enterprise 批次」抓 rating/userRatingCount/priceLevel/regularOpeningHours（每月免費額度 1,000 次）。
- *  車站/機場/加油站/ATM 等未列入者一律不主動抓，改由使用者按「查看評分」延遲觸發，見 PlacePreviewCard。 */
-const RATABLE_TYPES = new Set([
-  'restaurant',
-  'cafe',
-  'bar',
-  'bakery',
-  'food',
-  'meal_takeaway',
-  'tourist_attraction',
-  'museum',
-  'park',
-  'lodging',
-  'shopping_mall',
-  'store',
-  'art_gallery',
-  'zoo',
-  'amusement_park',
-])
+import { categorize, type StopCategory } from './placeCategory'
+
+/** 評分白名單改由 placeCategory.ts 的六值分類推導，不再自維護一份 type 字串清單：命中
+ *  food/sight/lodging/shopping 任一即代表「值得多打一次 Enterprise 批次」抓 rating/userRatingCount/
+ *  priceLevel/regularOpeningHours（每月免費額度 1,000 次）。transport/other 一律不主動抓，改由使用者
+ *  按「查看評分」延遲觸發，見 PlacePreviewCard。
+ *  行為變化：白名單涵蓋面從舊版硬編碼的 15 個 type 擴大到 categorize() 對照表 food/sight/lodging/shopping
+ *  四桶合計約 320 個 type（逐 Table A/B section 核對後的實際數字，含日本行程常見的拉麵店等 Food and
+ *  Drink 細分類，舊版漏掉，見 Plan D2）。
+ *  **同時發生反向的行為收窄**（審查 M-1，別只看上面那句「擴大」）：語義從舊版的「types 陣列裡任一
+ *  命中白名單就抓」變成「第一個命中決定分類，再看該分類是否 ratable」。所以東京駅
+ *  `['train_station','subway_station','transit_station','shopping_mall',…]` 舊版會因 shopping_mall
+ *  而抓、新版歸 transport 不抓；機場內餐廳群同理。這個方向是對的——舊註解本來就寫「車站/機場一律不
+ *  主動抓」，是舊程式碼沒做到——且使用者仍可按「查看評分」手動觸發，無功能損失。
+ *  成本量化（明確接受）：只在預覽卡掛載時觸發、一次搜尋最多打一次，`placeDetailCache` 同分頁去重，
+ *  單次規劃 session 實際只會發生數十次 Enterprise 呼叫，遠低於每月免費額度 1,000 次。 */
+const RATABLE_CATEGORIES = new Set<StopCategory>(['food', 'sight', 'lodging', 'shopping'])
 
 export function isRatableCategory(types: readonly string[], primaryType: string | null | undefined): boolean {
-  if (primaryType && RATABLE_TYPES.has(primaryType)) return true
-  return types.some(t => RATABLE_TYPES.has(t))
+  return RATABLE_CATEGORIES.has(categorize(types, primaryType))
 }
 
 const PRICE_LEVEL_LABELS: Record<string, string> = {

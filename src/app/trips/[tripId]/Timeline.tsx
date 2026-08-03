@@ -5,7 +5,9 @@ import type { Stop } from './TripView'
 import { formatLocalTime } from '@/lib/domain/tz'
 import { filterDayStops } from '@/lib/domain/days'
 import type { DayView } from './dayView'
-import { MODE_ICON, MODE_LABEL, legDurationText } from './legUi'
+import { MODE_ICON, MODE_LABEL, legDurationText, legDurationShortText } from './legUi'
+import { CATEGORY_BLOCK_CLASS, CATEGORY_ICON } from './categoryUi'
+import { normalizeCategory } from '@/lib/domain/placeCategory'
 
 const HOUR_MS = 60 * 60 * 1000
 const SNAP_MS = 5 * 60 * 1000 // 拖曳吸附至 5 分鐘；位移小於此視為點擊
@@ -146,12 +148,17 @@ export default function Timeline({
                   // editor 維持原本「按下→放開由 endDrag 判斷位移」流程，onClick 讓給 undefined 不重複觸發
                   onClick={onMove ? undefined : () => onSelect(stop.id)}
                   title={`${stop.name} ${formatLocalTime(s, stop.timezone)}–${formatLocalTime(e, stop.timezone)}`}
-                  className={`absolute top-1 bottom-1 touch-none overflow-hidden rounded px-1 text-left text-xs text-white ${
-                    conflictIds.has(stop.id) ? 'bg-red-600' : selectedId === stop.id ? 'bg-blue-600' : 'bg-emerald-600'
-                  }`}
+                  // 底色優先序寫死：衝突 > 分類。選取改用 ring 疊加而非換底色——否則選取會蓋掉分類色，
+                  // 使用者一點下去就看不出這格是什麼類型了。
+                  // 註：bg-emerald-600 原本是「一般色塊」的預設 fallback，Plan 7 起重新賦義為「景點」；
+                  // 分類接上後這個顏色只會在該格真的是景點時出現，語意不衝突。
+                  className={`absolute top-1 bottom-1 touch-none truncate rounded px-1 text-left text-xs text-white ${
+                    conflictIds.has(stop.id) ? 'bg-red-600' : CATEGORY_BLOCK_CLASS[normalizeCategory(stop.category)]
+                  } ${selectedId === stop.id ? 'ring-2 ring-blue-500' : ''}`}
                   style={{ left: `${pct(s + offset)}%`, width: `${Math.max(pct(e + offset) - pct(s + offset), 1.5)}%` }}
                 >
                   {stop.locked && '🔒'}
+                  {CATEGORY_ICON[normalizeCategory(stop.category)]}
                   {stop.name}
                 </button>
               )
@@ -175,7 +182,7 @@ export default function Timeline({
                   tabIndex={-1}
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
                   title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
-                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden whitespace-nowrap rounded text-center text-[10px] leading-tight ${
+                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
                     isDeadZone ? 'pointer-events-none' : ''
                   } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
                     selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
@@ -184,7 +191,7 @@ export default function Timeline({
                 >
                   {MODE_ICON[leg.mode]}
                   {leg.stale && '⚠️'}
-                  {legDurationText(leg)}
+                  {legDurationShortText(leg)}
                 </button>
               )
             })}

@@ -4,18 +4,25 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
-import { nextDefaultSlot } from '@/lib/domain/slot'
-import { formatLocalTime, localDateKey, wallInputToUtcMs } from '@/lib/domain/tz'
+import { defaultSlotForDay, stayMsForCategory } from '@/lib/domain/slot'
+import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
 import { adjacentPairs } from '@/lib/domain/legSync'
+import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
 import PlacePreviewCard from './PlacePreviewCard'
 import StopEditor from './StopEditor'
 import LegEditor from './LegEditor'
 import Timeline, { dayWindow } from './Timeline'
+import SectionErrorBoundary from './SectionErrorBoundary'
+import { shouldPanCamera } from './cameraGeometry'
 import { buildDayView } from './dayView'
-import { MODE_ICON, legDurationText } from './legUi'
+import { MODE_ICON, legDurationText, isNoTransitData } from './legUi'
+import CandidatesPanel, { type Candidate } from './CandidatesPanel'
+import CostSummary from './CostSummary'
+import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
+import { normalizeCategory } from '@/lib/domain/placeCategory'
 import tzlookup from '@photostructure/tz-lookup'
 
 export type Trip = {
@@ -42,6 +49,7 @@ export type Stop = {
   locked: boolean
   notes: string | null
   estimated_cost: number | null
+  category: StopCategory
 }
 
 export type Leg = {
@@ -63,33 +71,99 @@ export type Leg = {
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
+const PLAYBACK_MAX_ZOOM = 15 // 起播 fitBounds 的縮放上限：單點/近距離日程會被拉到最大縮放，需夾住
 const SYNC_RETRY_MS = 1_500 // I-3：sync 回報 pending/incomplete 時的續跑間隔
 const MAX_SYNC_ROUNDS = 6 // I-3：續跑回合上限（配合 I-2 的 in-flight guard），避免無金鑰環境無限重試
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
 
-/** 鏡頭跟隨：target 變更時平移過去；視野太遠時拉近（需在 APIProvider 內才能拿到 map 實例） */
-function CameraFollow({ target }: { target: { lat: number; lng: number } | null }) {
+/** 鏡頭跟隨：target 變更時平移過去；視野太遠時拉近（需在 APIProvider 內才能拿到 map 實例）。
+ *  I-1（審查更正）：播放中（playing=true）不做「視野太遠就拉近」——PlaybackCamera 已用 fitBounds
+ *  收好整段視野；若使用者這時點側欄或時間軸的停留點觸發這裡的 setCameraTarget，被拉到 zoom 14 會讓
+ *  下一個播放 tick 的位移暴增，重演瞬移灰塊（可達路徑：Timeline 停留點色塊的 onSelect 對 playing
+ *  沒有任何閘門）。panTo 本身仍照常執行——使用者點擊是明確意圖，只是播放中不跟著硬拉縮放。 */
+function CameraFollow({ target, playing }: { target: { lat: number; lng: number } | null; playing: boolean }) {
   const map = useMap()
   useEffect(() => {
     if (!map || !target) return
     map.panTo(target)
-    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
-  }, [map, target])
+    if (!playing && (map.getZoom() ?? 0) < 12) map.setZoom(14)
+  }, [map, target, playing])
   return null
 }
 
-/** 播放中鏡頭跟隨橘點（M-7）：只在播放時作用，不干擾使用者平時手動平移。
- *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。 */
-function PlaybackCamera({ lat, lng, active }: { lat: number | null; lng: number | null; active: boolean }) {
+/** 播放鏡頭（M-7，2026-08-01 產品拍板：**起播定格全景，不是逐幀跟著橘點跑**）：起播時用
+ *  fitBounds 把當日整段路線收進視野一次，之後鏡頭原則上不動，橘點自己在畫面內移動；只有橘點跑出
+ *  視窗中央 70% 安全區（例如單日跨距超過容器、或使用者手動平移過鏡頭）才會 panTo 追上去。
+ *  這是刻意的產品行為（使用者在 N-4 review 明確選擇「定格全景」而非「鏡頭貼著橘點跑」），
+ *  邊緣閘門是安全網——不要因為「九州這種日程通常不會觸發」就拿掉，沒有它，遠距離或使用者平移過的
+ *  日程會回到瞬移灰塊的舊 bug。
+ *  相依取 lat/lng 數值而非位置物件——物件字面量每次 render 都是新參照，會讓 effect 每輪重跑。
+ *  M-6（跨分支提醒）：Google 官方文件記載地圖容器 `display:none` 時 fitBounds 讀到 0x0 尺寸、
+ *  不會做任何事——若 mobile 版面把地圖面板用 `hidden` class 藏起來，這裡的 fitBounds 會靜默失效，
+ *  合併前請檢查手機版面下播放是否仍會收整段視野。 */
+function PlaybackCamera({
+  lat, lng, active, bounds,
+}: {
+  lat: number | null
+  lng: number | null
+  active: boolean
+  /** 當日停留點的原始座標陣列（未化簡成 min/max）：TripView 每次 render 都會重新 map() 出新參照，
+   *  故不放進下面 effect 的 deps，改用 ref 讀最新值（同 L468 playheadMsRef 的作法：ref 寫入也要放進
+   *  effect 裡，不能在 render 期間直接賦值，否則違反 react-hooks/refs） */
+  bounds: { lat: number; lng: number }[] | null
+}) {
   const map = useMap()
-  // 起播時若視野過遠先拉近一次；之後不再動縮放，讓使用者能自行調整
+  const boundsRef = useRef(bounds)
+  useEffect(() => {
+    boundsRef.current = bounds
+  }, [bounds])
+  // M-2：跟下面的跟隨 effect 同樣依賴 active，起播那個 commit 兩者會接連執行；跟隨 effect
+  // 若接著讀 map.getBounds() 可能拿到 fitBounds 套用前的舊視窗（見下方 C-1 說明的同一個啟發式
+  // 時序問題），在舊座標系下誤判邊緣、跟 fitBounds 的動畫互搶。用這個旗標讓跟隨 effect 那輪跳過一次。
+  const justFittedRef = useRef(false)
+  // 起播時（active 由 false→true）把當日整段收進視野，取代原本「zoom<12 才拉近單點」的邏輯——
+  // 遠距離日程（如福岡→鹿兒島 200km）不會再被單點 setZoom(14) 強拉到超出容器涵蓋範圍。
+  // 這裡用逐點 extend 建構 LatLngBounds 而非在呼叫端 Math.min/max 化簡座標，是因為 Math.min/max
+  // 在跨 180 度經線時會算出反向（過大）的框；extend 交給 Google 官方實作正確處理，且只能在
+  // google.maps 腳本已載入後呼叫（map 非 null 時保證已載入），render 期間（含 SSR）不能碰 google 全域
   useEffect(() => {
     if (!map || !active) return
-    if ((map.getZoom() ?? 0) < 12) map.setZoom(14)
+    const b = boundsRef.current
+    if (!b || b.length === 0) return
+    // C-1（審查更正，race-free 修復）：原本 fitBounds 後立刻 getZoom() 判斷要不要夾縮放上限，
+    // 但 @types/google.maps 的 fitBounds 文件明載「是否套用動畫由內部啟發式決定」——呼叫後立刻讀到
+    // 的可能是套用前的舊值。用「按播放前的 zoom」去判斷「fitBounds 之後該不該夾」是競態、行為不可
+    // 決定（實測：使用者先手動放大到 z17 再播放 → 誤讀舊值 17 → 才誤觸發夾成 15，但若舊 zoom 本來
+    // 就 <15 則完全不會觸發，該夾的單點/近距離日程反而夾不到）。改用 maxZoom 選項讓 fitBounds 在
+    // 套用當下就不會超過上限，沒有「事後讀值」這個步驟，天生不會有時序競態。
+    map.setOptions({ maxZoom: PLAYBACK_MAX_ZOOM })
+    const latLngBounds = new google.maps.LatLngBounds()
+    for (const p of b) latLngBounds.extend(p)
+    map.fitBounds(latLngBounds, 60)
+    justFittedRef.current = true
+    return () => {
+      // active 轉 false（暫停/停止）時還原，不永久限制使用者手動縮放
+      map.setOptions({ maxZoom: null })
+    }
   }, [map, active])
   useEffect(() => {
     if (!map || !active || lat === null || lng === null) return
+    if (justFittedRef.current) {
+      justFittedRef.current = false
+      return
+    }
+    // 邊緣閘門（純函式抽到 cameraGeometry.ts 方便單元測試，含跨 180 度經線的 M-1 修復）：點還在
+    // 目前視窗中央 70% 區域內就不動鏡頭，避免每個取樣點都 panTo 一次造成掃視感；真的要出邊界才動，
+    // 動的時候仍是平滑 panTo（非瞬移）
+    const rawBounds = map.getBounds()
+    const viewport = rawBounds
+      ? {
+          ne: { lat: rawBounds.getNorthEast().lat(), lng: rawBounds.getNorthEast().lng() },
+          sw: { lat: rawBounds.getSouthWest().lat(), lng: rawBounds.getSouthWest().lng() },
+        }
+      : null
+    if (!shouldPanCamera({ lat, lng }, viewport)) return
     map.panTo({ lat, lng })
   }, [map, active, lat, lng])
   return null
@@ -225,6 +299,8 @@ export default function TripView({
   legs,
   canEdit,
   autoPlay = false,
+  candidates,
+  candidatesError,
 }: {
   trip: Trip
   stops: Stop[]
@@ -235,6 +311,9 @@ export default function TripView({
   /** Task 8（spec §5「分享連結預設進播放模式」）：分享頁掛載時直接進播放模式。惰性 useState 初始化
    *  （避免 set-state-in-effect lint——本專案已兩度踩過），不開額外 effect */
   autoPlay?: boolean
+  /** 備選地點清單（由 page.tsx 併發查詢帶入） */
+  candidates: Candidate[]
+  candidatesError?: boolean
 }) {
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -254,7 +333,11 @@ export default function TripView({
     return dayWindow(filterDayStops(stops, tripDayKeys(trip.start_date, trip.end_date)[0])) !== null
   })
   const busyRef = useRef(false)
-  const lastInsertedEndRef = useRef(0)
+  // 日別化（R-4）：原本只存 endsAt 數字，安全性完全依賴「addStop 永遠用 activeDay」這個前提。
+  // 備選庫的「拼入行程」允許指定任意日期後該前提消失——把第 3 天的墊底基準拿去算第 1 天，
+  // 會產出離譜時段。改帶 day 後，defaultSlotForDay 只在同日才套用墊底。
+  const lastInsertedEndRef = useRef<{ day: string; endsAt: number } | null>(null)
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
   const [draftPin, setDraftPin] = useState<{ lat: number; lng: number } | null>(null)
   const [draftName, setDraftName] = useState('')
   // 搜尋預覽（先看再決定加不加入，不寫 DB）：與 draftPin 互斥同一時間只顯示一張卡，視覺概念一致
@@ -266,11 +349,17 @@ export default function TripView({
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
   const center = stops.length > 0 ? { lat: stops[0].lat, lng: stops[0].lng } : FALLBACK_CENTER
 
-  // refresh 落地（真實列已涵蓋墊底基準）後歸零，讓後續預設時段計算回歸 props 真相
+  // refresh 落地（真實列已涵蓋墊底基準）後歸零，讓後續預設時段計算回歸 props 真相。
+  // 日別化後只比對「同一天」的停留點——別天的列即使結束時間更晚，也不代表這天的墊底已落地。
   useEffect(() => {
-    if (stops.some(s => new Date(s.ends_at).getTime() >= lastInsertedEndRef.current)) {
-      lastInsertedEndRef.current = 0
-    }
+    const pending = lastInsertedEndRef.current
+    if (!pending) return
+    const landed = stops.some(
+      s =>
+        localDateKey(new Date(s.starts_at).getTime(), s.timezone) === pending.day &&
+        new Date(s.ends_at).getTime() >= pending.endsAt,
+    )
+    if (landed) lastInsertedEndRef.current = null
   }, [stops])
 
   const syncedRef = useRef(false)
@@ -349,7 +438,16 @@ export default function TripView({
     }
   }
 
-  async function addStop(p: { name: string; lat: number; lng: number; placeId: string | null; isCustom: boolean }): Promise<boolean> {
+  async function addStop(p: {
+    name: string
+    lat: number
+    lng: number
+    placeId: string | null
+    isCustom: boolean
+    category: StopCategory
+    /** 目標日；省略時為當前 Day。備選庫的「拼入行程」會指定任意日期 */
+    targetDay?: string
+  }): Promise<boolean> {
     // Task 5：目前所有呼叫點都已被 canEdit 閘門擋住（PlaceSearch/草稿表單皆不渲染），這裡補一層與
     // syncLegs 對齊的防線二，避免日後新增呼叫點時繞過閘門
     if (!canEdit) return false
@@ -358,27 +456,15 @@ export default function TripView({
     busyRef.current = true
     setBusy(true)
     try {
-      // Day-aware：只用當日既有停留點排定時段，避開「多日預設時段疊加」
-      const targetDay = activeDay
-      // 該日的參考時區：當日已有停留點用其時區，否則沿用全行程最後一個停留點的時區，再不然用瀏覽器時區
-      const dayStops = stops.filter(s => localDateKey(new Date(s.starts_at).getTime(), s.timezone) === targetDay)
-      const refTz =
-        dayStops[dayStops.length - 1]?.timezone ??
-        stops[stops.length - 1]?.timezone ??
-        Intl.DateTimeFormat().resolvedOptions().timeZone
-      const daySchedule = dayStops.map(s => ({
-        id: s.id,
-        startsAt: new Date(s.starts_at).getTime(),
-        endsAt: new Date(s.ends_at).getTime(),
-        locked: s.locked,
-      }))
-      // 空日的預設開場：當地早上九點
-      const fallback = wallInputToUtcMs(`${targetDay}T09:00`, refTz)
-      if (lastInsertedEndRef.current > 0) {
-        // router.refresh() 尚未把新列帶回 props 前，用上次成功寫入的結束時間墊底，避免連續加入算出相同時段
-        daySchedule.push({ id: '__pending__', startsAt: lastInsertedEndRef.current - 1, endsAt: lastInsertedEndRef.current, locked: false })
-      }
-      const slot = nextDefaultSlot(daySchedule, fallback)
+      // 日別預設時段計算已抽成純函式（含 refTz 三段 fallback、空日當地 09:00、pending 墊底且只在同日套用）
+      const targetDay = p.targetDay ?? activeDay
+      const slot = defaultSlotForDay(
+        stops,
+        targetDay,
+        lastInsertedEndRef.current,
+        Intl.DateTimeFormat().resolvedOptions().timeZone,
+        stayMsForCategory(p.category),
+      )
 
       let timezone = 'UTC'
       try {
@@ -395,6 +481,7 @@ export default function TripView({
         lng: p.lng,
         place_id: p.placeId,
         is_custom: p.isCustom,
+        category: p.category,
         timezone,
         starts_at: new Date(slot.startsAt).toISOString(),
         ends_at: new Date(slot.endsAt).toISOString(),
@@ -406,7 +493,7 @@ export default function TripView({
         })
         return false
       }
-      lastInsertedEndRef.current = slot.endsAt
+      lastInsertedEndRef.current = { day: targetDay, endsAt: slot.endsAt }
       setNotice(null)
       setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
       void syncLegs()
@@ -416,6 +503,84 @@ export default function TripView({
       busyRef.current = false
       setBusy(false)
     }
+  }
+
+  /** 存入備選：不寫 stops、不佔時間軸，只把地點收進 trip_candidates 待日後決定。
+   *  三重閘門與 addStop 對齊（canEdit 防線二、busyRef 同步 guard 防連點、stopsError 讀取失敗即關閉寫入）。 */
+  async function saveCandidate(name: string, category: StopCategory): Promise<boolean> {
+    if (!canEdit) return false
+    if (busyRef.current) return false
+    if (stopsError) return false
+    if (!searchPreview) return false
+    busyRef.current = true
+    setBusy(true)
+    try {
+      const supabase = createClient()
+      // 六欄，一個都不能多：created_by / created_at / id 不在欄位級 INSERT 白名單內，帶了會 42501
+      const { error } = await supabase.from('trip_candidates').insert({
+        trip_id: trip.id,
+        name,
+        lat: searchPreview.lat,
+        lng: searchPreview.lng,
+        place_id: searchPreview.place.id ?? '',
+        category,
+      })
+      if (error) {
+        // 錯誤碼翻成人話：使用者看到「23505」不知道那是什麼意思
+        const text =
+          error.code === '23505'
+            ? '這個地點已在備選清單'
+            : error.code === '23514'
+              ? '名稱長度不符限制'
+              : error.message?.includes('candidate_limit_reached')
+                ? '備選已達上限 100 筆，請先拼入行程或刪除'
+                : '存入備選失敗，請稍後再試'
+        setNotice({ kind: 'error', text })
+        return false // 失敗時保留預覽卡，讓使用者能改名重試
+      }
+      setSearchPreview(null)
+      setNotice({ kind: 'success', text: '已存入備選 ✓' })
+      router.refresh()
+      return true
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+
+  /** 拼入行程：備選 → 正式停留點（移轉語意，不是複製）。
+   *  刻意「先建後刪」而非原子交易：反序（先刪後建）若建立失敗會直接丟失使用者資料，
+   *  這個方向最壞情況只是備選殘留、可手動刪除，永不丟資料（fail-safe）。 */
+  async function promoteCandidate(c: Candidate, day: string): Promise<boolean> {
+    const ok = await addStop({
+      name: c.name,
+      lat: c.lat,
+      lng: c.lng,
+      placeId: c.place_id,
+      isCustom: false,
+      // 沿用備選自己的分類：使用者存入備選時已經確認過一次，拼入行程不該把它重設回 other
+      category: c.category,
+      targetDay: day,
+    })
+    if (!ok) return false // addStop 已設好 notice
+
+    const supabase = createClient()
+    const { error } = await supabase.from('trip_candidates').delete().eq('id', c.id)
+    if (error) {
+      setNotice({ kind: 'error', text: '已加入行程，但備選未移除，請手動刪除' })
+    }
+
+    if (day !== activeDay) {
+      // 不呼叫 changeDay：它會清掉剛剛 addStop 寫入的墊底基準，導致連續 promote 到同一天算出相同時段
+      setActiveDay(day)
+      setSelectedId(null)
+      setSelectedLegId(null)
+      setPlayheadMs(null)
+      setPlaying(false)
+    }
+    setSelectedCandidateId(null)
+    router.refresh()
+    return true
   }
 
   // 時間軸拖曳平移提交：呼叫連鎖順延 RPC，後續未鎖定停留點原子化跟著移動（spec §6）
@@ -448,16 +613,19 @@ export default function TripView({
     }
   }
 
-  // 切換 Day：連動重置播放頭、播放狀態與加點基準，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
+  // 切換 Day：連動重置播放頭、播放狀態，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
   function changeDay(day: string) {
     setActiveDay(day)
     setSelectedId(null)
     setSelectedLegId(null)
     setPlayheadMs(null)
     setPlaying(false)
-    lastInsertedEndRef.current = 0
+    // 加點基準不再於此歸零：ref 已帶 day，defaultSlotForDay 只在同日才套用墊底，跨日天然無效。
+    // 保留歸零反而會讓「promote 到他日後切回原本那天」失去仍然有效的墊底基準。
   }
 
+  const dayKeys = tripDayKeys(trip.start_date, trip.end_date)
+  const selectedCandidate = candidates.find(c => c.id === selectedCandidateId) ?? null
   // 側欄只顯示當前 Day 的停留點，編號沿用當日順序
   const activeDayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(activeDayStops)
@@ -478,6 +646,12 @@ export default function TripView({
           })),
           clampedPlayheadMs,
         )
+
+  // 播放鏡頭 fitBounds 用的當日停留點座標（M-7 修復）：只傳原始點陣列，不在這裡用 Math.min/max 化簡成
+  // min/max——跨 180 度經線時 min/max 會反向算出錯誤的框。真正安全的 LatLngBounds 建構（逐點 extend）
+  // 只能在 google.maps 腳本載入後執行，這裡是 render 期間（含 SSR）碰不到 google 全域，故挪到
+  // PlaybackCamera 的 effect 裡處理
+  const playbackBounds = activeDayStops.length > 0 ? activeDayStops.map(s => ({ lat: s.lat, lng: s.lng })) : null
 
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
@@ -555,8 +729,11 @@ export default function TripView({
 
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-80 shrink-0 overflow-y-auto border-r p-3">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        {/* 手機（< md）上下堆疊：側欄改滿寬、上限 38vh 內部捲動（overflow-y-auto 已存在），
+            讓 flex-1 的地圖區塊自動吃下剩餘高度，不需要另外幫地圖寫死高度（見下方地圖容器）。
+            桌機（md 以上）維持原本 320px 固定寬側欄 + 左右並排，外觀與行為完全不變。 */}
+        <aside className="max-h-[38vh] w-full overflow-y-auto border-b p-3 md:max-h-none md:w-80 md:shrink-0 md:border-b-0 md:border-r">
           {canEdit && apiKey && !stopsError && (
             <PlaceSearch
               onPick={p => {
@@ -575,20 +752,23 @@ export default function TripView({
               key={searchPreview.seq}
               place={searchPreview.place}
               initialName={searchPreview.name}
+              initialCategory={searchPreview.category}
               lat={searchPreview.lat}
               lng={searchPreview.lng}
               busy={busy}
-              onAdd={async name => {
+              onAdd={async (name, category) => {
                 const ok = await addStop({
                   name,
                   lat: searchPreview.lat,
                   lng: searchPreview.lng,
                   placeId: searchPreview.place.id,
                   isCustom: false,
+                  category,
                 })
                 if (ok) setSearchPreview(null) // 成功後清掉預覽；失敗維持原樣讓使用者能重試
                 return ok
               }}
+              onSaveCandidate={saveCandidate}
               onCancel={() => setSearchPreview(null)}
             />
           )}
@@ -599,7 +779,8 @@ export default function TripView({
                 e.preventDefault()
                 const name = draftName.trim()
                 if (!name) return
-                const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true })
+                // 地圖右鍵自訂地點沒有 Google 分類資料可推導，一律歸類 other
+                const ok = await addStop({ name, lat: draftPin.lat, lng: draftPin.lng, placeId: null, isCustom: true, category: 'other' })
                 if (ok) {
                   setDraftPin(null)
                   setDraftName('')
@@ -663,6 +844,7 @@ export default function TripView({
                       <span className="mr-1 text-xs text-gray-400">
                         {formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}
                       </span>
+                      <span className="mr-1">{CATEGORY_ICON[normalizeCategory(stop.category)]}</span>
                       <span className="font-medium">{stop.name}</span>
                     </button>
                     {canEdit && selectedId === stop.id && (
@@ -693,7 +875,12 @@ export default function TripView({
                           // gapMinutes < requiredMinutes 恆成立（detectConflicts 的判定條件），四捨五入可能把
                           // 44.6 分進位成 45 分，顯示出「45 分＜45 分」自相矛盾的句子；改用無條件捨去，
                           // floor(gap) < requiredMinutes 對整數 requiredMinutes 永遠成立，不等式恆自洽
-                          ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分`}
+                          // M-3：isNoTransitData 段的 requiredMinutes 是步行估算而非大眾運輸班次時間，
+                          // 警示文案需明確標註，否則像九州這種 Routes API 不支援大眾運輸的地區會整條
+                          // 時間軸誤報趕不上
+                          ` ⚠ 趕不上：空檔 ${Math.floor(tightWarning.gapMinutes)} 分＜交通 ${tightWarning.requiredMinutes} 分${
+                            isNoTransitData(leg) ? '（步行估算）' : ''
+                          }`}
                       </button>
                       {canEdit && leg.source === 'manual' && (
                         <span className="ml-1">
@@ -725,6 +912,12 @@ export default function TripView({
               </li>
             )}
           </ul>
+          {/* 花費分類摘要（Plan 7 Task 8 的元件，此處掛載）：全行程七桶，不只當日 */}
+          <CostSummary
+            stops={stops.map(s => ({ category: normalizeCategory(s.category), estimatedCost: s.estimated_cost }))}
+            legs={legs.map(l => ({ estimatedCost: l.estimated_cost }))}
+            currency={trip.currency}
+          />
           {detachedLegs.length > 0 && (
             <details className="mt-2 rounded border p-2" open>
               <summary className="cursor-pointer text-sm font-medium">
@@ -750,72 +943,120 @@ export default function TripView({
               </ul>
             </details>
           )}
+          <CandidatesPanel
+            candidates={candidates}
+            loadError={Boolean(candidatesError)}
+            canEdit={canEdit}
+            busy={busy}
+            dayKeys={dayKeys}
+            activeDay={activeDay}
+            selectedCandidateId={selectedCandidateId}
+            onFocus={c => {
+              // 不清 searchPreview / draftPin：三者語義不同（備選是已存的、預覽是待決定的、
+              // 草稿是自訂地點），同時存在不衝突
+              setSelectedCandidateId(c.id)
+              setCameraTarget({ lat: c.lat, lng: c.lng })
+            }}
+            onPromote={promoteCandidate}
+          />
         </aside>
-        <div className="min-h-0 flex-1">
+        {/* min-h-[160px]（僅手機）：側欄在極短螢幕上被壓到接近 0 時，地圖仍保有可用的最小高度，
+            不會整個被擠到看不見；md:min-h-0 還原成桌機原本的值，避免這個安全下限在桌機的極端矮視窗
+            （例如瀏覽器被縮到很矮）改變原本「地圖可以被壓到 0」的行為，確保桌機零變化。
+            flex-1 本身在 row（桌機）與 col（手機）兩種方向下都會自動吃下側欄以外的剩餘空間，
+            兩種斷點共用同一組 flex-1，不需要另外寫死 vh 高度。 */}
+        <div className="min-h-[160px] flex-1 md:min-h-0">
           {apiKey ? (
-            <Map
-              defaultCenter={center}
-              defaultZoom={12}
-              mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
-              gestureHandling="greedy"
-              disableDefaultUI={false}
-              onContextmenu={e => {
-                if (!canEdit || stopsError) return
-                const latLng = e.detail.latLng
-                if (latLng) {
-                  setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
-                  setDraftPin({ lat: latLng.lat, lng: latLng.lng })
-                }
-              }}
-            >
-              {stops.map(stop => {
-                // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
-                const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
-                const inActiveDay = dayIdx >= 0
-                return (
-                  <AdvancedMarker
-                    key={stop.id}
-                    position={{ lat: stop.lat, lng: stop.lng }}
-                    onClick={() => {
-                      // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
-                      const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
-                      if (day !== activeDay) changeDay(day)
-                      setSelectedId(stop.id)
-                    }}
-                    title={stop.name}
-                  >
-                    <Pin
-                      background={selectedId === stop.id ? '#2563eb' : inActiveDay ? '#ef4444' : '#d1d5db'}
-                      glyphColor="#fff"
-                      borderColor="#fff"
+            <SectionErrorBoundary message="地圖載入失敗（可能是金鑰或網路問題），行程資料仍可正常編輯">
+              <Map
+                defaultCenter={center}
+                defaultZoom={12}
+                mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
+                // 手勢策略決策（手機版面陷阱）：改成上下堆疊後地圖橫跨全寬，若維持會捲頁的單指手勢，
+                // 使用者想滑向下方時間軸/側欄會被地圖吃掉。這裡選 (b) 而非 (a) cooperative：
+                // 本頁殼層本來就是 h-screen 固定版面、不存在「頁面捲動」這件事（page.tsx 的 <main>
+                // 用 h-screen，TripView 外層是 min-h-0 flex-1）——桌機原本就沒有整頁捲動、只有側欄
+                // 自己的 overflow-y-auto。手機版把地圖用 flex-1 限制在剩餘高度內、側欄補上 max-h-[38vh]
+                // 上限捲動，三個區塊（側欄／地圖／時間軸）在同一個螢幕內各自可見、各自捲動，本來就不需要
+                // 使用者「滑過地圖」才能看到下一段內容，因此不必犧牲地圖雙指以外的手勢；也順帶避開了
+                // 依視窗寬度切換 gestureHandling 需要在 client 用 JS 判斷寬度、可能造成 SSR/hydration
+                // 不一致的風險（純 CSS 斷點即可解決，不需要 JS 介入）。桌機行為原封不動。
+                gestureHandling="greedy"
+                disableDefaultUI={false}
+                onContextmenu={e => {
+                  if (!canEdit || stopsError) return
+                  const latLng = e.detail.latLng
+                  if (latLng) {
+                    setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
+                    setDraftPin({ lat: latLng.lat, lng: latLng.lng })
+                  }
+                }}
+              >
+                {stops.map(stop => {
+                  // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
+                  const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
+                  const inActiveDay = dayIdx >= 0
+                  return (
+                    <AdvancedMarker
+                      key={stop.id}
+                      position={{ lat: stop.lat, lng: stop.lng }}
+                      onClick={() => {
+                        // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
+                        const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
+                        if (day !== activeDay) changeDay(day)
+                        setSelectedId(stop.id)
+                      }}
+                      title={stop.name}
                     >
-                      {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
-                    </Pin>
+                      {/* 狀態 × 分類雙重編碼（Plan 7 Task 6）：background 讓給分類色之後，原本靠它
+                          承載的「選取／當日／他日」三態必須換載體——選取改用藍框、當日他日改用大小與
+                          序號。序號是既有的順序資訊，不可因為改配色就弄丟。 */}
+                      <Pin
+                        background={CATEGORY_PIN_HEX[normalizeCategory(stop.category)]}
+                        glyphColor="#fff"
+                        borderColor={selectedId === stop.id ? '#2563eb' : '#fff'}
+                        scale={selectedId === stop.id ? 1.3 : inActiveDay ? 1.0 : 0.7}
+                      >
+                        {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
+                      </Pin>
+                    </AdvancedMarker>
+                  )
+                })}
+                {canEdit && !stopsError && draftPin && (
+                  <AdvancedMarker position={draftPin}>
+                    <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
-                )
-              })}
-              {canEdit && !stopsError && draftPin && (
-                <AdvancedMarker position={draftPin}>
-                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
-                </AdvancedMarker>
-              )}
-              {canEdit && !stopsError && searchPreview && (
-                <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
-                  <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
-                </AdvancedMarker>
-              )}
-              {playheadPos && (
-                // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
-                // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
-                // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
-                // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
-                <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
-                  <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
-                </AdvancedMarker>
-              )}
-              <CameraFollow target={cameraTarget} />
-              <PlaybackCamera lat={playheadPos?.lat ?? null} lng={playheadPos?.lng ?? null} active={playing} />
-            </Map>
+                )}
+                {/* 選中的備選（橘）：與草稿/預覽的灰、停留點的紅/藍/灰區隔。
+                    viewer 也看得到——點名稱聚焦是純讀取行為，不是寫入出口 */}
+                {selectedCandidate && (
+                  <AdvancedMarker position={{ lat: selectedCandidate.lat, lng: selectedCandidate.lng }} title={selectedCandidate.name}>
+                    <Pin background="#f59e0b" glyphColor="#fff" borderColor="#fff" />
+                  </AdvancedMarker>
+                )}
+                {canEdit && !stopsError && searchPreview && (
+                  <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
+                    <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
+                  </AdvancedMarker>
+                )}
+                {playheadPos && (
+                  // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
+                  // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
+                  // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
+                  // 圓點沒有針尖，需明確置中錨點，否則會系統性偏移半個標記高度
+                  <AdvancedMarker position={playheadPos} title="目前時刻位置" anchorLeft="-50%" anchorTop="-50%">
+                    <div className="h-4 w-4 rounded-full border-2 border-white bg-orange-500 shadow" />
+                  </AdvancedMarker>
+                )}
+                <CameraFollow target={cameraTarget} playing={playing} />
+                <PlaybackCamera
+                  lat={playheadPos?.lat ?? null}
+                  lng={playheadPos?.lng ?? null}
+                  active={playing}
+                  bounds={playbackBounds}
+                />
+              </Map>
+            </SectionErrorBoundary>
           ) : (
             <div className="flex h-full items-center justify-center text-gray-500">
               尚未設定 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY，地圖無法顯示
@@ -850,12 +1091,19 @@ export default function TripView({
 
   // APIProvider 需包住整個側欄 + 地圖：PlaceSearch（側欄）與 Map 都要用 useMapsLibrary/APIProviderContext，
   // 若只包地圖那一側，PlaceSearch 會拿不到 context（React context 不會跨兄弟節點），gmp-select 永遠不會註冊。
+  // I-2：這裡再包一層 SectionErrorBoundary（保留在 APIProvider 內——這樣觸發後 retry 只需要重新渲染
+  // content，不必連 APIProvider 一起卸載重掛，不用重新跑一次 Maps 腳本載入）。跟 <Map> 那顆內層
+  // boundary 是兩顆獨立的 boundary：地圖本身壞了先被內層接住（側欄與時間軸不受影響，維持原本的窄
+  // 範圍承諾）；PlaceSearch 這種位在側欄、跟地圖同層兄弟節點的例外，結構上只有這顆外層才接得到，
+  // 觸發時整個 content（側欄+地圖+時間軸）會被取代，是比 Next 預設全頁崩潰頁更好的防禦性最後防線。
   return apiKey ? (
     <APIProvider
       apiKey={apiKey}
       onError={() => setNotice({ kind: 'error', text: 'Google 地圖載入失敗，請檢查金鑰設定與網路' })}
     >
-      {content}
+      <SectionErrorBoundary message="行程頁部分內容載入失敗，可能是暫時性問題，請按重試或重新整理頁面">
+        {content}
+      </SectionErrorBoundary>
     </APIProvider>
   ) : (
     content

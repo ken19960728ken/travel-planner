@@ -2,9 +2,10 @@ import Link from 'next/link'
 import { notFound, redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import TripView from './TripView'
-import type { Leg } from './TripView'
+import type { Leg, Stop } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
+import type { Candidate } from './CandidatesPanel'
 
 export default async function TripDetailPage({
   params,
@@ -40,11 +41,12 @@ export default async function TripDetailPage({
     { data: memberRows, error: membersError },
     { data: stops, error: stopsError },
     { data: legs, error: legsError },
+    { data: candidateRows, error: candidatesError },
   ] = await Promise.all([
     supabase.from('trip_members').select('user_id, role').eq('trip_id', tripId),
     supabase
       .from('stops')
-      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost')
+      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })
@@ -55,6 +57,13 @@ export default async function TripDetailPage({
       .eq('trip_id', tripId)
       .order('id', { ascending: true })
       .limit(500),
+    supabase
+      .from('trip_candidates')
+      .select('id, name, lat, lng, place_id, created_at, category')
+      .eq('trip_id', tripId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(100), // 對齊 DB trip_candidates_limit_check trigger 的 100 筆上限
   ])
   if (membersError) {
     return (
@@ -91,28 +100,36 @@ export default async function TripDetailPage({
 
   return (
     <main className="flex h-screen flex-col">
-      <header className="flex items-baseline gap-3 border-b p-3">
-        <Link href="/trips" className="text-sm text-gray-500">← 我的行程</Link>
-        <h1 className="text-lg font-bold">{trip.title}</h1>
-        <span className="text-sm text-gray-500">{trip.start_date} ~ {trip.end_date}</span>
-        {!canEdit && (
-          <span
-            className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600"
-            title="你在此行程的角色為檢視者，無法編輯"
-          >
-            👁 檢視模式
-          </span>
-        )}
-        <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} canEdit={canEdit} />
-        <MembersPanel
-          tripId={tripId}
-          currentUserId={user.id}
-          isOwner={isOwner}
-          members={members}
-          invites={invites}
-          shareToken={trip.share_token}
-          loadError={membersPanelLoadError}
-        />
+      <header className="flex flex-col gap-2 border-b p-3 md:flex-row md:items-baseline md:gap-3">
+        {/* 手機：拆兩行避免總寬超出視窗時每個 flex 子項被壓到 min-content（CJK 逐字換行）；
+            桌機：wrapper 用 md:contents 解散自身盒模型，子元素直接回到 header 的 flex row，
+            與改版前完全同一份 flex context、同一個 DOM 順序，幾何零變化。 */}
+        <div className="flex min-w-0 items-baseline gap-2 md:contents">
+          <Link href="/trips" className="text-sm text-gray-500 max-md:shrink-0 max-md:whitespace-nowrap">← 我的行程</Link>
+          <h1 className="text-lg font-bold max-md:min-w-0 max-md:flex-1 max-md:truncate">{trip.title}</h1>
+          {/* 日期區間手機隱藏（次要資訊，空間優先給標題）；md 以上 class 與原本完全相同 */}
+          <span className="text-sm text-gray-500 max-md:hidden">{trip.start_date} ~ {trip.end_date}</span>
+          {!canEdit && (
+            <span
+              className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600 max-md:shrink-0 max-md:whitespace-nowrap"
+              title="你在此行程的角色為檢視者，無法編輯"
+            >
+              👁 檢視模式
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 overflow-x-auto md:contents">
+          <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} canEdit={canEdit} />
+          <MembersPanel
+            tripId={tripId}
+            currentUserId={user.id}
+            isOwner={isOwner}
+            members={members}
+            invites={invites}
+            shareToken={trip.share_token}
+            loadError={membersPanelLoadError}
+          />
+        </div>
       </header>
       {stopsError && (
         <p className="border-b p-2 text-sm text-red-600">停留點讀取失敗，請重新整理再試</p>
@@ -120,7 +137,15 @@ export default async function TripDetailPage({
       {legsError && (
         <p className="border-b p-2 text-sm text-red-600">交通段讀取失敗，請重新整理再試</p>
       )}
-      <TripView trip={trip} stops={stops ?? []} stopsError={Boolean(stopsError)} legs={(legs ?? []) as Leg[]} canEdit={canEdit} />
+      <TripView
+        trip={trip}
+        stops={(stops ?? []) as Stop[]}
+        stopsError={Boolean(stopsError)}
+        legs={(legs ?? []) as Leg[]}
+        canEdit={canEdit}
+        candidates={(candidateRows ?? []) as Candidate[]}
+        candidatesError={Boolean(candidatesError)}
+      />
     </main>
   )
 }

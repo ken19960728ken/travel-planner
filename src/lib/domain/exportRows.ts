@@ -1,7 +1,9 @@
 import { adjacentPairs } from './legSync'
 import { tripDayKeys, filterDayStops } from './days'
 import { formatLocalTime, localDateKey } from './tz'
-import { totalEstimatedCost } from './cost'
+import { totalEstimatedCost, costByCategory } from './cost'
+import { legDurationText } from './legStatus'
+import { CATEGORY_ORDER, CATEGORY_LABEL, normalizeCategory, type StopCategory } from './placeCategory'
 
 /** exportRows 屬 domain 層，輸入型別自帶最小欄位（不 import app 層的 TripView/legUi）。 */
 export type ExportTrip = { start_date: string; end_date: string }
@@ -13,6 +15,7 @@ export type ExportStop = {
   ends_at: string
   estimated_cost: number | null
   notes: string | null
+  category: StopCategory
 }
 export type ExportLegMode = 'transit' | 'walking' | 'driving' | 'flight' | 'custom'
 export type ExportLeg = {
@@ -29,22 +32,13 @@ export type ExportLeg = {
 /** xlsx 行別模型：discriminated union，逐列對應 exceljs worksheet 的一列。 */
 export type ItineraryRow =
   | { kind: 'day'; label: string }
-  | { kind: 'stop'; time: string; name: string; stayMinutes: number; cost: number | null; notes: string | null }
+  | { kind: 'stop'; time: string; name: string; category: string; stayMinutes: number; cost: number | null; notes: string | null }
   | { kind: 'leg'; modeLabel: string; durationText: string; cost: number | null; crossDay: string | null; detached: boolean }
+  | { kind: 'categoryTotal'; label: string; cost: number }
   | { kind: 'total'; cost: number }
 
 const MODE_LABEL: Record<ExportLegMode, string> = {
   transit: '大眾運輸', walking: '步行', driving: '開車', flight: '航班', custom: '自訂',
-}
-
-function isNoRoute(leg: ExportLeg): boolean {
-  return typeof leg.detail === 'object' && leg.detail !== null && (leg.detail as { no_route?: boolean }).no_route === true
-}
-
-/** 沿 legUi.legDurationText 的文案邏輯（duration null 時區分「待計算」與「查無路線」）。 */
-function legDurationText(leg: ExportLeg): string {
-  if (leg.duration_minutes !== null) return `${leg.duration_minutes} 分`
-  return isNoRoute(leg) ? '查無路線' : '待計算'
 }
 
 /** 純函式：把 trip/stops/legs 轉成 xlsx 匯出用的行別陣列。
@@ -82,6 +76,8 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
         kind: 'stop',
         time: `${formatLocalTime(new Date(stop.starts_at).getTime(), stop.timezone)}–${formatLocalTime(new Date(stop.ends_at).getTime(), stop.timezone)}`,
         name: stop.name,
+        // 匯出用繁中純文字標籤，不用 emoji——Excel 跨平台字型風險
+        category: CATEGORY_LABEL[normalizeCategory(stop.category)],
         stayMinutes: Math.round((new Date(stop.ends_at).getTime() - new Date(stop.starts_at).getTime()) / 60_000),
         cost: stop.estimated_cost,
         notes: stop.notes,
@@ -99,6 +95,17 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
     })
     for (const leg of detached) rows.push(legRow(leg, day, true))
   }
+
+  // 分類小計（Plan 7 Task 9）：排在總計之前，金額為 0 的桶不出列。
+  // 不變量（exportRows.test.ts 鎖住）：所有 categoryTotal 的 cost 總和 === total 列的 cost。
+  const buckets = costByCategory(
+    stops.map(s => ({ category: normalizeCategory(s.category), estimatedCost: s.estimated_cost })),
+    legs.map(l => ({ estimatedCost: l.estimated_cost })),
+  )
+  for (const c of CATEGORY_ORDER) {
+    if (buckets.byCategory[c] > 0) rows.push({ kind: 'categoryTotal', label: CATEGORY_LABEL[c], cost: buckets.byCategory[c] })
+  }
+  if (buckets.legs > 0) rows.push({ kind: 'categoryTotal', label: '交通段', cost: buckets.legs })
 
   const total = totalEstimatedCost([
     ...stops.map(s => ({ estimatedCost: s.estimated_cost })),

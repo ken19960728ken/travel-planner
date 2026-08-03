@@ -357,7 +357,7 @@ export default function MembersPanel({
 
   return (
     <>
-      {shareToken && <ShareButton tripId={tripId} shareToken={shareToken} isOwner={isOwner} />}
+      {shareToken && <ShareButton key={shareToken} tripId={tripId} shareToken={shareToken} isOwner={isOwner} />}
       <div className="relative">
       <button
         type="button"

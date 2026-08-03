@@ -24,6 +24,9 @@ language sql security definer stable set search_path = public, pg_temp as $$
     'stops', coalesce((select jsonb_agg(jsonb_build_object(
         'id', s.id, 'name', s.name, 'lat', s.lat, 'lng', s.lng, 'place_id', s.place_id,
         'is_custom', s.is_custom, 'timezone', s.timezone, 'starts_at', s.starts_at,
+        -- category 必須在單內：分享頁的 CostSummary/地圖 Pin/側欄圖示都讀它，缺了會被
+        -- normalizeCategory 全部歸成 'other'——不是「少顯示」而是「顯示錯的分類金額」。
+        'category', s.category,
         'ends_at', s.ends_at, 'locked', s.locked,
         'estimated_cost', s.estimated_cost
       ) order by s.starts_at, s.id) from (select * from stops where trip_id = t.id order by starts_at, id limit 500) s), '[]'::jsonb),

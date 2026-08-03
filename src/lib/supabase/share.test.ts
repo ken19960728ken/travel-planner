@@ -20,7 +20,7 @@ function newUserClient(): SupabaseClient {
 const TRIP_KEYS = ['id', 'title', 'start_date', 'end_date', 'currency'].sort()
 const STOP_KEYS = [
   'id', 'name', 'lat', 'lng', 'place_id', 'is_custom', 'timezone',
-  'starts_at', 'ends_at', 'locked', 'estimated_cost',
+  'starts_at', 'ends_at', 'locked', 'estimated_cost', 'category',
 ].sort()
 const LEG_KEYS = [
   'id', 'from_stop_id', 'to_stop_id', 'mode', 'duration_minutes', 'distance_meters',

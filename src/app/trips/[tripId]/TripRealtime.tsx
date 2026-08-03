@@ -4,23 +4,33 @@ import { useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import type { Tables } from '@/lib/supabase/database.types'
-import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js'
+import type { RealtimePostgresChangesPayload, RealtimeChannel } from '@supabase/supabase-js'
 
 const REFRESH_DEBOUNCE_MS = 500 // Task 11 Step 1：連續事件合併成一次 refresh，避免刷新風暴
+// Minor（critic 審查）：純 trailing debounce 在旁人連續動作時，畫面要等對方停手才更新；
+// 加 max-wait 確保連續事件下最多等 2 秒也會強制 flush 一次。
+const REFRESH_MAX_WAIT_MS = 2000
 
 export type PresencePeer = { userId: string; displayName: string }
 
-// 只取用到的欄位；DELETE payload（見下方 handleRowEvent）在 RLS 啟用時即使 replica identity 為 full
-// 也只剩 PK（官方文件 postgres-changes.mdx 明載），故 updated_by 只在 INSERT/UPDATE 保證存在
-type StopChange = Pick<Tables<'stops'>, 'id' | 'updated_by'>
-type LegChange = Pick<Tables<'legs'>, 'id' | 'updated_by'>
+// 只取用到的欄位；DELETE payload 的實測記錄見下方 handleRowEvent 註解
+type StopChange = Pick<Tables<'stops'>, 'id'>
+type LegChange = Pick<Tables<'legs'>, 'id'>
 
-/** stops/legs 共用事件處理：INSERT/UPDATE 忽略自己的寫入（避免與自己的寫入路徑疊成雙重刷新）；
- *  DELETE 不套 RLS、不能 filter，會收到其他行程的刪除事件，payload.old 僅含 PK——只信本地 id 集合
- *  命中才 refresh，未命中靜默忽略，絕不信 payload 的其他欄位（spec §8）。 */
-function handleRowEvent<T extends { id?: string; updated_by?: string | null }>(
+/** stops/legs 共用事件處理。
+ *  INSERT/UPDATE 一律 refresh——不判斷「是否為自己的寫入」略過（critic 審查 Minor：舊版用
+ *  `updated_by === currentUserId` 判斷，但 updated_by 是每「使用者」而非每「分頁」，同帳號開兩個
+ *  分頁時會讓另一個分頁的旁人變動被誤判成自己而永遠不刷新——這是真正的資料新鮮度 bug，比起「自己
+ *  的寫入路徑已呼叫過一次 router.refresh()，這裡再刷一次」的無感重複請求嚴重得多。刻意選擇接受
+ *  重複 refresh 換取正確性）。
+ *  DELETE 不套 RLS、不能 filter，payload.old 僅含 PK（實測：即使 stops/legs 的 replica identity
+ *  是 full，RLS 啟用時 DELETE 的 old record 仍只剩主鍵——官方文件 postgres-changes.mdx 明載此為
+ *  RLS + replica identity full 組合下的既定行為）——只信本地 id 集合命中才 refresh，未命中靜默
+ *  忽略，絕不信 payload 的其他欄位（scratchpad/rt-delete-payload.mjs 已實測：本 schema 下同 topic
+ *  的訂閱者不會收到「別的行程」的 DELETE payload——private channel 的 join 授權已把非成員整個擋在
+ *  外面；id 集合比對仍保留作縱深防禦，不因單次實測結果而拿掉這層保護）。 */
+function handleRowEvent<T extends { id?: string }>(
   payload: RealtimePostgresChangesPayload<T>,
-  currentUserId: string,
   knownIds: Set<string>,
   scheduleRefresh: () => void,
 ) {
@@ -29,14 +39,18 @@ function handleRowEvent<T extends { id?: string; updated_by?: string | null }>(
     if (id && knownIds.has(id)) scheduleRefresh()
     return
   }
-  if (payload.new.updated_by === currentUserId) return
   scheduleRefresh()
 }
 
-/** Task 11：單一 channel `trip:{tripId}` 訂閱 stops/legs/trips 變更 + presence，debounce refresh。
- *  純邏輯元件（不渲染畫面）：presence 頭像與斷線橫幅由 TripView 依 onXxxChange 回呼自行渲染——
- *  TripView 只做掛載與旗標接線（spec 分工）。canEdit=false（viewer/分享頁）時 TripView 不掛載本元件
- *  （spec §6 Step 3：唯讀者用手動刷新即可，省 anon realtime 授權面）。 */
+/** Task 11：單一 private channel `trip:{tripId}` 訂閱 stops/legs/trips 變更 + presence，debounce
+ *  refresh。純邏輯元件（不渲染畫面）：presence 頭像與斷線橫幅由 TripView 依 onXxxChange 回呼自行
+ *  渲染——TripView 只做掛載與旗標接線（spec 分工）。canEdit=false（viewer/分享頁）時 TripView
+ *  不掛載本元件（spec §6 Step 3：唯讀者用手動刷新即可，省 anon realtime 授權面）。
+ *
+ *  C-1 Critical 根治（2026-08-04 critic 審查 + PoC 實證）：channel 改用 private:true，配合
+ *  migration 20260805000000 在 realtime.messages 建的 RLS policy——未登入者與非成員現在連 join
+ *  都會被拒絕，無法再偽造 presence payload 讓成員頁面崩潰（另見下方 presence sync 的型別守衛，
+ *  屬第二層防禦）。 */
 export default function TripRealtime({
   tripId,
   userId,
@@ -69,63 +83,111 @@ export default function TripRealtime({
   useEffect(() => {
     const supabase = createClient()
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    let maxWaitTimer: ReturnType<typeof setTimeout> | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     let retriesLeft = 3
     let cancelled = false
-    let currentChannel: ReturnType<typeof supabase.channel> | null = null
+    let currentChannel: RealtimeChannel | null = null
 
+    function flushRefresh() {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer)
+        debounceTimer = null
+      }
+      if (maxWaitTimer) {
+        clearTimeout(maxWaitTimer)
+        maxWaitTimer = null
+      }
+      router.refresh()
+    }
     function scheduleRefresh() {
       if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(() => router.refresh(), REFRESH_DEBOUNCE_MS)
+      debounceTimer = setTimeout(flushRefresh, REFRESH_DEBOUNCE_MS)
+      if (!maxWaitTimer) maxWaitTimer = setTimeout(flushRefresh, REFRESH_MAX_WAIT_MS)
     }
 
-    // 實測發現：本地 Realtime 引擎（v2.113.4）在兩個 client 幾乎同時 join 同一 topic 時，
-    // 偶發讓其中一條 postgres_changes 綁定（隨機命中 stops/legs/trips 任一張表）在 phx_reply 之後
-    // 非同步收到 `system` extension=postgres_changes status=error 訊息（"invalid column for filter X"，
-    // X 為該綁定實際存在且有權限的欄位）——channel 本身仍回報 SUBSCRIBED，但該綁定完全收不到後續事件，
-    // 且不影響其他綁定。研判為引擎內部 subscription_check_filters trigger 在併發註冊下的競態瑕疵
-    // （已用 pg_catalog.has_column_privilege 手動重現該檢查邏輯，欄位與權限本身皆正確，非本檔案的
-    // filter 語法錯誤）。緩解：收到此類 system 錯誤時整條 channel 拆掉重建（供 3 次重試，指數退避），
-    // 全新的 join 極高機率避開這次競態視窗（spec §8 已記錄殘留風險）。
-    function mount() {
+    // mount() 的結果透過這個 helper 交回 currentChannel：effect 已卸載（cancelled）時直接丟棄剛
+    // 建好的 channel，避免卸載後仍留一條連線在背景（mount 內部有 await，subscribe 完成時卸載
+    // 可能已經發生）。
+    function adopt(promise: Promise<RealtimeChannel | null>) {
+      void promise.then(ch => {
+        if (cancelled) {
+          if (ch) void supabase.removeChannel(ch)
+          return
+        }
+        currentChannel = ch
+      })
+    }
+
+    async function mount(): Promise<RealtimeChannel | null> {
+      // M-2 Major 實測根因訂正（critic 審查 + scratchpad/rt-authrace2.mjs、rt-authrace3.mjs、
+      // rt-browser-bindingerr.mjs）：@supabase/ssr 的 browser client 靠 onAuthStateChange 的
+      // INITIAL_SESSION 事件（非同步）才呼叫 realtime.setAuth()；先前這裡的 useEffect 掛載當下就
+      // 同步 subscribe，join 送出時 realtime client 還沒帶上使用者的 JWT，伺服器端會用 anon 角色
+      // 驗證 filter 欄位權限——anon 對 stops/legs/trips 均無 grant，導致每個 filter 欄位都在 join
+      // 後收到 system 層級的「invalid column for filter」錯誤。真實瀏覽器連續 6 次載入 100% 重現
+      // 且固定是 trips/id（先前註解誤判為「本地引擎偶發競態、隨機命中任一張表」，已訂正）。
+      // 修法：join 前主動 await setAuth() 取得目前 session 的 token（PoC 對照實驗：加上這行後
+      // 4/4 zero error）。
+      await supabase.realtime.setAuth()
+      if (cancelled) return null
+
       const channel = supabase
-        .channel(`trip:${tripId}`, { config: { presence: { key: userId } } })
+        .channel(`trip:${tripId}`, { config: { private: true, presence: { key: userId } } })
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'stops', filter: `trip_id=eq.${tripId}` },
           (payload: RealtimePostgresChangesPayload<StopChange>) =>
-            handleRowEvent(payload, userId, stopIdsRef.current, scheduleRefresh),
+            handleRowEvent(payload, stopIdsRef.current, scheduleRefresh),
         )
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'legs', filter: `trip_id=eq.${tripId}` },
           (payload: RealtimePostgresChangesPayload<LegChange>) =>
-            handleRowEvent(payload, userId, legIdsRef.current, scheduleRefresh),
+            handleRowEvent(payload, legIdsRef.current, scheduleRefresh),
         )
-        // trips 無 updated_by 欄位，無法比對自己的寫入；本分頁目前唯一的 client 端 trips 寫入路徑是
-        // MembersPanel 的 regenerate_share_token RPC（自己已呼叫 router.refresh()），這裡頂多重複一次
-        // 無害的 refresh。只訂 UPDATE：DELETE 不能 filter 且 trips 無可信欄位可辨別是否為本行程，
-        // 行程本身被刪除時使用者下一次 refresh 會被 RLS 導向 404，不需要額外處理
+        // trips 無 updated_by 欄位；只訂 UPDATE：DELETE 不能 filter 且 trips 無可信欄位可辨別是否
+        // 為本行程，行程本身被刪除時使用者下一次 refresh 會被 RLS 導向 404，不需要額外處理
         .on(
           'postgres_changes',
           { event: 'UPDATE', schema: 'public', table: 'trips', filter: `id=eq.${tripId}` },
           () => scheduleRefresh(),
         )
         .on('presence', { event: 'sync' }, () => {
-          const state = channel.presenceState<PresencePeer>()
-          const peers = Object.values(state)
-            .flat()
-            .map(p => ({ userId: p.userId, displayName: p.displayName }))
-            .filter(p => p.userId !== userId)
+          // C-1 Critical 止血（critic 審查 + scratchpad/rt-presence-crash.mjs）：presence payload
+          // 來自其他 client 端自行 track() 的內容，不受任何 schema 約束——舊版直接信任型別標註渲染，
+          // 未登入攻擊者只要知道 tripId 就能 track 一筆缺 displayName 的 payload，讓所有正在編輯的
+          // 成員頁面在 render 期對 undefined 呼叫 .slice() 而整頁崩潰。這裡逐欄型別守衛 + 20 字元
+          // 長度上限（防超長字串塞爆頭像列）+ 依 userId 去重（同帳號多分頁避免重複 key/頭像）。
+          // 根治見本檔 private:true 與 migration 20260805000000——未登入者現在連 join 都會被拒絕；
+          // 這裡的守衛是額外一層防禦，即使某個已登入成員的 client 端有 bug 送出畸形 payload，也不會
+          // 讓其他成員一起崩潰。
+          const state = channel.presenceState<Record<string, unknown>>()
+          const seen = new Set<string>()
+          const peers: PresencePeer[] = []
+          for (const p of Object.values(state).flat()) {
+            if (typeof p.userId !== 'string' || typeof p.displayName !== 'string') continue
+            if (p.userId === userId || seen.has(p.userId)) continue
+            seen.add(p.userId)
+            peers.push({ userId: p.userId, displayName: p.displayName.slice(0, 20) })
+          }
           onPeersChange(peers)
         })
         .on('system', {}, payload => {
+          // M-2 修正 auth 時序後這裡理論上不再觸發；保留為後備防線。retriesLeft 耗盡仍失敗時
+          // 必須讓使用者知道——channel 這時仍回報 SUBSCRIBED，但某個綁定已經聾了，若不亮橫幅，
+          // 使用者會在收不到旁人變更的情況下繼續編輯而不自知，這正好推翻 Step 3 斷線橫幅的設計
+          // 目的（critic 審查 M-2：寧可誤報斷線，也不能靜默失聰）。
           if (payload?.extension !== 'postgres_changes' || payload?.status !== 'error') return
-          if (cancelled || retriesLeft <= 0) return
+          if (cancelled) return
+          if (retriesLeft <= 0) {
+            onDisconnectedChange(true)
+            return
+          }
           retriesLeft -= 1
           void supabase.removeChannel(channel)
           retryTimer = setTimeout(() => {
-            if (!cancelled) currentChannel = mount()
+            if (!cancelled) adopt(mount())
           }, 300 * (4 - retriesLeft))
         })
 
@@ -150,11 +212,12 @@ export default function TripRealtime({
       return channel
     }
 
-    currentChannel = mount()
+    adopt(mount())
 
     return () => {
       cancelled = true
       if (debounceTimer) clearTimeout(debounceTimer)
+      if (maxWaitTimer) clearTimeout(maxWaitTimer)
       if (retryTimer) clearTimeout(retryTimer)
       if (currentChannel) void supabase.removeChannel(currentChannel)
     }

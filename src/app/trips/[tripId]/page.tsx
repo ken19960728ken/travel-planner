@@ -93,6 +93,9 @@ export default async function TripDetailPage({
     role: m.role as Member['role'],
     displayName: profileMap.has(m.user_id) ? profileMap.get(m.user_id) || '（未命名）' : '已離開的成員',
   }))
+  // Task 11：Realtime presence track 用的自己顯示名稱——現在的登入者必為成員，profileMap 理論上必有此鍵；
+  // profiles 查詢失敗（profilesError）時 profileMap 為空，回退「（未命名）」而非誤植「已離開的成員」
+  const currentDisplayName = profileMap.get(user.id) || '（未命名）'
   const invites: Invite[] = (inviteRows ?? []).map(i => ({ id: i.id, role: i.role as Invite['role'], expiresAt: i.expires_at }))
   // profiles/trip_invites 查詢失敗不阻擋整頁（次要資料），但要讓面板知道自己資料不完整——
   // 不然 profiles 失敗會讓所有成員顯示「已離開的成員」、invites 失敗會讓 owner 誤以為沒有邀請連結，兩者都是靜默誤導
@@ -144,6 +147,7 @@ export default async function TripDetailPage({
         legs={(legs ?? []) as Leg[]}
         canEdit={canEdit}
         currentUserId={user.id}
+        displayName={currentDisplayName}
         candidates={(candidateRows ?? []) as Candidate[]}
         candidatesError={Boolean(candidatesError)}
       />

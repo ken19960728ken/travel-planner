@@ -28,7 +28,7 @@ import { normalizeCategory } from '@/lib/domain/placeCategory'
 import RoutePolylines from './RoutePolylines'
 import PlaybackTrail from './PlaybackTrail'
 import tzlookup from '@photostructure/tz-lookup'
-import TripRealtime from './TripRealtime'
+import TripRealtime, { type PresencePeer } from './TripRealtime'
 
 export type Trip = {
   id: string
@@ -361,6 +361,7 @@ export default function TripView({
   legs,
   canEdit,
   currentUserId,
+  displayName,
   autoPlay = false,
   candidates,
   candidatesError,
@@ -371,9 +372,10 @@ export default function TripView({
   legs: Leg[]
   /** Task 5：viewer 唯讀化——page.tsx 查 trip_members role 算出，false 時隱藏全部編輯入口且不打 sync */
   canEdit: boolean
-  /** Task 11：目前登入者的 id，供 TripRealtime 忽略自己的寫入事件。canEdit=false（viewer/分享頁）
-   *  不掛載 TripRealtime 時不會用到，宣告為可選讓分享頁沿用既有呼叫方式 */
+  /** Task 11：目前登入者的 id/顯示名稱，供 TripRealtime 忽略自己的寫入事件與 presence track。
+   *  canEdit=false（viewer/分享頁）不掛載 TripRealtime 時不會用到，宣告為可選讓分享頁沿用既有呼叫方式 */
   currentUserId?: string
+  displayName?: string
   /** Task 8（spec §5「分享連結預設進播放模式」）：分享頁掛載時直接進播放模式。惰性 useState 初始化
    *  （避免 set-state-in-effect lint——本專案已兩度踩過），不開額外 effect */
   autoPlay?: boolean
@@ -386,6 +388,9 @@ export default function TripView({
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  // Task 11：Realtime 在線成員——TripRealtime 是純邏輯元件，透過這個回呼把 presence 狀態交回
+  // TripView 渲染（頂部在線頭像）
+  const [peers, setPeers] = useState<PresencePeer[]>([])
   // M-1：拖曳提交（cascade_shift_stops RPC）成功到 refresh 落地間的過渡偏移預覽；moveStop 於 RPC 前設定，
   // 下面的 render 期比對觀察 stops 落地後清空（pendingShiftResolved），傳給 Timeline 算色塊 offset
   const [pendingShift, setPendingShift] = useState<PendingShift | null>(null)
@@ -943,9 +948,29 @@ export default function TripView({
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Task 11：viewer/分享頁（canEdit=false）不掛載——唯讀者用手動刷新即可，省 anon realtime 授權面
-          （spec §6 Step 3）。TripRealtime 是純邏輯元件，不渲染畫面 */}
-      {canEdit && currentUserId && (
-        <TripRealtime tripId={trip.id} userId={currentUserId} stopIds={stopIdSet} legIds={legIdSet} />
+          （spec §6 Step 3）。TripRealtime 是純邏輯元件，presence 狀態透過回呼交回這裡渲染 */}
+      {canEdit && currentUserId && displayName && (
+        <TripRealtime
+          tripId={trip.id}
+          userId={currentUserId}
+          displayName={displayName}
+          stopIds={stopIdSet}
+          legIds={legIdSet}
+          onPeersChange={setPeers}
+        />
+      )}
+      {peers.length > 0 && (
+        <div className="flex items-center gap-1 border-b p-2">
+          {peers.map(p => (
+            <span
+              key={p.userId}
+              title={p.displayName}
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white"
+            >
+              {p.displayName.slice(0, 1)}
+            </span>
+          ))}
+        </div>
       )}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* 手機（< md）上下堆疊：側欄改滿寬、上限 38vh 內部捲動（overflow-y-auto 已存在），

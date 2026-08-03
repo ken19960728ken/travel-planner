@@ -8,6 +8,8 @@ import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js'
 
 const REFRESH_DEBOUNCE_MS = 500 // Task 11 Step 1：連續事件合併成一次 refresh，避免刷新風暴
 
+export type PresencePeer = { userId: string; displayName: string }
+
 // 只取用到的欄位；DELETE payload（見下方 handleRowEvent）在 RLS 啟用時即使 replica identity 為 full
 // 也只剩 PK（官方文件 postgres-changes.mdx 明載），故 updated_by 只在 INSERT/UPDATE 保證存在
 type StopChange = Pick<Tables<'stops'>, 'id' | 'updated_by'>
@@ -31,20 +33,25 @@ function handleRowEvent<T extends { id?: string; updated_by?: string | null }>(
   scheduleRefresh()
 }
 
-/** Task 11 Step 1：單一 channel `trip:{tripId}` 訂閱 stops/legs/trips 變更，debounce refresh。
- *  純邏輯元件（不渲染畫面）——TripView 只做掛載與旗標接線（spec 分工）。 */
+/** Task 11：單一 channel `trip:{tripId}` 訂閱 stops/legs/trips 變更 + presence，debounce refresh。
+ *  純邏輯元件（不渲染畫面）：presence 頭像由 TripView 依 onPeersChange 回呼自行渲染——
+ *  TripView 只做掛載與旗標接線（spec 分工）。 */
 export default function TripRealtime({
   tripId,
   userId,
+  displayName,
   stopIds,
   legIds,
+  onPeersChange,
 }: {
   tripId: string
   userId: string
+  displayName: string
   /** 本地已知的 stops/legs id 集合，供 DELETE 事件的冪等比對。用 ref 讀最新值——stops/legs 資料變動
    *  不需要重建 channel（見下方 effect 的 deps），否則每次寫入都會斷線重連 */
   stopIds: Set<string>
   legIds: Set<string>
+  onPeersChange: (peers: PresencePeer[]) => void
 }) {
   const router = useRouter()
   const stopIdsRef = useRef(stopIds)
@@ -79,7 +86,7 @@ export default function TripRealtime({
     // 全新的 join 極高機率避開這次競態視窗（spec §8 已記錄殘留風險）。
     function mount() {
       const channel = supabase
-        .channel(`trip:${tripId}`, { config: {} })
+        .channel(`trip:${tripId}`, { config: { presence: { key: userId } } })
         .on(
           'postgres_changes',
           { event: '*', schema: 'public', table: 'stops', filter: `trip_id=eq.${tripId}` },
@@ -101,6 +108,14 @@ export default function TripRealtime({
           { event: 'UPDATE', schema: 'public', table: 'trips', filter: `id=eq.${tripId}` },
           () => scheduleRefresh(),
         )
+        .on('presence', { event: 'sync' }, () => {
+          const state = channel.presenceState<PresencePeer>()
+          const peers = Object.values(state)
+            .flat()
+            .map(p => ({ userId: p.userId, displayName: p.displayName }))
+            .filter(p => p.userId !== userId)
+          onPeersChange(peers)
+        })
         .on('system', {}, payload => {
           if (payload?.extension !== 'postgres_changes' || payload?.status !== 'error') return
           if (cancelled || retriesLeft <= 0) return
@@ -111,7 +126,9 @@ export default function TripRealtime({
           }, 300 * (4 - retriesLeft))
         })
 
-      channel.subscribe()
+      channel.subscribe(async status => {
+        if (status === 'SUBSCRIBED') await channel.track({ userId, displayName })
+      })
 
       return channel
     }
@@ -124,9 +141,9 @@ export default function TripRealtime({
       if (retryTimer) clearTimeout(retryTimer)
       if (currentChannel) void supabase.removeChannel(currentChannel)
     }
-    // tripId/userId 變動才需要重建 channel（換行程/身分）；stopIds/legIds 用 ref 讀最新值
+    // tripId/userId/displayName 變動才需要重建 channel（換行程/身分）；stopIds/legIds 用 ref 讀最新值
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tripId, userId])
+  }, [tripId, userId, displayName])
 
   return null
 }

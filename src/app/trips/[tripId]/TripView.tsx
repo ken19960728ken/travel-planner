@@ -10,6 +10,7 @@ import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { decodePolyline, greatCirclePoints, pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { adjacentPairs } from '@/lib/domain/legSync'
+import { pendingShiftLanded, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
 import PlacePreviewCard from './PlacePreviewCard'
@@ -376,6 +377,9 @@ export default function TripView({
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
+  // M-1：拖曳提交（cascade_shift_stops RPC）成功到 refresh 落地間的過渡偏移預覽；moveStop 於 RPC 前設定，
+  // 下面的 useEffect 觀察 stops 落地後清空（pendingShiftLanded），傳給 Timeline 算色塊 offset
+  const [pendingShift, setPendingShift] = useState<PendingShift | null>(null)
   // 預設顯示行程第一天；Timeline 的 Day 分頁點擊會切換它
   const [activeDay, setActiveDay] = useState<string>(() => tripDayKeys(trip.start_date, trip.end_date)[0])
   // autoPlay 初始值以第一天視窗推導：視窗不存在（行程還沒有停留點）則保持暫停，播放頭留 null
@@ -417,6 +421,21 @@ export default function TripView({
     )
     if (landed) lastInsertedEndRef.current = null
   }, [stops])
+
+  // M-1：pendingShift 落地偵測——被拖點的 starts_at 追上 baseline+delta 後清空，讓 Timeline 的色塊
+  // offset 回歸 props 真相。不開新 effect 直接 setState（同下方 M-7 selectedLegId 清理踩過的
+  // set-state-in-effect lint），改用 React 官方文件「Adjusting state when a prop changes」的
+  // useState 追蹤前一輪 stops＋render 期間比對樣式——只在 stops 參照真的變動那一輪才比對一次
+  const [prevStopsForShift, setPrevStopsForShift] = useState(stops)
+  if (prevStopsForShift !== stops) {
+    setPrevStopsForShift(stops)
+    if (
+      pendingShift &&
+      pendingShiftLanded(pendingShift, stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
+    ) {
+      setPendingShift(null)
+    }
+  }
 
   const syncedRef = useRef(false)
   const syncInFlightRef = useRef(false) // I-2：同時只跑一個 in-flight sync 請求
@@ -552,6 +571,19 @@ export default function TripView({
       lastInsertedEndRef.current = { day: targetDay, endsAt: slot.endsAt }
       setNotice(null)
       setCameraTarget({ lat: p.lat, lng: p.lng }) // 鏡頭飛到剛加入的停留點
+      // M-5：滿日加點時 defaultSlotForDay 可能把時段推過午夜落到隔日，activeDay 需跟隨實際落地日，
+      // 否則使用者在原本那天看不到剛加的點。selectedId 一併重置——地圖標記的選取態不分日
+      // （下方 stops.map 全量渲染），沒清掉會在別天的停留點上留一顆藍框選取（規格原文未列，但屬
+      // 同一組視覺狀態，一併收斂，見下方 TripView 的地圖 Pin borderColor/scale）。
+      // 不歸零 lastInsertedEndRef：連續加點的墊底基準要跨日延續。
+      const landedDay = localDateKey(slot.startsAt, timezone)
+      if (landedDay !== activeDay) {
+        setActiveDay(landedDay)
+        setSelectedId(null)
+        setSelectedLegId(null)
+        setPlayheadMs(null)
+        setPlaying(false)
+      }
       void syncLegs()
       router.refresh()
       return true
@@ -626,14 +658,9 @@ export default function TripView({
       setNotice({ kind: 'error', text: '已加入行程，但備選未移除，請手動刪除' })
     }
 
-    if (day !== activeDay) {
-      // 不呼叫 changeDay：它會清掉剛剛 addStop 寫入的墊底基準，導致連續 promote 到同一天算出相同時段
-      setActiveDay(day)
-      setSelectedId(null)
-      setSelectedLegId(null)
-      setPlayheadMs(null)
-      setPlaying(false)
-    }
+    // M-5：切日與播放/選取狀態重置已改由 addStop 內部統一處理（其算出的 landedDay 才是真正落地的那天——
+    // 目標日已滿時 defaultSlotForDay 會推過午夜落到隔日，此處若仍用呼叫時的 day 覆寫，會在滿日情境下
+    // 覆蓋回錯的日期）；這裡不重複判斷，避免兩份邏輯互踩
     setSelectedCandidateId(null)
     router.refresh()
     return true
@@ -644,10 +671,22 @@ export default function TripView({
     // Task 5：目前唯一呼叫點是 Timeline 的 onMove，已由 `canEdit ? moveStop : undefined` 收口，這裡補
     // 防線二，避免日後新增呼叫點時繞過閘門（與 syncLegs/addStop 對齊）
     if (!canEdit) return
-    if (busyRef.current || stopsError) return
+    if (busyRef.current) {
+      // M-3：busy 期間的拖曳提交原本靜默 return，使用者不知道為何沒反應；明確告知後再擋下
+      setNotice({ kind: 'error', text: '另一項操作進行中，請稍候再拖曳' })
+      return
+    }
+    if (stopsError) return // 讀取失敗時基準不可信，寫入入口本來就整組關閉，維持靜默
     busyRef.current = true
     setBusy(true)
     try {
+      // M-1：baseline 取自 RPC 呼叫當下（位移發生前）被拖點的 starts_at，語義對齊 RPC 的
+      // v_changed_start；設定 pendingShift 後，RPC 成功到 refresh 落地前，Timeline 用它算出哪些
+      // 色塊該加上 deltaMs 預覽，消除這段過渡期的回彈
+      const changedStop = stops.find(s => s.id === stopId)
+      if (changedStop) {
+        setPendingShift({ changedStopId: stopId, deltaMs, baselineStartMs: new Date(changedStop.starts_at).getTime() })
+      }
       const supabase = createClient()
       const { error } = await supabase.rpc('cascade_shift_stops', {
         p_trip_id: trip.id,
@@ -657,6 +696,7 @@ export default function TripView({
       })
       if (error) {
         setNotice({ kind: 'error', text: '時間調整失敗，請稍後再試' })
+        setPendingShift(null) // 失敗不會有 refresh 落地可觀察，預覽偏移須主動清空，否則永久卡在偏移位置
         return
       }
       setNotice(null)
@@ -1269,6 +1309,7 @@ export default function TripView({
         }}
         onMove={canEdit ? moveStop : undefined}
         busy={busy}
+        pendingShift={pendingShift}
         playing={playing}
         onTogglePlay={togglePlay}
         dayView={dayView}

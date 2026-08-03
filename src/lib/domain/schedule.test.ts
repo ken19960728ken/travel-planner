@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cascadeShift } from './schedule'
+import { cascadeShift, pendingShiftOffsetMs, pendingShiftLanded, type PendingShift } from './schedule'
 import type { StopSchedule } from './types'
 
 const HOUR = 60 * 60 * 1000
@@ -47,5 +47,45 @@ describe('cascadeShift', () => {
     const stops = [stop('a', 9, 10), stop('b', 11, 12)]
     cascadeShift(stops, 'a', HOUR)
     expect(stops[1].startsAt).toBe(11 * HOUR)
+  })
+})
+
+describe('pendingShiftOffsetMs', () => {
+  const pending: PendingShift = { changedStopId: 'a', deltaMs: HOUR, baselineStartMs: 9 * HOUR }
+
+  it('pending 為 null 時一律不偏移', () => {
+    expect(pendingShiftOffsetMs(stop('a', 9, 10), null)).toBe(0)
+  })
+
+  it('被拖點本身套用偏移', () => {
+    expect(pendingShiftOffsetMs(stop('a', 9, 10), pending)).toBe(HOUR)
+  })
+
+  it('未鎖定且 baseline 上晚於被拖點的停留點套用偏移', () => {
+    expect(pendingShiftOffsetMs(stop('c', 13, 14), pending)).toBe(HOUR)
+  })
+
+  it('baseline 上早於或等於被拖點的其他停留點不偏移', () => {
+    expect(pendingShiftOffsetMs(stop('z', 8, 9), pending)).toBe(0)
+  })
+
+  it('鎖定的停留點即使晚於被拖點也不偏移', () => {
+    expect(pendingShiftOffsetMs(stop('c', 13, 14, true), pending)).toBe(0)
+  })
+})
+
+describe('pendingShiftLanded', () => {
+  const pending: PendingShift = { changedStopId: 'a', deltaMs: HOUR, baselineStartMs: 9 * HOUR }
+
+  it('被拖點的 starts_at 尚未追上 baseline+delta 時未落地', () => {
+    expect(pendingShiftLanded(pending, [{ id: 'a', startsAt: 9 * HOUR }])).toBe(false)
+  })
+
+  it('被拖點的 starts_at 已等於 baseline+delta 時已落地', () => {
+    expect(pendingShiftLanded(pending, [{ id: 'a', startsAt: 10 * HOUR }])).toBe(true)
+  })
+
+  it('找不到被拖點（已被刪除）時視為未落地', () => {
+    expect(pendingShiftLanded(pending, [{ id: 'other', startsAt: 10 * HOUR }])).toBe(false)
   })
 })

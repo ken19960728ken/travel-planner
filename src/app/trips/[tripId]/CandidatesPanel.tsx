@@ -3,8 +3,10 @@
 import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import type { StopCategory } from '@/lib/domain/placeCategory'
+import { CATEGORY_ICON, CATEGORY_LABEL, CATEGORY_ORDER } from './categoryUi'
 
-export type Candidate = { id: string; name: string; lat: number; lng: number; place_id: string; created_at: string }
+export type Candidate = { id: string; name: string; lat: number; lng: number; place_id: string; created_at: string; category: StopCategory }
 
 // 調整此值須同步 page.tsx 的 .limit(100) 與 migration 20260804000000_trip_candidates.sql 的 v_limit（三處目前各自寫死）
 export const CANDIDATE_LIMIT = 100
@@ -99,6 +101,34 @@ function CandidateRow({
     }
   }
 
+  async function changeCategory(next: StopCategory) {
+    if (busyRef.current || busy) return
+    busyRef.current = true
+    setSaving(true)
+    setNotice(null)
+    try {
+      const supabase = createClient()
+      const { data, error } = await supabase.from('trip_candidates').update({ category: next }).eq('id', candidate.id).select('id')
+      // error（離線、42501、P0001 等）與「RLS USING 排除時 error 為 null 但 0 列受影響」（比照
+      // MembersPanel toggleRole 語義）是不同狀況，不能共用同一句提示——後者才是「未生效，請重新整理」，
+      // 前者套用同一句會誤導成「只是沒刷新」，蓋掉真正的網路／權限錯誤
+      if (error) {
+        setNotice({ kind: 'error', text: '改分類失敗，請稍後再試' })
+        router.refresh()
+        return
+      }
+      if (data.length === 0) {
+        setNotice({ kind: 'error', text: '未生效，請重新整理' })
+        router.refresh()
+        return
+      }
+      router.refresh()
+    } finally {
+      busyRef.current = false
+      setSaving(false)
+    }
+  }
+
   async function remove() {
     if (busyRef.current || busy) return
     busyRef.current = true
@@ -140,6 +170,16 @@ function CandidateRow({
               <option key={k} value={k}>
                 {k}
               </option>
+            ))}
+          </select>
+          <select
+            className="rounded border p-1"
+            value={candidate.category}
+            onChange={e => changeCategory(e.target.value as StopCategory)}
+            disabled={saving || busy}
+          >
+            {CATEGORY_ORDER.map(c => (
+              <option key={c} value={c}>{`${CATEGORY_ICON[c]} ${CATEGORY_LABEL[c]}`}</option>
             ))}
           </select>
           <button type="button" className="rounded border px-1 disabled:opacity-50" disabled={saving || busy} onClick={promote}>
@@ -231,24 +271,34 @@ export default function CandidatesPanel({
         {candidates.length >= CANDIDATE_LIMIT && <span className="ml-1 font-normal text-red-600">已達上限 100，請先拼入行程或刪除</span>}
       </summary>
       {loadError && <p className="mt-1 text-xs text-red-600">備選讀取失敗，清單可能不完整</p>}
-      <ul className="mt-2 flex flex-col gap-2">
-        {candidates.map(c => (
-          <CandidateRow
-            key={c.id}
-            candidate={c}
-            canEdit={canEdit}
-            busy={busy}
-            dayKeys={dayKeys}
-            activeDay={activeDay}
-            selected={selectedCandidateId === c.id}
-            onFocus={onFocus}
-            onPromote={onPromote}
-          />
-        ))}
-        {candidates.length === 0 && (
-          <li className="text-sm text-gray-500">{canEdit ? '還沒有備選，搜尋地點後按「存入備選」' : '這個行程還沒有備選'}</li>
-        )}
-      </ul>
+      {candidates.length === 0 ? (
+        <p className="mt-2 text-sm text-gray-500">{canEdit ? '還沒有備選，搜尋地點後按「存入備選」' : '這個行程還沒有備選'}</p>
+      ) : (
+        CATEGORY_ORDER.map(category => {
+          const items = candidates.filter(c => c.category === category)
+          if (items.length === 0) return null
+          return (
+            <div key={category} className="mt-2">
+              <p className="text-xs font-medium text-gray-500">{`${CATEGORY_ICON[category]} ${CATEGORY_LABEL[category]}（${items.length}）`}</p>
+              <ul className="mt-1 flex flex-col gap-2">
+                {items.map(c => (
+                  <CandidateRow
+                    key={c.id}
+                    candidate={c}
+                    canEdit={canEdit}
+                    busy={busy}
+                    dayKeys={dayKeys}
+                    activeDay={activeDay}
+                    selected={selectedCandidateId === c.id}
+                    onFocus={onFocus}
+                    onPromote={onPromote}
+                  />
+                ))}
+              </ul>
+            </div>
+          )
+        })
+      )}
     </details>
   )
 }

@@ -235,6 +235,19 @@ export default function MembersPanel({
         setNotice({ kind: 'error', text: '邀請連結撤銷失敗，尚未移除成員，請稍後再試' })
         return
       }
+      // 審查 I-2（兩位審查員獨立查到）：原本只撤邀請、完全沒碰 share_token，但 ShareButton 對
+      // 所有成員（含 viewer）無條件顯示——被移除者手上那條唯讀連結永久有效，而 UI 卻寫「已一併撤銷」。
+      // 這正是同檔上方「唯一不會 fail-open 的作法」那段拒絕過的模式。分享連結一併重新產生，
+      // 舊的立刻失效。只有 owner 能呼叫此 RPC，非 owner 移除成員時文案必須誠實說明分享連結未變。
+      let shareRegenerated = false
+      if (isOwner) {
+        const { error: regenErr } = await supabase.rpc('regenerate_share_token', { p_trip_id: tripId })
+        if (regenErr) {
+          setNotice({ kind: 'error', text: '分享連結重新產生失敗，尚未移除成員，請稍後再試' })
+          return
+        }
+        shareRegenerated = true
+      }
       const { data, error } = await supabase
         .from('trip_members').delete().eq('trip_id', tripId).eq('user_id', userId).select('user_id')
       if (error) {
@@ -247,7 +260,12 @@ export default function MembersPanel({
         router.refresh()
         return
       }
-      setNotice({ kind: 'success', text: '已移除 ✓（該行程所有邀請連結已一併撤銷，如需再邀請請重新產生）' })
+      setNotice({
+        kind: 'success',
+        text: shareRegenerated
+          ? '已移除 ✓（邀請連結與分享連結均已失效，如需再分享請重新產生）'
+          : '已移除 ✓（邀請連結已全部撤銷；分享連結不受影響，請聯繫擁有者重新產生）',
+      })
       router.refresh()
     } finally {
       busyRef.current = false

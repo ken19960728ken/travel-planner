@@ -1,13 +1,17 @@
 import type { Metadata } from 'next'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import Link from 'next/link'
+import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
 import type { Database } from '@/lib/supabase/database.types'
 import TripView, { type Trip, type Stop, type Leg } from '../../trips/[tripId]/TripView'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-// token 在 URL path，不得經 Referer 外洩到外部連結；本頁也不需要被搜尋引擎索引
+// C-1 修復（邊界換票）：這個頁面的 URL 永遠不含 token，token 改放 /share/[token]/route.ts 種下的
+// HttpOnly cookie（path=/share，短效 1 小時）。Google Maps JS 讀 window.location.href 塞進請求 body
+// 時已看不到任何憑證——no-referrer 只擋 Referer header，管不到請求 body，故用「URL 裡從頭沒有 token」
+// 這個更根本的手段（原本這裡的註解宣稱 no-referrer 已擋住外洩，經審查實測證偽，一併更正）。
 export const metadata: Metadata = {
   robots: { index: false },
   referrer: 'no-referrer',
@@ -39,15 +43,13 @@ function InvalidLink() {
   )
 }
 
-export default async function SharedTripPage({
-  params,
-}: {
-  params: Promise<{ token: string }>
-}) {
-  const { token } = await params
+export default async function SharedTripViewPage() {
+  const cookieStore = await cookies()
+  const token = cookieStore.get('share_token')?.value
 
-  // token 非 UUID 格式：純格式檢查，不打 RPC（比照 invite 頁的短路順序）
-  if (!UUID_RE.test(token)) {
+  // cookie 缺失（直接開 /share/view、未經換票；或換票 cookie 已過期）或格式不對（純格式檢查，
+  // 不打 RPC，比照原本 /share/[token] 的短路順序）：與「連結已失效」同一種對外語義，不特別區分
+  if (!token || !UUID_RE.test(token)) {
     return <InvalidLink />
   }
 

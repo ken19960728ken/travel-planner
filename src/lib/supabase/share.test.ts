@@ -20,12 +20,24 @@ function newUserClient(): SupabaseClient {
 const TRIP_KEYS = ['id', 'title', 'start_date', 'end_date', 'currency'].sort()
 const STOP_KEYS = [
   'id', 'name', 'lat', 'lng', 'place_id', 'is_custom', 'timezone',
-  'starts_at', 'ends_at', 'locked', 'notes', 'estimated_cost',
+  'starts_at', 'ends_at', 'locked', 'estimated_cost',
 ].sort()
 const LEG_KEYS = [
   'id', 'from_stop_id', 'to_stop_id', 'mode', 'duration_minutes', 'distance_meters',
-  'polyline', 'detail', 'source', 'stale', 'departs_at', 'arrives_at', 'estimated_cost', 'updated_at',
+  'detail', 'source', 'stale', 'departs_at', 'arrives_at', 'estimated_cost', 'updated_at',
 ].sort()
+
+// ⚠️ 這組全等斷言是分享白名單的**唯一自動守門**——它會抓到任何多出或少掉的欄位。
+// skipIf 讓沒有本地 Supabase 的環境靜默跳過、測試全綠，等於守門在 CI 上不存在。
+// 未改成硬失敗是因為本專案其餘整合測試都用同一慣例，單獨改這支會造成不一致；
+// 改用啟動時的醒目警告，並在 README 標明 CI 必須起本地 Supabase。
+if (!hasEnv) {
+  console.warn(
+    '\n⚠️  share.test.ts 已跳過：缺少 SUPABASE_URL / ANON / SERVICE_ROLE。\n' +
+    '   這支測試是 get_shared_trip 欄位白名單的唯一自動守門，跳過等於沒有人在看。\n' +
+    '   CI 必須啟動本地 Supabase，否則新增欄位外洩不會有任何告警。\n',
+  )
+}
 
 describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
   let admin: SupabaseClient

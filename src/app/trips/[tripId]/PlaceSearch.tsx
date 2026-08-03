@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import { useMap, useMapsLibrary } from '@vis.gl/react-google-maps'
+import { categorize, type StopCategory } from '@/lib/domain/placeCategory'
 
 // 搜尋選中先預覽不寫入 DB：帶出 place 物件本身（而非拆散成純資料），讓 PlacePreviewCard
 // 需要時能對同一個 Place 實例再 fetchFields 一次抓 Enterprise 批次（評分/營業時間等）
@@ -10,6 +11,9 @@ export type PlacePick = {
   name: string
   lat: number
   lng: number
+  /** 由 Google types/primaryType 推導的預填分類，使用者在 PlacePreviewCard 送出前仍可改——
+   *  place.types/primaryType 本身不會離開這個檔案，只有這個推導後的六值 slug 會往外傳 */
+  category: StopCategory
 }
 
 export default function PlaceSearch({
@@ -69,6 +73,7 @@ export default function PlaceSearch({
         name: place.displayName ?? '未命名地點',
         lat: place.location.lat(),
         lng: place.location.lng(),
+        category: categorize(place.types ?? [], place.primaryType ?? null),
       })
       el.value = '' // 連續加入多個景點：選取後清空輸入框
     }

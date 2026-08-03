@@ -4,7 +4,7 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps'
 import { createClient } from '@/lib/supabase/client'
-import { defaultSlotForDay } from '@/lib/domain/slot'
+import { defaultSlotForDay, stayMsForCategory } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition } from '@/lib/domain/interpolate'
@@ -445,6 +445,7 @@ export default function TripView({
         targetDay,
         lastInsertedEndRef.current,
         Intl.DateTimeFormat().resolvedOptions().timeZone,
+        stayMsForCategory(p.category),
       )
 
       let timezone = 'UTC'

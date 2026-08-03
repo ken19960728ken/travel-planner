@@ -337,6 +337,6 @@ flowchart LR
 | auto leg 冷資料逾期殘留 | 超過 30 天未被開啟的行程，其 auto 段的 polyline/duration 逾期後仍留在 legs 直到下次開啟才重算——ToS 曝險殘留 | 商用前補背景清理 job（與 spec §4「行程被開啟時重算」的既有語義一致） |
 | TRANSIT departureTime 夾限 | 出發時間離現在超過 100 天的行程，transit 以夾限後時間查詢，結果可能與實際班表有偏差 | 記錄即可（超前規劃 100 天以上屬邊緣） |
 | sync 每人每分鐘 30 次上限的實務含意 | GOOGLE_CALL_LIMIT=30／RATE_WINDOW_MS=60s 為每一 serverless 實例、每使用者的滑動視窗計數（快取命中不計）；單次開頁若一分鐘內連續觸發 sync，該實例內最多算出約 30 段新交通資訊，其餘留 pending 待下次 sync（單次 sync 另受 MAX_GOOGLE_CALLS_PER_SYNC=5 次要上限與 30 秒牆鐘預算約束，兩層護欄各自獨立生效） | 與「路線代理限流為實例級記憶體」同批商用前處理 |
-| M-6：跨 DST 邊界的 flight/custom 起訖換算 | wallInputToUtcMs（`date-fns-tz` fromZonedTime）遇到當地「不存在的時刻」（DST 春進時鐘跳過的那一小時）不會報錯，而是靜默位移到鄰近有效時刻；已由 date-fns-tz 底層處理但本專案無專屬測試案例覆蓋此邊界 | Plan 5：補跨 DST 邊界的單元測試案例，評估是否需改為顯式拒絕並提示使用者 |
+| M-6：跨 DST 邊界的 flight/custom 起訖換算 | wallInputToUtcMs（`date-fns-tz` fromZonedTime）遇到當地「不存在的時刻」（DST 春進時鐘跳過的那一小時）與「重複的時刻」（秋回撥回的那一小時）不會報錯，而是靜默位移／擇一；已由 tz.test.ts 補實測案例鎖定實際回傳值 | 已補測試鎖定行為，顯式拒絕不做（本產品時區主場景東亞無 DST；防禦的複雜度大於風險） |
 | 樂觀鎖比對「當下 props」的防護範圍 | StopEditor（updated_at）與 LegEditor（lockToken，令牌隨每次成功寫入前進、props 追上時於 render 期間同步）皆以「目前已知的伺服器值」比對寫入，防的是本分頁尚未觀察到的外部改動（跨分頁、其他協作者、sync 併發寫回）；不是悲觀鎖，比對相同即視為安全——若外部曾寫入又剛好復原成相同值，此極端情況不會被偵測到 | 記錄即可（現行防護已覆蓋實務上的併發場景） |
 | M-8：快照內含 Google 地點名稱的長期保存屬灰色地帶 | 定稿快照（`buildTripSnapshot`）與 JSON 匯出納入非 `is_custom` 停留點的地點名稱（Plan 5 Task 3 決策，理由見 spec §4）——條款對「地點名稱、地址」無明文允許長期儲存，快照本質是永久保存的凍結副本，比一般 30 天快取類別的曝險時間更長 | 商用前與 30 天 TTL 解讀同批向 Google 業務窗口書面確認 |

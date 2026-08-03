@@ -34,14 +34,16 @@ function handleRowEvent<T extends { id?: string; updated_by?: string | null }>(
 }
 
 /** Task 11：單一 channel `trip:{tripId}` 訂閱 stops/legs/trips 變更 + presence，debounce refresh。
- *  純邏輯元件（不渲染畫面）：presence 頭像由 TripView 依 onPeersChange 回呼自行渲染——
- *  TripView 只做掛載與旗標接線（spec 分工）。 */
+ *  純邏輯元件（不渲染畫面）：presence 頭像與斷線橫幅由 TripView 依 onXxxChange 回呼自行渲染——
+ *  TripView 只做掛載與旗標接線（spec 分工）。canEdit=false（viewer/分享頁）時 TripView 不掛載本元件
+ *  （spec §6 Step 3：唯讀者用手動刷新即可，省 anon realtime 授權面）。 */
 export default function TripRealtime({
   tripId,
   userId,
   displayName,
   stopIds,
   legIds,
+  onDisconnectedChange,
   onPeersChange,
 }: {
   tripId: string
@@ -51,6 +53,7 @@ export default function TripRealtime({
    *  不需要重建 channel（見下方 effect 的 deps），否則每次寫入都會斷線重連 */
   stopIds: Set<string>
   legIds: Set<string>
+  onDisconnectedChange: (disconnected: boolean) => void
   onPeersChange: (peers: PresencePeer[]) => void
 }) {
   const router = useRouter()
@@ -126,8 +129,22 @@ export default function TripRealtime({
           }, 300 * (4 - retriesLeft))
         })
 
+      // Step 3：斷線橫幅＋暫停編輯——CHANNEL_ERROR/TIMED_OUT 進橫幅，重連 SUBSCRIBED 清橫幅並整份重抓；
+      // wasDisconnected 區分「初次掛載的 SUBSCRIBED」（資料已是 server 剛渲染的新鮮值，不需要 refresh）
+      // 與「斷線後恢復的 SUBSCRIBED」（spec §6：重連後整份行程重新抓取）
+      let wasDisconnected = false
       channel.subscribe(async status => {
-        if (status === 'SUBSCRIBED') await channel.track({ userId, displayName })
+        if (status === 'SUBSCRIBED') {
+          onDisconnectedChange(false)
+          if (wasDisconnected) {
+            wasDisconnected = false
+            router.refresh()
+          }
+          await channel.track({ userId, displayName })
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          wasDisconnected = true
+          onDisconnectedChange(true)
+        }
       })
 
       return channel

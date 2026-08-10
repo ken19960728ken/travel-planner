@@ -44,7 +44,7 @@
 
 測試現況：單元／整合 289 項、Playwright E2E 7 條（含分享 token 外洩迴歸、Realtime 雙 context 同步、匿名攻擊防護），皆綠。
 
-**尚未處理（正式對外前應完成）**：地圖 `mapId` 仍為開發用 `DEMO_MAP_ID`；GCP 金鑰的 referrer／API 限制與配額上限尚未收緊。其餘取捨見「已知限制」。
+**正式環境設定狀態**（2026-08-10）：GCP 兩把金鑰已收緊（瀏覽器金鑰限 referrer + Maps JavaScript API／Places API (New)；伺服器金鑰限 Routes API、依 Vercel 動態 IP 的限制不設應用程式限制），正式 Map ID 已透過 `NEXT_PUBLIC_GOOGLE_MAP_ID` 生效。**每日配額上限尚未設定**——目前沒有自動的用量硬上限，防線只有帳單預算警示（僅通知、不自動停用，且有數小時延遲）。設定步驟見 [`docs/guides/gcp-setup.md`](docs/guides/gcp-setup.md)。其餘取捨見「已知限制」。
 
 ## 開發
 

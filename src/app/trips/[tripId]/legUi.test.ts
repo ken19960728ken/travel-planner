@@ -7,7 +7,7 @@ import type { Leg } from './TripView'
 // legDurationShortText（Timeline 連接條專用短標籤，legStatus.ts 沒有這個概念）。
 const mkLeg = (over: Partial<Leg> = {}): Leg => ({
   id: 'L', from_stop_id: 'A', to_stop_id: 'B', mode: 'transit',
-  duration_minutes: null, distance_meters: null, polyline: null, detail: null,
+  duration_minutes: null, distance_meters: null, polyline: null, custom_path: null, detail: null,
   source: 'auto', stale: false, departs_at: null, arrives_at: null,
   estimated_cost: null, updated_at: '2026-08-01T00:00:00Z',
   ...over,

@@ -65,6 +65,10 @@ export type Leg = {
   duration_minutes: number | null
   distance_meters: number | null
   polyline: string | null
+  /** 使用者手繪的路徑（中間轉折點，jsonb `[[lat,lng],...]`）。**刻意宣告為 unknown**：資料來自 DB
+   *  與分享 RPC，形狀不可信，強迫所有消費端必須先過 `parseCustomPath`（src/lib/domain/routePath.ts）
+   *  再使用，避免重演 Realtime presence 那種「信任遠端資料形狀導致整頁崩潰」的事故（spec §8 C-1）。 */
+  custom_path: unknown
   detail: unknown
   source: 'auto' | 'manual'
   stale: boolean

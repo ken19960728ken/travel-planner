@@ -38,6 +38,7 @@ export type Database = {
         Row: {
           arrives_at: string | null
           computed_at: string | null
+          custom_path: Json | null
           departs_at: string | null
           detail: Json | null
           distance_meters: number | null
@@ -57,6 +58,7 @@ export type Database = {
         Insert: {
           arrives_at?: string | null
           computed_at?: string | null
+          custom_path?: Json | null
           departs_at?: string | null
           detail?: Json | null
           distance_meters?: number | null
@@ -76,6 +78,7 @@ export type Database = {
         Update: {
           arrives_at?: string | null
           computed_at?: string | null
+          custom_path?: Json | null
           departs_at?: string | null
           detail?: Json | null
           distance_meters?: number | null

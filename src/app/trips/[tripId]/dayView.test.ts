@@ -32,6 +32,7 @@ function leg(id: string, fromStopId: string, toStopId: string, durationMinutes: 
     duration_minutes: durationMinutes,
     distance_meters: null,
     polyline: null,
+    custom_path: null,
     detail: null,
     source: 'auto',
     stale: false,

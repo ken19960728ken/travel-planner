@@ -8,7 +8,8 @@ import { defaultSlotForDay, stayMsForCategory } from '@/lib/domain/slot'
 import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
-import { decodePolyline, greatCirclePoints, pathPosition, type LatLng } from '@/lib/domain/polyline'
+import { pathPosition, type LatLng } from '@/lib/domain/polyline'
+import { resolveRoutePath } from '@/lib/domain/routePath'
 import { adjacentPairs } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
@@ -826,17 +827,15 @@ export default function TripView({
   const travelFitKey = segment?.kind === 'travel' ? `travel:${segment.fromStopId}` : null
   const travelLeg =
     segment?.kind === 'travel' ? (legByPair.get(`${segment.fromStopId}→${segment.toStopId}`) ?? null) : null
-  // 路徑解碼在 render body 每秒發生一次，長 polyline 需 memo（key：leg id + 座標端點）
+  // 路徑解碼在 render body 每秒發生一次，長 polyline 需 memo（key：leg id + 座標端點）。
+  // 優先序（手繪 → Google → flight 大圓弧 → null）收斂在 resolveRoutePath，與 RoutePolylines
+  // 及下方 completedPaths 共用同一份語義，不各寫一份而漂移
   const travelPath = useMemo(() => {
     if (!travelLeg) return null
-    if (travelLeg.polyline) return decodePolyline(travelLeg.polyline)
     const from = stopById.get(travelLeg.from_stop_id)
     const to = stopById.get(travelLeg.to_stop_id)
     if (!from || !to) return null
-    if (travelLeg.mode === 'flight') {
-      return greatCirclePoints({ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng })
-    }
-    return null // 無 polyline 的地面段維持直線內插（資料就沒有路線）
+    return resolveRoutePath(travelLeg, { lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng })
   }, [travelLeg, stopById])
   const travelPos = segment?.kind === 'travel' && travelPath ? pathPosition(travelPath, segment.progress) : null
   const playheadDisplayPos = travelPos ?? playheadPos // travelPos 缺料時退回既有直線內插
@@ -875,9 +874,11 @@ export default function TripView({
       const to = ordered[i + 1]
       if (to.startsAt > clampedPlayheadMs) break // 這段還沒走完（含進行中——由 currentPath 負責）
       const leg = legByPair.get(`${from.id}→${to.id}`)
-      if (leg?.polyline) out.push(decodePolyline(leg.polyline))
-      else if (leg?.mode === 'flight') out.push(greatCirclePoints(from, to))
-      else out.push([{ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng }])
+      const fromPos = { lat: from.lat, lng: from.lng }
+      const toPos = { lat: to.lat, lng: to.lng }
+      // 與 travelPath／RoutePolylines 共用 resolveRoutePath（2026-08-10：此處原本是第二份重複的
+      // fallback 實作，未走 travelPath，加手繪路徑時一併收斂，避免三份語義各自漂移）
+      out.push((leg ? resolveRoutePath(leg, fromPos, toPos) : null) ?? [fromPos, toPos])
     }
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 逐秒變動的 clampedPlayheadMs 刻意不入 deps，換段（segmentKey）才需要重算

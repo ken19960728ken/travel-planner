@@ -9,9 +9,15 @@
  *    manual 段是使用者全文輸入，額外存 duration_minutes/departs_at/arrives_at。
  *  - 兩者一律不含 polyline/detail/distance_meters/computed_at 等 Google 衍生欄位——
  *    輸入型別本身就不收這些鍵，結構上不可能外洩（比對照全欄位再逐一排除更安全）。
+ *  - **custom_path 是例外，而且是刻意收錄的**（2026-08-10 手繪路徑）：它不是 Google 衍生資料，
+ *    是使用者自己在地圖上點出來的路線，性質同 is_custom 停留點的座標。不受 30 天 TTL 限制，
+ *    永久保存正是它的目的——使用者為日本電車段畫的路線不該在快照裡消失。
+ *    這條例外不鬆動上面那句：Google 衍生欄位仍然一個都不收。
  *  - stops 額外帶 id：不是 Google 衍生資料，且 legs 的 from_stop_id/to_stop_id 需要它才能對應
  *    回具體停留點（否則匯出的 JSON 會有指不到任何紀錄的孤兒外鍵，回憶專案無法重建行程圖）。
  */
+
+import { parseCustomPath } from './routePath'
 
 export type SnapshotTrip = {
   title: string
@@ -45,6 +51,9 @@ export type SnapshotLeg = {
   duration_minutes: number | null
   departs_at: string | null
   arrives_at: string | null
+  /** 使用者手繪路徑。宣告為 unknown 是刻意的——來源是 DB，形狀不可信，builder 內用
+   *  parseCustomPath 清洗後才落進快照，不讓畸形資料進入永久保存的凍結副本。 */
+  custom_path: unknown
 }
 
 export type SnapshotStopOut = {
@@ -71,6 +80,8 @@ export type SnapshotLegOut = {
   duration_minutes?: number | null
   departs_at?: string | null
   arrives_at?: string | null
+  /** 已清洗的手繪路徑 `[[lat,lng],...]`；沒畫過的段落不帶這個鍵（與上面三個 optional 同慣例） */
+  custom_path?: [number, number][]
 }
 
 export type TripSnapshot = {
@@ -103,15 +114,23 @@ export function buildTripSnapshot(trip: SnapshotTrip, stops: SnapshotStop[], leg
       estimated_cost: s.estimated_cost,
       ...(s.is_custom ? { lat: s.lat, lng: s.lng } : {}),
     })),
-    legs: legs.map(l => ({
-      from_stop_id: l.from_stop_id,
-      to_stop_id: l.to_stop_id,
-      mode: l.mode,
-      source: l.source,
-      estimated_cost: l.estimated_cost,
-      ...(l.source === 'manual'
-        ? { duration_minutes: l.duration_minutes, departs_at: l.departs_at, arrives_at: l.arrives_at }
-        : {}),
-    })),
+    legs: legs.map(l => {
+      // 清洗後才落進快照——快照是永久保存的凍結副本，不讓畸形資料進去
+      const waypoints = parseCustomPath(l.custom_path)
+      return {
+        from_stop_id: l.from_stop_id,
+        to_stop_id: l.to_stop_id,
+        mode: l.mode,
+        source: l.source,
+        estimated_cost: l.estimated_cost,
+        ...(l.source === 'manual'
+          ? { duration_minutes: l.duration_minutes, departs_at: l.departs_at, arrives_at: l.arrives_at }
+          : {}),
+        // 與 source 無關：auto 段也可以有手繪路徑（畫路徑不改變 auto/manual 狀態）
+        ...(waypoints.length > 0
+          ? { custom_path: waypoints.map(p => [p.lat, p.lng] as [number, number]) }
+          : {}),
+      }
+    }),
   }
 }

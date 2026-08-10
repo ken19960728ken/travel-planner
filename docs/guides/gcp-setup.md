@@ -3,6 +3,32 @@
 > 2026-08-10 依 Google 官方文件查證後撰寫。文件未明載之處已標註，不臆測。
 > 本專案用到的 Google 服務：**Maps JavaScript API**、**Places API (New)**、**Routes API**。
 
+## 快速連結
+
+點進去若跑到別的專案，網址結尾加 `?project=你的專案ID`（或用左上角切換器）。
+
+| 要做的事 | 網址 |
+|---|---|
+| 編輯金鑰限制 | https://console.cloud.google.com/google/maps-apis/credentials |
+| 建立 Map ID | https://console.cloud.google.com/google/maps-apis/studio/maps |
+| 每日配額上限 | https://console.cloud.google.com/project/_/google/maps-apis/quotas |
+| 帳單預算警示 | https://console.cloud.google.com/billing/budgets |
+| 用量圖表（事後檢查） | https://console.cloud.google.com/google/maps-apis/metrics |
+| 啟用 **Places API (New)** | https://console.cloud.google.com/apis/library/places.googleapis.com |
+| 啟用 Maps JavaScript API | https://console.cloud.google.com/apis/library/maps-backend.googleapis.com |
+| 啟用 Routes API | https://console.cloud.google.com/apis/library/routes.googleapis.com |
+
+**出處說明**：Map ID、配額、預算三條是官方文件逐字給的網址；其餘由服務端點名稱推得
+（Google 文件未直接列出）。
+
+🚨 **Places 那條特別注意**：新舊版的服務名稱只差一個字尾——
+- `places.googleapis.com` = **Places API (New)** ← 你要的
+- `places-backend.googleapis.com` = Places API（舊版 Legacy）
+
+用上表的網址進去就不會選錯；若改用搜尋，務必確認標題有 `(New)`。
+
+---
+
 ## 你有兩把金鑰，用途與限制方式完全相反
 
 | | 環境變數 | 用途 | 應用程式限制 | API 限制 |

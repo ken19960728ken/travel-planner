@@ -75,6 +75,11 @@ export type Leg = {
 }
 
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
+/** 地圖樣式 ID。`DEMO_MAP_ID` 是 Google 給文件範例用的，官方明載不可用於正式環境、也不支援
+ *  Cloud Styling；未設環境變數時沿用它，行為與先前完全相同。正式 Map ID 的建立步驟見
+ *  docs/guides/gcp-setup.md（建好後在 Vercel 設 NEXT_PUBLIC_GOOGLE_MAP_ID 並重新部署即可，
+ *  不需要改程式碼）。AdvancedMarker 需要 mapId 才能運作，故不可為空字串。 */
+const MAP_ID = process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || 'DEMO_MAP_ID'
 const PLAY_STEP_MS = 10 * 60 * 1000 // 播放中每秒推進的模擬時間
 const PLAYBACK_MAX_ZOOM = 15 // 起播 fitBounds 的縮放上限：單點/近距離日程會被拉到最大縮放，需夾住
 /** 換段取景的縮放上限（分 mode）：步行段 fitBounds 天然拉到 18-19，夾 16 保留街廓脈絡；
@@ -1229,7 +1234,7 @@ export default function TripView({
               <Map
                 defaultCenter={center}
                 defaultZoom={12}
-                mapId="DEMO_MAP_ID" // TODO(deploy): 正式環境需換專屬 Map ID
+                mapId={MAP_ID}
                 // 手勢策略決策（手機版面陷阱）：改成上下堆疊後地圖橫跨全寬，若維持會捲頁的單指手勢，
                 // 使用者想滑向下方時間軸/側欄會被地圖吃掉。這裡選 (b) 而非 (a) cooperative：
                 // 本頁殼層本來就是 h-screen 固定版面、不存在「頁面捲動」這件事（page.tsx 的 <main>

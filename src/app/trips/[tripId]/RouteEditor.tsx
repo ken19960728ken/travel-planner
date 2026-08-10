@@ -46,6 +46,10 @@ export default function RouteEditor({
 
   useEffect(() => {
     if (!map) return
+    // 關掉 Google 的 POI 圖示點擊（實測必要）：不關的話點到餐廳/車站圖示會彈出 Google 原生的
+    // 資訊視窗，它會蓋住地圖並吃掉後續點擊——實測連點三下只加得到第一個點。
+    // 比照 PlaybackCamera 處理 maxZoom 的作法：進入時設、cleanup 還原，不影響編輯模式以外的行為。
+    map.setOptions({ clickableIcons: false })
     const initial = parseCustomPath(initialCustomPath)
     const polyline = new google.maps.Polyline({
       map,
@@ -85,6 +89,7 @@ export default function RouteEditor({
       listeners.forEach(l => l.remove())
       polyline.setMap(null)
       polylineRef.current = null
+      map.setOptions({ clickableIcons: true })
     }
     // 只在切換交通段或地圖實例變動時重建；initialCustomPath/端點刻意不入 deps——
     // 它們是「進入編輯模式當下的快照」，編輯期間 props 若因 router.refresh() 變動也不該

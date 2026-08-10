@@ -9,7 +9,7 @@ import { formatLocalTime, localDateKey } from '@/lib/domain/tz'
 import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { pathPosition, type LatLng } from '@/lib/domain/polyline'
-import { resolveRoutePath } from '@/lib/domain/routePath'
+import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
 import { adjacentPairs } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
@@ -23,6 +23,7 @@ import { shouldPanCamera } from './cameraGeometry'
 import { buildDayView } from './dayView'
 import { MODE_ICON, legDurationText, isNoTransitData } from './legUi'
 import CandidatesPanel, { type Candidate } from './CandidatesPanel'
+import RouteEditor from './RouteEditor'
 import CostSummary from './CostSummary'
 import { CATEGORY_PIN_HEX, CATEGORY_ICON } from './categoryUi'
 import { normalizeCategory } from '@/lib/domain/placeCategory'
@@ -396,6 +397,9 @@ export default function TripView({
   const router = useRouter()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null)
+  /** 正在手繪路徑的交通段 id；非 null 即為「路徑編輯模式」。這是一個**模式**而非啟發式判斷——
+   *  編輯期間地圖的其他互動一律停用，避免與畫線的點擊/拖曳搶手勢（手機能用的關鍵，設計文件 §4）。 */
+  const [routeEditingLegId, setRouteEditingLegId] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   // Task 11：Realtime 斷線狀態與在線成員——TripRealtime 是純邏輯元件，透過這兩個回呼把狀態交回
@@ -804,6 +808,11 @@ export default function TripView({
     return legs.filter(l => activeDayStopIds.has(l.from_stop_id) && nextByStopId.get(l.from_stop_id) === l.to_stop_id)
   }, [legs, stops, activeDay, nextByStopId])
 
+  // 正在手繪路徑的那一段（含其起訖停留點座標，供 RouteEditor 與圖釘高亮使用）
+  const editingLeg = routeEditingLegId ? (legs.find(l => l.id === routeEditingLegId) ?? null) : null
+  const editingFrom = editingLeg ? stopById.get(editingLeg.from_stop_id) : undefined
+  const editingTo = editingLeg ? stopById.get(editingLeg.to_stop_id) : undefined
+
   const win = dayWindow(activeDayStops)
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
   // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
@@ -1136,6 +1145,8 @@ export default function TripView({
                         onClick={() => setSelectedLegId(selectedLegId === leg.id ? null : leg.id)}
                       >
                         {MODE_ICON[leg.mode]} {legDurationText(leg)}
+                        {/* 已自訂路徑標記：讓使用者一眼看出哪幾段動過手繪，不必逐段點開確認 */}
+                        {parseCustomPath(leg.custom_path).length > 0 && ' ✏️'}
                         {leg.estimated_cost !== null && ` · ${trip.currency} ${leg.estimated_cost}`}
                         {crossDay && ` → ${localDateKey(new Date(next.starts_at).getTime(), next.timezone).slice(5)} ${next.name}`}
                         {leg.stale && ' ⚠️ 前後行程變動過，可能過期'}
@@ -1163,6 +1174,11 @@ export default function TripView({
                           toStop={next}
                           currency={trip.currency}
                           onChanged={() => void syncLegs()}
+                          onDrawPath={() => {
+                            // 播放與畫線搶同一個地圖，不可並存（設計文件 §4 邊界情況）
+                            setPlaying(false)
+                            setRouteEditingLegId(leg.id)
+                          }}
                         />
                       )}
                     </li>
@@ -1252,7 +1268,8 @@ export default function TripView({
                 gestureHandling="greedy"
                 disableDefaultUI={false}
                 onContextmenu={e => {
-                  if (!canEdit || writesBlocked) return
+                  // 路徑編輯模式停用：編輯期間地圖屬於畫線，不該同時開自訂地點草稿（設計文件 §4）
+                  if (!canEdit || writesBlocked || routeEditingLegId) return
                   const latLng = e.detail.latLng
                   if (latLng) {
                     setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
@@ -1264,11 +1281,20 @@ export default function TripView({
                   // 地圖標記照樣渲染全行程，但編號與配色改為「當日視角」：當日 = 紅底 + 當日編號，他日 = 灰底無編號
                   const dayIdx = activeDayStops.findIndex(s => s.id === stop.id)
                   const inActiveDay = dayIdx >= 0
+                  // 路徑編輯模式：其他圖釘淡化縮小讓出視覺焦點，但**正在編輯那一段的起訖兩點高亮**
+                  // ——使用者要知道自己在從哪畫到哪（需求方選擇「淡化保留」而非全部隱藏，理由是
+                  // 保有方向感、不會畫完才發現跟鄰段對不起來）
+                  const isRouteEndpoint =
+                    editingLeg !== null && (stop.id === editingLeg.from_stop_id || stop.id === editingLeg.to_stop_id)
+                  const dimmedPin = routeEditingLegId !== null && !isRouteEndpoint
                   return (
                     <AdvancedMarker
                       key={stop.id}
                       position={{ lat: stop.lat, lng: stop.lng }}
                       onClick={() => {
+                        // 路徑編輯模式停用（設計文件 §4）：此處原本沒有任何閘門，編輯時點到圖釘會
+                        // 切換日期、把正在畫的那一段整個換掉
+                        if (routeEditingLegId) return
                         // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
                         const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
                         if (day !== activeDay) changeDay(day)
@@ -1282,10 +1308,14 @@ export default function TripView({
                       <Pin
                         background={CATEGORY_PIN_HEX[normalizeCategory(stop.category)]}
                         glyphColor="#fff"
-                        borderColor={selectedId === stop.id ? '#2563eb' : '#fff'}
-                        scale={selectedId === stop.id ? 1.3 : inActiveDay ? 1.0 : 0.7}
+                        borderColor={
+                          isRouteEndpoint ? '#dc2626' : selectedId === stop.id ? '#2563eb' : '#fff'
+                        }
+                        scale={
+                          isRouteEndpoint ? 1.3 : dimmedPin ? 0.5 : selectedId === stop.id ? 1.3 : inActiveDay ? 1.0 : 0.7
+                        }
                       >
-                        {inActiveDay ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
+                        {inActiveDay && !dimmedPin ? <span className="text-xs font-bold">{dayIdx + 1}</span> : null}
                       </Pin>
                     </AdvancedMarker>
                   )
@@ -1341,7 +1371,20 @@ export default function TripView({
                   legs={routeLegs}
                   stops={stops}
                   selectedLegId={selectedLegId}
+                  dimmed={routeEditingLegId !== null}
                 />
+                {editingLeg && editingFrom && editingTo && (
+                  <RouteEditor
+                    // key 讓換一段編輯時整顆重建，內部 effect 的 legId deps 不必再處理跨段殘留
+                    key={editingLeg.id}
+                    legId={editingLeg.id}
+                    lockToken={editingLeg.updated_at}
+                    fromPos={{ lat: editingFrom.lat, lng: editingFrom.lng }}
+                    toPos={{ lat: editingTo.lat, lng: editingTo.lng }}
+                    initialCustomPath={editingLeg.custom_path}
+                    onClose={() => setRouteEditingLegId(null)}
+                  />
+                )}
                 <PlaybackTrail
                   completedPaths={completedPaths}
                   currentPath={currentTravelPath}

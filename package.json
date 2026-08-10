@@ -9,7 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint . --ignore-pattern \"supabase/**\"",
+    "lint": "eslint . --ignore-pattern \"supabase/.temp/**\" --ignore-pattern \".claude/**\" --ignore-pattern \"**/.next/**\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"

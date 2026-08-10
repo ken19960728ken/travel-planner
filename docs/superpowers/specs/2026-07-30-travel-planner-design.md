@@ -23,9 +23,11 @@
 | 行程預覽動畫（時間軸自動播放 + 鏡頭跟隨） | ✅ | |
 | 預估花費（景點/交通可留空欄位 + 總覽） | ✅ | |
 | 定稿快照 + JSON 匯出（為回憶專案鋪路） | ✅ | |
+| Excel（xlsx）行程表匯出 | ✅ | 使用者 2026-07-31 提出，Plan 5 與 JSON 匯出同批完成 |
+| 備選清單（未定日期的候選地點） | ✅ | 使用者 2026-08-02 提出，Plan 6 完成（原設計文件未涵蓋，2026-08-10 補記） |
+| 地點分類（六類 + 配色圖示 + 分類花費統計） | ✅ | 使用者 2026-08-03 提出，Plan 7 完成（原設計文件未涵蓋，2026-08-10 補記） |
 | 計畫 vs 實際對比 | | 回憶專案 |
 | mp4 影片匯出 | | 回憶專案 |
-| Excel（xlsx）行程表匯出 | | Plan 5（與 JSON 匯出同批；使用者 2026-07-31 提出。若行前急用，可於 Plan 3 後先出簡版——僅停留點欄位、無交通欄） |
 | 照片 / 社群串接 | | 回憶專案 |
 | 分帳結算（誰付誰欠） | | 不做（Splitwise 級的獨立產品，做了會失焦） |
 | 離線編輯與合併 | | 不做（CRDT 級複雜度，MVP 不碰） |
@@ -87,14 +89,26 @@ graph LR
 
 ## 4. 資料模型
 
-七張表：`profiles`、`trips`、`trip_members`、`stops`、`legs`、`trip_snapshots`、`route_cache`。
+原設計為七張表；實作過程另加兩張（2026-08-10 補記，原文未更新）：`trip_invites`（Plan 5 邀請連結）與
+`trip_candidates`（Plan 6 備選清單）。目前共九張：`profiles`、`trips`、`trip_members`、`trip_invites`、
+`stops`、`legs`、`trip_candidates`、`trip_snapshots`、`route_cache`。
+
+- **`trip_invites`**：邀請連結。`token`（uuid）、`role`（editor／viewer 白名單，擋提權）、`expires_at`
+  （預設 7 天、上限 30 天）。效期內可重複使用（群組分享語義），撤銷＝刪除；owner 移除成員時連帶
+  刪除該行程全部邀請（fail-open 分析見 README 已知限制）。
+- **`trip_candidates`**：還沒決定日期的候選地點。欄位比照 stops 的地點面（`name`／`lat`／`lng`／
+  `place_id`／`category`）但**不含時間**——這正是它與 stops 的分界：有時段的是行程，沒時段的是備選。
+  「拼入行程」＝以該筆資料建立 stop 後刪除備選（create-then-delete，失敗時寧可留下備選也不遺失資料）。
+  每行程上限 100 筆。**不在 Realtime 訂閱範圍**（見 README 已知限制）。
 
 ```mermaid
 erDiagram
     profiles ||--o{ trip_members : ""
     trips ||--o{ trip_members : "成員"
+    trips ||--o{ trip_invites : "邀請連結"
     trips ||--o{ stops : "停留點"
     trips ||--o{ legs : "交通段"
+    trips ||--o{ trip_candidates : "備選清單"
     trips ||--o{ trip_snapshots : "定稿快照"
     stops ||--o{ legs : "起點/終點"
 
@@ -325,7 +339,7 @@ flowchart LR
 | 本機 supabase db reset 故障 | CLI 2.110.0 報 LegacyDbBootstrapError；本機重建 schema 的替代指令：drop schema public cascade 後以 psql 重跑 migration | CLI 修復後移除 workaround |
 | Plan 2 開工前清理批次 | 最終審查遺留項：Google 登入按鈕在未設定 provider 時必失敗（藏按鈕或補 config stub）、OAuth redirect 允許清單與 README host 不一致、UI 層零自動化測試（補 Playwright smoke）、以及 11 個 Minor（title 驗證、清單分頁、錯誤訊息通用化、深色模式按鈕、layout metadata/lang、登出入口、profiles 可列舉範圍等，詳見最終審查報告） | Plan 2 開工前 |
 | Playwright reuseExistingServer 寫死 true | 導入 CI 時需改為 !process.env.CI 並評估 retries/trace，否則 CI 可能對過期 server 跑出假綠燈 | 導入 CI 時 |
-| E2E 清理的 listUsers 未分頁 | 測試使用者清理只掃第一頁，規模大後可能漏清（不會誤刪，只會少清） | 測試量成長時 |
+| ~~E2E 清理的 listUsers 未分頁~~ **已修** | Plan 5 Task 7 已補翻頁掃描（`smoke.spec.ts` / `invite.spec.ts` / `realtime.spec.ts` 的 afterAll 皆翻到底），本條保留為紀錄 | 已完成 |
 | stops 批次寫入的 advisory lock 約束 | 任何對 stops 的多列批次 UPDATE 必須先取 pg_advisory_xact_lock(hashtextextended(trip_id::text,0))（已寫入表註解），否則與 cascade_shift_stops 併發會 deadlock；單列 UPDATE 不受限 | 每次新增 stops 批次寫入時 |
 | cascade RPC 的 delta 單位契約 | 參數為「秒」，client 呼叫端必須 Math.round(deltaMs/1000) 明確換算並註解——366 天上限只能攔千倍級災難值，分鐘級的 ms 誤傳仍會靜默造成 10-42 天跳動 | Plan 3 Task 6 接線與其後每個新 caller |
 | 跨午夜停留點僅顯示於開始日 | 23:00–01:00 的停留點只出現在開始日的側欄/時間軸，結束日無延續視覺、當日衝突偵測亦不涵蓋其尾段 | 時間軸後續迭代 |
@@ -342,4 +356,9 @@ flowchart LR
 | sync 每人每分鐘 30 次上限的實務含意 | GOOGLE_CALL_LIMIT=30／RATE_WINDOW_MS=60s 為每一 serverless 實例、每使用者的滑動視窗計數（快取命中不計）；單次開頁若一分鐘內連續觸發 sync，該實例內最多算出約 30 段新交通資訊，其餘留 pending 待下次 sync（單次 sync 另受 MAX_GOOGLE_CALLS_PER_SYNC=5 次要上限與 30 秒牆鐘預算約束，兩層護欄各自獨立生效） | 與「路線代理限流為實例級記憶體」同批商用前處理 |
 | M-6：跨 DST 邊界的停留點與 flight/custom 起訖換算 | wallInputToUtcMs（`date-fns-tz` fromZonedTime）遇到當地「不存在的時刻」（DST 春進時鐘跳過的那一小時）與「重複的時刻」（秋回撥回的那一小時）不會報錯，而是靜默位移／擇一；**重複時刻擇哪一次取決於執行環境（瀏覽器＝使用者裝置）的系統時區**（審查實測 418 個 IANA 時區：宿主偏移 ≥ UTC+4:30 取 EST、否則取 EDT），故同一停留點被不同時區的協作者開啟＋儲存可能靜默位移 1 小時；曝險面涵蓋 StopEditor（停留點起訖）與 LegEditor（flight/custom 起訖） | 已補測試鎖定行為（春進鎖具體值；秋回僅鎖「必為兩個合法時刻之一 + round-trip 不變」，具體值依裝置時區不可鎖），顯式拒絕不做（本產品時區主場景東亞無 DST；防禦的複雜度大於風險） |
 | 樂觀鎖比對「當下 props」的防護範圍 | StopEditor（updated_at）與 LegEditor（lockToken，令牌隨每次成功寫入前進、props 追上時於 render 期間同步）皆以「目前已知的伺服器值」比對寫入，防的是本分頁尚未觀察到的外部改動（跨分頁、其他協作者、sync 併發寫回）；不是悲觀鎖，比對相同即視為安全——若外部曾寫入又剛好復原成相同值，此極端情況不會被偵測到 | 記錄即可（現行防護已覆蓋實務上的併發場景） |
+| exceljs 維護停滯 | 4.4.0 約兩年未發版；本專案僅用「寫入」路徑（產生 xlsx），解析類 CVE 不適用；npm audit 的傳遞依賴告警屬此範疇 | 若未來需要「解析使用者上傳的 xlsx」時重新評估（候選 @e965/xlsx 等） |
+| 邀請 token 無使用次數上限 | 效期內（預設 7 天、上限 30 天）可重複使用，這是刻意的群組分享語義（一條連結發給所有旅伴）；外洩即可入團，撤銷手段是刪除該邀請或移除成員（會連帶撤銷全部邀請） | 記錄即可（可授予的最高角色是 editor，owner 權力不外溢） |
+| 分享／邀請 token 隨 URL 進入日誌 | token 位於網址路徑，必然出現在 Vercel access log、瀏覽器歷史、以及使用者貼給他人的任何地方；頁面已設 `no-referrer` 阻斷外站 Referer 外洩（C-1 另已修掉 token 進入 Google Maps 請求 body 的路徑），token 可重新產生或撤銷 | 商用前評估改為 POST + 短效兌換碼 |
+| share RPC 無流量限制 | anon 可無限次呼叫 `get_shared_trip`；主防線是 token 為 UUID v4（122 bit 隨機、不可枚舉），但單一 token 到手後洗流量無護欄。已有的護欄只有 payload 側的 `limit 500`（20260803000005） | 商用前與路線代理限流同批上集中式方案 |
+| 轉移擁有權未做 | owner 不可被移除（成員 delete policy 的 `user_id <> auth.uid()` 排除自己，且不及於 owner），role 白名單只有 editor／viewer——擋的是**提權**，代價是無法把任何成員升為 owner；owner 刪帳號後行程無人可管理（與「帳號刪除語義」條目同源，共編上線後影響升級） | 後續迭代 |
 | M-8：快照內含 Google 地點名稱的長期保存屬灰色地帶 | 定稿快照（`buildTripSnapshot`）與 JSON 匯出納入非 `is_custom` 停留點的地點名稱（Plan 5 Task 3 決策，理由見 spec §4）——條款對「地點名稱、地址」無明文允許長期儲存，快照本質是永久保存的凍結副本，比一般 30 天快取類別的曝險時間更長 | 商用前與 30 天 TTL 解讀同批向 Google 業務窗口書面確認 |

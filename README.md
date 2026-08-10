@@ -127,7 +127,7 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 ## 已知限制
 
-- 地圖 `mapId` 目前為開發用 `DEMO_MAP_ID`，部署前需在 GCP 建立正式 Map ID 並替換
+- 地圖 `mapId` 未設定 `NEXT_PUBLIC_GOOGLE_MAP_ID` 時 fallback 為開發用 `DEMO_MAP_ID`（Google 明載不可用於正式環境、不支援 Cloud Styling）。建立正式 Map ID 與收緊金鑰的完整步驟見 [`docs/guides/gcp-setup.md`](docs/guides/gcp-setup.md)
 - 播放中的鏡頭行為是「分段定格」：起播 fitBounds 收整日全景一次，之後只在**進入交通段**時換一次取景
   （以該段完整路徑 fitBounds，步行段縮放上限 16、其餘 15），停留期間不動；換段為瞬間切換（刻意不做
   連續縮放動畫——跨多層圖磚的過渡正是灰塊問題的溫床），慢速網路下換段瞬間可能短暫露出未載入圖磚，

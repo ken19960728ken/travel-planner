@@ -210,7 +210,7 @@ export function participantPairs<T extends { id: string; startsAt: number; parti
 
 - 以四捨五入到小數 5 位（約 1 公尺）的座標分組
 - 組內 1 人 → 顯示該參與人的首字，底色用其顏色
-- 組內 > 1 人 → 顯示人數（「3」），底色用中性的 `#334155`
+- 組內 > 1 人 → 顯示人數（「3」），底色用 `#c4b5fd`（淺紫，對全部保留色最小 ΔE 34.9；深色中性帶已被 custom/other/步行灰佔滿，合併圖示只能往淺色走）
 
 軌跡線（`PlaybackTrail`）不合併——重疊時本來就疊在一起，視覺上無差別，而分岔時必須各自可見。
 

@@ -1091,7 +1091,7 @@ const markerGroups = useMemo(() => {
 圖示內容（設計文件 §5.2／§5.3）：
 
 - 組內 1 人 → `participantInitial(name)`，底色 `participantColorAt(名冊索引)`
-- 組內 > 1 人 → 人數數字，底色 `MERGED_MARKER_COLOR`
+- 組內 > 1 人 → 人數數字，底色 `MERGED_MARKER_COLOR`（淺紫，數字用 `MERGED_MARKER_TEXT` 深色）
 - `participantId` 為 null（名冊為空的退化路徑）→ 沿用現行播放頭樣式，不套任何參與人樣式
 
 軌跡線不合併（重疊時視覺上無差別，分岔時必須各自可見）。

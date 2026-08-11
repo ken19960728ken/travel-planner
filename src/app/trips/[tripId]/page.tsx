@@ -5,6 +5,8 @@ import TripView from './TripView'
 import type { Leg, Stop } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
+import ParticipantsPanel from './ParticipantsPanel'
+import { parseRoster, resolveStopParticipants } from '@/lib/domain/participants'
 import type { Candidate } from './CandidatesPanel'
 
 export default async function TripDetailPage({
@@ -101,6 +103,18 @@ export default async function TripDetailPage({
   // 不然 profiles 失敗會讓所有成員顯示「已離開的成員」、invites 失敗會讓 owner 誤以為沒有邀請連結，兩者都是靜默誤導
   const membersPanelLoadError = Boolean(profilesError || invitesError)
 
+  // 參與人名冊 + 每人被指派到幾個停留點（移除前的後果提示）。在 server 端算完傳純資料下去——
+  // 函式無法序列化給 client component。
+  // 只計「明確指派」：resolveStopParticipants 對 participant_ids 為 null 的停留點回傳全員，
+  // 那些是共同行程，移除某人不會改變它們，算進去會讓提示的數字虛胖到整趟行程。
+  const roster = parseRoster(trip.participants)
+  const rosterIds = roster.map(p => p.id)
+  const affectedStopCounts: Record<string, number> = Object.fromEntries(rosterIds.map(id => [id, 0]))
+  for (const s of stops ?? []) {
+    if (!Array.isArray(s.participant_ids)) continue
+    for (const id of resolveStopParticipants(s.participant_ids, rosterIds)) affectedStopCounts[id] += 1
+  }
+
   return (
     <main className="flex h-screen flex-col">
       <header className="flex flex-col gap-2 border-b p-3 md:flex-row md:items-baseline md:gap-3">
@@ -123,6 +137,13 @@ export default async function TripDetailPage({
         </div>
         <div className="flex items-center gap-2 overflow-x-auto md:contents">
           <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} canEdit={canEdit} />
+          <ParticipantsPanel
+            tripId={tripId}
+            roster={roster}
+            members={members}
+            canEdit={canEdit}
+            affectedStopCounts={affectedStopCounts}
+          />
           <MembersPanel
             tripId={tripId}
             currentUserId={user.id}

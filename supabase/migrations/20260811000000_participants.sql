@@ -57,6 +57,51 @@ alter table public.stops
 -- stops 是表級授權（authenticated=arwd，pg_attribute.attacl 為空），新欄位自動繼承
 -- INSERT/UPDATE/SELECT，不需 column grant。既有 policy「editor 以上可改停留點」自動涵蓋本欄位。
 
+-- ---------- 新增／更新參與人（在 SQL 端合併，不做 client 端 read-modify-write） ----------
+-- 為何是 RPC 而不是 client 讀出整份名冊改完再寫回：後者是典型的 lost update——兩個人同時各自
+-- 加一個參與人，後寫入者會把前一個人加的整個蓋掉，而且沒有任何錯誤。jsonb 欄位也無法用
+-- 本專案其他地方的 `.eq('updated_at', lockToken)` 樂觀鎖（trips 沒有 updated_at，
+-- 且 jsonb 值在 URL 上做等值比對不可靠）。在 SQL 端合併則天然原子。
+create or replace function public.upsert_trip_participant(
+  p_trip_id uuid, p_id uuid, p_user_id uuid, p_name text, p_color text)
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
+declare v_entry jsonb;
+begin
+  if not public.is_trip_editor(p_trip_id) then
+    raise exception 'not authorized' using errcode = '42501';
+  end if;
+  if coalesce(btrim(p_name), '') = '' then
+    raise exception 'name required' using errcode = '22023';
+  end if;
+  -- 名稱長度上限：與 trips_participants_shape 的 4000 字元總量互補。單筆過長會讓總量提早撞頂，
+  -- 使用者看到的是「加不進去」而非「這個名字太長」——在這裡明確擋下才給得出有意義的錯誤。
+  if length(btrim(p_name)) > 40 then
+    raise exception 'name too long' using errcode = '22023';
+  end if;
+
+  v_entry := jsonb_build_object(
+    'id', p_id, 'user_id', p_user_id, 'name', btrim(p_name), 'color', p_color);
+
+  update public.trips
+     set participants = (
+       select coalesce(jsonb_agg(e order by ord), '[]'::jsonb)
+         from (
+           -- 既有項目：命中 id 的換成新內容（就地更新，維持原順序＝維持顏色指派順序）
+           select case when e->>'id' = p_id::text then v_entry else e end as e, ord
+             from jsonb_array_elements(participants) with ordinality as t(e, ord)
+           union all
+           -- 新項目：原本不存在才附加在最後
+           select v_entry, 1e9
+            where not exists (
+              select 1 from jsonb_array_elements(participants) x where x->>'id' = p_id::text)
+         ) merged)
+   where id = p_trip_id;
+end;
+$$;
+
+revoke execute on function public.upsert_trip_participant(uuid, uuid, uuid, text, text) from public;
+grant execute on function public.upsert_trip_participant(uuid, uuid, uuid, text, text) to authenticated;
+
 -- ---------- 移除參與人（名冊 + 指派同一交易） ----------
 -- 陣列欄位無法設外鍵，名冊移除某人後 participant_ids 不能還指著他。兩個 UPDATE 必須原子，
 -- 否則中途失敗會留下指不到人的 id。

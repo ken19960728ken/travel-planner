@@ -427,6 +427,20 @@ export type Database = {
       is_trip_owner: { Args: { p_trip_id: string }; Returns: boolean }
       my_trip_ids: { Args: never; Returns: string[] }
       regenerate_share_token: { Args: { p_trip_id: string }; Returns: string }
+      remove_trip_participant: {
+        Args: { p_participant_id: string; p_trip_id: string }
+        Returns: undefined
+      }
+      upsert_trip_participant: {
+        Args: {
+          p_color: string
+          p_id: string
+          p_name: string
+          p_trip_id: string
+          p_user_id: string | null
+        }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never

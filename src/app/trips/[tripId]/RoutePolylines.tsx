@@ -30,12 +30,14 @@ const WALKING_FALLBACK_COLOR = '#6b7280'
  *  `dimmed`：手繪路徑編輯模式下，其他段落淡化保留（需求方選擇——保有方向感，不會畫完才發現
  *  跟鄰段對不起來），但不可點擊、不搶視覺焦點。 */
 export default function RoutePolylines({
-  legs, stops, selectedLegId, dimmed = false,
+  legs, stops, selectedLegId, dimmed = false, hiddenLegId = null,
 }: {
   legs: Leg[]
   stops: Stop[]
   selectedLegId: string | null
   dimmed?: boolean
+  /** 不要畫這一段（手繪編輯中的那段由 RouteEditor 自己畫，重複畫會疊影並攔截點擊） */
+  hiddenLegId?: string | null
 }) {
   const map = useMap()
 
@@ -44,6 +46,7 @@ export default function RoutePolylines({
     const stopById = new Map(stops.map(s => [s.id, s]))
     const overlays: google.maps.Polyline[] = []
     for (const leg of legs) {
+      if (leg.id === hiddenLegId) continue
       const from = stopById.get(leg.from_stop_id)
       const to = stopById.get(leg.to_stop_id)
       if (!from || !to) continue
@@ -59,15 +62,19 @@ export default function RoutePolylines({
       overlays.push(new google.maps.Polyline({
         map,
         path: resolved ?? greatCirclePoints(fromPos, toPos),
+        // clickable: false（審查 M-6，實測）：Google 預設 true，而虛線段的主線 strokeOpacity 為 0
+        // ——等於一條**看不見**的線在吃地圖點擊。手繪路徑最常沿著既有路線走廊描，命中率很高
+        // （手機更難閃避）。本專案沒有任何地方監聽這些 polyline 的 click，關掉無副作用。
+        clickable: false,
         strokeColor: color,
         // 虛線：主線透明 + repeat icon（Google Maps 官方 dashed line 做法）
-        strokeOpacity: solid ? (dimmed ? 0.25 : 0.75) : 0,
+        strokeOpacity: solid ? (dimmed ? 0.35 : 0.75) : 0,
         strokeWeight: leg.id === selectedLegId ? 5 : 3,
         ...(solid ? {} : {
           icons: [{
             icon: {
               path: 'M 0,-1 0,1',
-              strokeOpacity: dimmed ? 0.2 : walkingFallback ? 0.5 : 0.6,
+              strokeOpacity: dimmed ? 0.3 : walkingFallback ? 0.5 : 0.6,
               strokeColor: color,
               scale: 3,
             },
@@ -78,7 +85,7 @@ export default function RoutePolylines({
       }))
     }
     return () => overlays.forEach(o => o.setMap(null))
-  }, [map, legs, stops, selectedLegId, dimmed])
+  }, [map, legs, stops, selectedLegId, dimmed, hiddenLegId])
 
   return null
 }

@@ -80,6 +80,9 @@ export type Leg = {
   updated_at: string
 }
 
+/** 編輯模式下用來停用必填 callback prop 的空函式（傳 undefined 會壞型別）。 */
+const NOOP = () => {}
+
 const FALLBACK_CENTER = { lat: 25.034, lng: 121.5645 } // 台北 101，行程還沒有停留點時的預設視野
 /** 地圖樣式 ID。`DEMO_MAP_ID` 是 Google 給文件範例用的，官方明載不可用於正式環境、也不支援
  *  Cloud Styling；未設環境變數時沿用它，行為與先前完全相同。正式 Map ID 的建立步驟見
@@ -400,6 +403,11 @@ export default function TripView({
   /** 正在手繪路徑的交通段 id；非 null 即為「路徑編輯模式」。這是一個**模式**而非啟發式判斷——
    *  編輯期間地圖的其他互動一律停用，避免與畫線的點擊/拖曳搶手勢（手機能用的關鍵，設計文件 §4）。 */
   const [routeEditingLegId, setRouteEditingLegId] = useState<string | null>(null)
+  /** 剛存下的手繪路徑（C-1 樂觀覆寫，比照 pendingShift 的樣式）：router.refresh() 落地前，
+   *  props 的 leg.custom_path 還是舊值。少了這層，「存檔後立刻再進編輯器」會讀到空的路徑，
+   *  再存一次就把剛畫的整條蓋掉——審查實測過的靜默資料遺失。props 追上後於 render 期比對清除。 */
+  const [pendingCustomPath, setPendingCustomPath] =
+    useState<{ legId: string; value: [number, number][] | null } | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   // Task 11：Realtime 斷線狀態與在線成員——TripRealtime 是純邏輯元件，透過這兩個回呼把狀態交回
@@ -474,6 +482,26 @@ export default function TripView({
       pendingShiftResolved(pendingShift, stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
     ) {
       setPendingShift(null)
+    }
+  }
+
+  // C-1 樂觀覆寫的清除：props 的 legs 追上剛存的值之後就不再需要覆寫。用「同一個 legs 參照只比對
+  // 一次」的既有樣式（同上方 prevStopsForShift），不開 effect 直接 setState。
+  const [prevLegsForPath, setPrevLegsForPath] = useState(legs)
+  if (prevLegsForPath !== legs) {
+    setPrevLegsForPath(legs)
+    if (pendingCustomPath) {
+      const landed = legs.find(l => l.id === pendingCustomPath.legId)
+      // 比對「清洗後的點數與內容」而非原始 jsonb——DB 回來的是 number[][]，本地是 tuple，
+      // 直接比參照或 JSON 字串都不可靠
+      const landedPath = landed ? parseCustomPath(landed.custom_path) : []
+      const expected = pendingCustomPath.value ?? []
+      const same =
+        landed !== undefined &&
+        landedPath.length === expected.length &&
+        landedPath.every((p, i) => p.lat === expected[i][0] && p.lng === expected[i][1])
+      // leg 消失（協作者刪掉）也一併清除，避免永久掛著
+      if (same || landed === undefined) setPendingCustomPath(null)
     }
   }
 
@@ -809,9 +837,19 @@ export default function TripView({
   }, [legs, stops, activeDay, nextByStopId])
 
   // 正在手繪路徑的那一段（含其起訖停留點座標，供 RouteEditor 與圖釘高亮使用）
-  const editingLeg = routeEditingLegId ? (legs.find(l => l.id === routeEditingLegId) ?? null) : null
+  const editingLegRaw = routeEditingLegId ? (legs.find(l => l.id === routeEditingLegId) ?? null) : null
+  // C-1：refresh 落地前用剛存下的值覆寫，避免「存完立刻再進編輯器」讀到舊的空路徑
+  const editingLeg =
+    editingLegRaw && pendingCustomPath?.legId === editingLegRaw.id
+      ? { ...editingLegRaw, custom_path: pendingCustomPath.value }
+      : editingLegRaw
   const editingFrom = editingLeg ? stopById.get(editingLeg.from_stop_id) : undefined
   const editingTo = editingLeg ? stopById.get(editingLeg.to_stop_id) : undefined
+  /** 編輯模式是否**實際生效**（審查 M-3）。所有互動閘門一律讀這個衍生布林，不讀 routeEditingLegId
+   *  ——協作者刪掉停留點會 FK cascade 掉 leg，此時 RouteEditor 卸載但 id 還留著；閘門若讀 id
+   *  就會把地圖永久鎖死（實測：右鍵開不了草稿、圖釘淡化、沒有任何出口可按取消，只能重新整理）。
+   *  讀衍生布林則 leg 一消失閘門就自動解除，殘留 id 無害。 */
+  const routeEditing = editingLeg !== null && editingFrom !== undefined && editingTo !== undefined
 
   const win = dayWindow(activeDayStops)
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
@@ -1008,7 +1046,9 @@ export default function TripView({
             讓 flex-1 的地圖區塊自動吃下剩餘高度，不需要另外幫地圖寫死高度（見下方地圖容器）。
             桌機（md 以上）維持原本 320px 固定寬側欄 + 左右並排，外觀與行為完全不變。 */}
         <aside className="max-h-[38vh] w-full overflow-y-auto border-b p-3 md:max-h-none md:w-80 md:shrink-0 md:border-b-0 md:border-r">
-          {canEdit && apiKey && !writesBlocked && (
+          {/* !routeEditing（審查 M-5）：畫路徑期間側欄的寫入入口一律收起——避免使用者在畫線中途
+              加停留點／改時間，那些操作會改動正在編輯那段的起訖點，讓畫到一半的路徑語義破碎 */}
+          {canEdit && apiKey && !writesBlocked && !routeEditing && (
             <PlaceSearch
               onPick={p => {
                 previewSeqRef.current += 1
@@ -1124,7 +1164,7 @@ export default function TripView({
                     {/* M-3（critic 審查）：writesBlocked 走同一條 canEdit 通道——斷線/讀取失敗時整顆
                         編輯器連同任何已開啟的「確認刪除」狀態一併卸載，寫入路徑物理上不可能被觸發，
                         不需要在 StopEditor 內部另加守衛 */}
-                    {canEdit && !writesBlocked && selectedId === stop.id && (
+                    {canEdit && !writesBlocked && !routeEditing && selectedId === stop.id && (
                       <StopEditor
                         key={stop.id}
                         stop={stop}
@@ -1161,12 +1201,12 @@ export default function TripView({
                             isNoTransitData(leg) ? '（步行估算）' : ''
                           }`}
                       </button>
-                      {canEdit && !writesBlocked && leg.source === 'manual' && (
+                      {canEdit && !writesBlocked && !routeEditing && leg.source === 'manual' && (
                         <span className="ml-1">
                           <RevertToAutoButton legId={leg.id} onChanged={() => void syncLegs()} />
                         </span>
                       )}
-                      {canEdit && !writesBlocked && selectedLegId === leg.id && (
+                      {canEdit && !writesBlocked && !routeEditing && selectedLegId === leg.id && (
                         <LegEditor
                           key={leg.id}
                           leg={leg}
@@ -1219,7 +1259,7 @@ export default function TripView({
                       fromStop={from}
                       toStop={to}
                       currency={trip.currency}
-                      canEdit={canEdit && !writesBlocked}
+                      canEdit={canEdit && !writesBlocked && !routeEditing}
                       onChanged={() => void syncLegs()}
                     />
                   )
@@ -1230,7 +1270,7 @@ export default function TripView({
           <CandidatesPanel
             candidates={candidates}
             loadError={Boolean(candidatesError)}
-            canEdit={canEdit && !writesBlocked}
+            canEdit={canEdit && !writesBlocked && !routeEditing}
             busy={busy}
             dayKeys={dayKeys}
             activeDay={activeDay}
@@ -1269,7 +1309,7 @@ export default function TripView({
                 disableDefaultUI={false}
                 onContextmenu={e => {
                   // 路徑編輯模式停用：編輯期間地圖屬於畫線，不該同時開自訂地點草稿（設計文件 §4）
-                  if (!canEdit || writesBlocked || routeEditingLegId) return
+                  if (!canEdit || writesBlocked || routeEditing) return
                   const latLng = e.detail.latLng
                   if (latLng) {
                     setSearchPreview(null) // 互斥：右鍵開自訂草稿時取代掉搜尋預覽
@@ -1286,7 +1326,7 @@ export default function TripView({
                   // 保有方向感、不會畫完才發現跟鄰段對不起來）
                   const isRouteEndpoint =
                     editingLeg !== null && (stop.id === editingLeg.from_stop_id || stop.id === editingLeg.to_stop_id)
-                  const dimmedPin = routeEditingLegId !== null && !isRouteEndpoint
+                  const dimmedPin = routeEditing && !isRouteEndpoint
                   return (
                     <AdvancedMarker
                       key={stop.id}
@@ -1294,7 +1334,7 @@ export default function TripView({
                       onClick={() => {
                         // 路徑編輯模式停用（設計文件 §4）：此處原本沒有任何閘門，編輯時點到圖釘會
                         // 切換日期、把正在畫的那一段整個換掉
-                        if (routeEditingLegId) return
+                        if (routeEditing) return
                         // 只有點到不同 Day 的停留點才切換：同日點擊維持播放頭與加點基準不被重置
                         const day = localDateKey(new Date(stop.starts_at).getTime(), stop.timezone)
                         if (day !== activeDay) changeDay(day)
@@ -1371,9 +1411,15 @@ export default function TripView({
                   legs={routeLegs}
                   stops={stops}
                   selectedLegId={selectedLegId}
-                  dimmed={routeEditingLegId !== null}
+                  dimmed={routeEditing}
+                  // m-3：正在編輯的那段不重複畫——舊路徑會以 dimmed 疊在編輯線底下，按「清除全部」
+                  // 後它還留著，容易讓人以為沒清掉；而且那條線也會吃掉落在它上面的點擊
+                  hiddenLegId={routeEditing ? routeEditingLegId : null}
                 />
-                {editingLeg && editingFrom && editingTo && (
+                {/* canEdit && !writesBlocked（審查 M-4）：畫路徑是寫入動作，比照其他寫入入口。
+                    少了這道閘門，斷線期間（writesBlocked=true、橫幅顯示「編輯功能已暫停」）
+                    RouteEditor 的儲存鈕仍會真的寫 DB，而畫面不會更新，使用者只看到線消失。 */}
+                {canEdit && !writesBlocked && editingLeg && editingFrom && editingTo && (
                   <RouteEditor
                     // key 讓換一段編輯時整顆重建，內部 effect 的 legId deps 不必再處理跨段殘留
                     key={editingLeg.id}
@@ -1383,6 +1429,7 @@ export default function TripView({
                     toPos={{ lat: editingTo.lat, lng: editingTo.lng }}
                     initialCustomPath={editingLeg.custom_path}
                     onClose={() => setRouteEditingLegId(null)}
+                    onSaved={value => setPendingCustomPath({ legId: editingLeg.id, value })}
                   />
                 )}
                 <PlaybackTrail
@@ -1419,7 +1466,7 @@ export default function TripView({
         stops={stops}
         dayKeys={tripDayKeys(trip.start_date, trip.end_date)}
         activeDay={activeDay}
-        onDayChange={changeDay}
+        onDayChange={routeEditing ? NOOP : changeDay}
         selectedId={selectedId}
         onSelect={id => {
           setSelectedId(id)
@@ -1436,14 +1483,16 @@ export default function TripView({
         }}
         // Task 11：斷線時 onMove 一併收回（不只在 moveStop 內部靜默 return）——否則 Timeline 會出現
         // 拖曳預覽但提交不了的半互動狀態，與 Task 5 對 viewer 的既有處理一致
-        onMove={canEdit && !writesBlocked ? moveStop : undefined}
+        onMove={canEdit && !writesBlocked && !routeEditing ? moveStop : undefined}
         busy={busy}
         pendingShift={pendingShift}
         playing={playing}
-        onTogglePlay={togglePlay}
+        // 編輯模式停用（審查 M-5）：播放中 PlaybackCamera 會 fitBounds/panTo，鏡頭會在使用者畫線時自己跑掉。
+        // 這三個是必填 prop，故傳 no-op 而非 undefined（傳 undefined 會壞型別）
+        onTogglePlay={routeEditing ? NOOP : togglePlay}
         dayView={dayView}
         selectedLegId={selectedLegId}
-        onSelectLeg={setSelectedLegId}
+        onSelectLeg={routeEditing ? NOOP : setSelectedLegId}
       />
     </div>
   )

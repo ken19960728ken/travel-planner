@@ -20,10 +20,15 @@
 -- （停留點被拖動時路徑自動重接，不會與圖釘對不齊）。不用編碼字串是因為本專案只有 decodePolyline
 -- 沒有編碼器，用 JSON 免寫編碼器與其測試，且 DB 內容可讀、可用 check constraint 驗形狀。
 --
--- 【上限 100 點】橫跨九州的鐵路線實際用不到 40 點；100 給足餘裕，同時讓匿名分享頁的 payload
--- 有上界（100 點約 2KB，與 polyline 的 4000 字元上限同量級，見 20260804000000 的頻寬論述）。
--- check constraint 無法逐元素迭代，故只驗「是陣列、長度 ≤ 100」；每個元素是否為合法座標由
--- 應用層驗證（src/lib/domain/routePath.ts 的 parseCustomPath），渲染層另做防禦性過濾。
+-- 【雙重上限：100 點 + 4000 字元】
+-- 只限元素個數是不夠的——審查實測：100 個元素、每個塞 1MB 字串，仍然通過個數檢查，
+-- 整欄可達 95MB。任何 editor 成員都能直接打 PostgREST 寫入，而 get_shared_trip 白名單放行此欄，
+-- 匿名分享頁會把它整包吐出去，等於一個成員可以炸掉整個行程的分享頁與所有成員的頁面。
+-- 故另加 length(custom_path::text) <= 4000，與 legs_polyline_len 的 4000 字元上限同量級。
+-- 座標由應用層四捨五入到 6 位小數（約 0.1 公尺，遠超畫線精度需求）後才寫入，100 點約 2.4KB，
+-- 在 4000 字元內；不收斂精度的話全精度浮點會讓 100 點逼近 4000，卡得太緊。
+-- check constraint 無法逐元素迭代，故只驗「是陣列、長度 ≤ 100、總字元 ≤ 4000」；每個元素是否為
+-- 合法座標由應用層驗證（src/lib/domain/routePath.ts 的 parseCustomPath），渲染層另做防禦性過濾。
 --
 -- 【不需要 GRANT】實測 pg_class.relacl 顯示 legs 是表級 authenticated=arwd，
 -- 且 pg_attribute.attacl 對 legs 完全為空（零欄位級 ACL）。新欄位在表級授權下自動繼承
@@ -43,7 +48,12 @@ alter table public.legs drop constraint if exists legs_custom_path_shape;
 alter table public.legs
   add constraint legs_custom_path_shape check (
     custom_path is null
-    or (jsonb_typeof(custom_path) = 'array' and jsonb_array_length(custom_path) <= 100)
+    or (
+      jsonb_typeof(custom_path) = 'array'
+      and jsonb_array_length(custom_path) <= 100
+      -- 資料量上界：只限個數擋不住「100 個元素、每個 1MB」（審查實測 95MB）
+      and length(custom_path::text) <= 4000
+    )
   );
 
 -- ============ get_shared_trip 白名單補 custom_path ============

@@ -119,4 +119,64 @@ describe.skipIf(!hasEnv)('legs schema 與 stale trigger（需本地 Supabase）'
     const { data } = await owner.from('legs').select('source, stale').eq('trip_id', tripId)
     expect(data!.find(r => r.source === 'manual')!.stale).toBe(true)
   })
+
+  // ---- custom_path（手繪路徑，migration 20260810000000）----
+  // 這三條是 2026-08-11 總審 M-7／m-4 的回歸守門：constraint 原本只限元素個數，實測 100 個元素
+  // 可塞 95MB（任何 editor 都能寫，而分享 RPC 放行此欄 → 一人可炸掉整個行程的分享頁）。
+
+  it('custom_path 正常寫入（6 位小數座標，100 點在字元上限內）', async () => {
+    const legId = await firstLegId()
+    const points = Array.from({ length: 100 }, (_, i) => [33.589712 + i * 1e-6, 130.420717])
+    const { error } = await owner.from('legs').update({ custom_path: points }).eq('id', legId)
+    expect(error).toBeNull()
+    const { data } = await owner.from('legs').select('custom_path').eq('id', legId).single()
+    expect((data!.custom_path as unknown[]).length).toBe(100)
+    await owner.from('legs').update({ custom_path: null }).eq('id', legId)
+  })
+
+  it('超過 100 點被 check 擋下（23514）', async () => {
+    const legId = await firstLegId()
+    const points = Array.from({ length: 101 }, () => [33.589712, 130.420717])
+    const { error } = await owner.from('legs').update({ custom_path: points }).eq('id', legId)
+    expect(error?.code).toBe('23514')
+  })
+
+  it('元素個數合法但資料量過大也被擋下（M-7：100 個元素 × 大字串）', async () => {
+    const legId = await firstLegId()
+    const bloated = Array.from({ length: 100 }, () => 'x'.repeat(1000))
+    const { error } = await owner.from('legs').update({ custom_path: bloated }).eq('id', legId)
+    expect(error?.code).toBe('23514')
+  })
+
+  it('viewer 不能寫 custom_path（欄位隨表級 policy 受 editor 限制）', async () => {
+    const legId = await firstLegId()
+    const suffix = Math.random().toString(36).slice(2, 8)
+    const email = `legs-viewer-${suffix}@test.local`
+    const password = 'test-password-1234'
+    const v = await admin.auth.admin.createUser({ email, password, email_confirm: true })
+    const viewerId = v.data.user!.id
+    await admin.from('trip_members').insert({ trip_id: tripId, user_id: viewerId, role: 'viewer' })
+    const viewer = createClient(url!, anonKey!, { auth: { persistSession: false } })
+    await viewer.auth.signInWithPassword({ email, password })
+
+    const { data, error } = await viewer
+      .from('legs')
+      .update({ custom_path: [[33.5, 130.4]] })
+      .eq('id', legId)
+      .select('id')
+    // RLS 擋下時不報錯、回 0 列（policy 過濾掉該列），不可誤判成成功
+    expect(error).toBeNull()
+    expect(data ?? []).toHaveLength(0)
+    const { data: after } = await owner.from('legs').select('custom_path').eq('id', legId).single()
+    expect(after!.custom_path).toBeNull()
+
+    await admin.auth.admin.deleteUser(viewerId)
+  })
+
+  /** 取本行程任一 leg 的 id——前面的測試已建立過 legs，這裡只需要一個可寫的目標 */
+  async function firstLegId(): Promise<string> {
+    const { data, error } = await owner.from('legs').select('id').eq('trip_id', tripId).limit(1).single()
+    if (error) throw error
+    return data.id
+  }
 })

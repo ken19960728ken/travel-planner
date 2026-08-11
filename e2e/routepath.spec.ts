@@ -132,6 +132,38 @@ test('畫路徑 → 落地 DB → 重新載入仍在 → 分享頁可見 → 還
   expect(sharePageErrors).toEqual([])
   await shareContext.close()
 
+  // ---- C-1 迴歸：存檔後「立刻」再進編輯器，必須看到剛存的點，不是空的 ----
+  // 這是總審實測到的靜默資料遺失：舊版靠 Realtime 的 500ms debounce 才更新 props，那段延遲內
+  // 重進編輯器會讀到空路徑，再存一次就把剛畫的整條蓋掉，且全程無警告。
+  await page.getByRole('button', { name: '編輯路徑' }).click()
+  await expect(page.getByText(/2\/100/)).toBeVisible({ timeout: 10_000 })
+
+  // ---- M-2 迴歸：原生「拖線段中央控制點」插點不得繞過上限 ----
+  // 這裡驗的是攔截機制存在（真正的拖曳互動由單元層的上限判斷守住）；先把點數灌到上限，
+  // 再確認地圖點擊被擋且有提示。
+  await admin.from('legs').update({
+    custom_path: Array.from({ length: 100 }, (_, i) => [33.589712 + i * 1e-6, 130.420717]),
+  }).eq('id', legId)
+  await page.getByRole('button', { name: '取消' }).click()
+  await page.reload()
+  await page.getByText(/無大眾運輸資料/).first().click()
+  await page.getByRole('button', { name: '編輯路徑' }).click()
+  await expect(page.getByText(/100\/100/)).toBeVisible({ timeout: 10_000 })
+  const fullBox = await page.locator('[data-testid="map"]').boundingBox()
+  await page.mouse.click(fullBox!.x + fullBox!.width * 0.2, fullBox!.y + fullBox!.height * 0.82)
+  await expect(page.getByText(/已達上限 100 個/)).toBeVisible({ timeout: 5_000 })
+  await expect(page.getByText(/100\/100/)).toBeVisible() // 沒有變成 101
+
+  // ---- M-5 迴歸：編輯模式下播放鈕必須「停用」而非「按了沒反應」----
+  // 總審指出編輯中播放鈕可按（播放會讓 PlaybackCamera 在使用者畫線時自己移動鏡頭）。
+  // 第一版修法傳 no-op callback，鈕還是看起來可按——那比停用更糟，使用者不知道為何沒動靜。
+  await expect(page.getByRole('button', { name: /播放/ })).toBeDisabled()
+
+  await page.getByRole('button', { name: '取消' }).click()
+  await admin.from('legs').update({ custom_path: [[33.589712, 130.420717], [33.593800, 130.404300]] }).eq('id', legId)
+  await page.reload()
+  await page.getByText(/無大眾運輸資料/).first().click()
+
   // ---- 還原成自動路線 → DB 回 null、✏️ 消失 ----
   await page.getByRole('button', { name: '還原成自動路線' }).click()
   await expect

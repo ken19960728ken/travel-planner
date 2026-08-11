@@ -1493,6 +1493,7 @@ export default function TripView({
         dayView={dayView}
         selectedLegId={selectedLegId}
         onSelectLeg={routeEditing ? NOOP : setSelectedLegId}
+        interactionsDisabled={routeEditing}
       />
     </div>
   )

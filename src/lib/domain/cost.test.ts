@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { totalEstimatedCost, perPersonCost, costByCategory } from './cost'
+import { totalEstimatedCost, perPersonCost, costByCategory, costByParticipant } from './cost'
 import { CATEGORY_ORDER, type StopCategory } from './placeCategory'
 
 describe('totalEstimatedCost', () => {
@@ -103,5 +103,57 @@ describe('costByCategory', () => {
       expect(bucketSum + r.legs).toBe(r.total)
       expect(r.total).toBe(totalEstimatedCost([...stops, ...legs]))
     }
+  })
+})
+
+describe('costByParticipant', () => {
+  const roster = ['p1', 'p2', 'p3']
+
+  it('未指派（null）＝全員均分', () => {
+    expect(costByParticipant([{ estimatedCost: 900, participantIds: null }], roster))
+      .toEqual({ p1: 300, p2: 300, p3: 300 })
+  })
+
+  it('只有部分人參與時，只分攤給他們', () => {
+    expect(costByParticipant([{ estimatedCost: 900, participantIds: ['p1', 'p2'] }], roster))
+      .toEqual({ p1: 450, p2: 450, p3: 0 })
+  })
+
+  it('除不盡時餘數按 id 字典序分給前幾人，總和嚴格等於原金額', () => {
+    const r = costByParticipant([{ estimatedCost: 1000, participantIds: null }], roster)
+    expect(r).toEqual({ p1: 334, p2: 333, p3: 333 })
+    expect(r.p1 + r.p2 + r.p3).toBe(1000)
+  })
+
+  it('分配是決定性的：participantIds 順序不影響結果', () => {
+    const a = costByParticipant([{ estimatedCost: 1000, participantIds: ['p3', 'p1', 'p2'] }], roster)
+    const b = costByParticipant([{ estimatedCost: 1000, participantIds: ['p1', 'p2', 'p3'] }], roster)
+    expect(a).toEqual(b)
+  })
+
+  it('null 花費與 0 一律略過', () => {
+    expect(costByParticipant([
+      { estimatedCost: null, participantIds: null },
+      { estimatedCost: 0, participantIds: null },
+    ], roster)).toEqual({ p1: 0, p2: 0, p3: 0 })
+  })
+
+  it('名冊為空時回空物件', () => {
+    expect(costByParticipant([{ estimatedCost: 900, participantIds: null }], [])).toEqual({})
+  })
+
+  it('未知 id 的指派視同全員（與 resolveStopParticipants 同一套規則，不另開分支）', () => {
+    expect(costByParticipant([{ estimatedCost: 900, participantIds: ['ghost'] }], roster))
+      .toEqual({ p1: 300, p2: 300, p3: 300 })
+  })
+
+  it('不變量：任意組合下 sum(每人應付) === 總額', () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      estimatedCost: (i * 37) % 1000,
+      participantIds: i % 3 === 0 ? null : ['p1', 'p2', 'p3'].slice(0, (i % 3) + 1),
+    }))
+    const total = items.reduce((sum, i) => sum + (i.estimatedCost ?? 0), 0)
+    const per = costByParticipant(items, roster)
+    expect(Object.values(per).reduce((a, b) => a + b, 0)).toBe(total)
   })
 })

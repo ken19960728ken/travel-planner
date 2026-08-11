@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createServiceClient } from '@/lib/supabase/service'
 import { planLegSync, type SyncStop, type SyncLeg } from '@/lib/domain/legSync'
+import { parseRoster } from '@/lib/domain/participants'
 import { buildRouteCacheKey, type RouteQuery } from '@/lib/domain/cacheKey'
 import {
   buildComputeRoutesRequest, parseComputeRoutesResponse, clampTransitDeparture,
@@ -20,6 +21,16 @@ const MAX_GOOGLE_CALLS_PER_SYNC = 5 // 額外上限（次要護欄）：即使�
                                      // 真正的逾時防線是下方 WALL_CLOCK_BUDGET_MS（審查 I-1）；未算完的段留 pending 下次補
 const FETCH_TIMEOUT_MS = 5_000
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // route_cache TTL（Google ToS 上限）
+/** 停留點上限。與 page.tsx 的 .limit(500) 對齊。 */
+const STOP_LIMIT = 500
+/** 交通段上限。**刻意與停留點上限脫鉤**（審查 m-7）：
+ *  改版前 legs ≈ stops − 1，兩個哨兵天然同步；分軌之後 legs 的上界是
+ *  Σ(每人鏈長 − 1) 去重，4 個人交錯指派 200 個停留點就可能超過 500。
+ *  沿用同一個數字會讓這種行程對**所有後續呼叫**回 413——交通段既不建也不清，永久停擺。
+ *  ⚠️ 成本面：分頭會放大 Google Routes 的計費呼叫量（新增一位參與人可能一次觸發數百次計算），
+ *  而每日配額上限目前尚未設定（見 README 已知限制）。這個數字同時是成本的實質上界。 */
+const LEG_LIMIT = 2000
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const rateWindows = new Map<string, RateWindow>()
 
@@ -36,29 +47,43 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const { data: isEditor } = await supabase.rpc('is_trip_editor', { p_trip_id: tripId })
   if (!isEditor) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
 
-  // 讀現況（user client：RLS 生效）。兩查詢互不依賴，平行送出（審查 S-1）。
-  const [{ data: stopRows, error: stopsErr }, { data: legRows, error: legsErr }] = await Promise.all([
+  // 讀現況（user client：RLS 生效）。三查詢互不依賴，平行送出（審查 S-1）。
+  const [
+    { data: stopRows, error: stopsErr },
+    { data: legRows, error: legsErr },
+    { data: tripRow, error: tripErr },
+  ] = await Promise.all([
     supabase
       .from('stops')
-      .select('id, lat, lng, starts_at, ends_at')
+      .select('id, lat, lng, starts_at, ends_at, participant_ids')
       .eq('trip_id', tripId)
       .order('starts_at')
-      .limit(501), // 501 = 500 護欄 + 1 哨兵，藉此偵測「剛好卡在上限」與「真的超過上限」的差異（審查 I-2）
+      .limit(STOP_LIMIT + 1), // +1 哨兵，藉此偵測「剛好卡在上限」與「真的超過上限」的差異（審查 I-2）
     supabase
       .from('legs')
       .select('id, from_stop_id, to_stop_id, mode, source, duration_minutes, departs_at, computed_at, stale, estimated_cost')
       .eq('trip_id', tripId)
       .order('id')
-      .limit(501),
+      .limit(LEG_LIMIT + 1),
+    // 名冊：決定交通段要按幾條時間軸生成（participantPairs）。
+    // 讀失敗必須整個中止而不能退回空名冊——空名冊會讓 planLegSync 退回單軌演算法，
+    // 於是分頭行程的幻影段被「重新建立」、真正的段落被判為脫離配對而刪除。
+    supabase.from('trips').select('participants').eq('id', tripId).maybeSingle(),
   ])
-  if (stopsErr || legsErr) {
+  if (stopsErr || legsErr || tripErr) {
     if (stopsErr) console.error('[legs/sync] stops read failed', { tripId, code: stopsErr.code, message: stopsErr.message })
     if (legsErr) console.error('[legs/sync] legs read failed', { tripId, code: legsErr.code, message: legsErr.message })
+    if (tripErr) console.error('[legs/sync] trip read failed', { tripId, code: tripErr.code, message: tripErr.message })
     return NextResponse.json({ error: 'read failed' }, { status: 500 })
   }
-  // 哨兵命中（審查 I-2）：行程規模超出同步上限，拒絕處理而非悄悄截斷資料造成配對錯亂
-  if ((stopRows?.length ?? 0) > 500 || (legRows?.length ?? 0) > 500) {
-    return NextResponse.json({ error: 'trip too large to sync' }, { status: 413 })
+  // 哨兵命中（審查 I-2）：行程規模超出同步上限，拒絕處理而非悄悄截斷資料造成配對錯亂。
+  // 兩個上限分開判、錯誤訊息分開給（審查 m-7）——分頭行程的 legs 可以遠多於 stops，
+  // 使用者需要知道是「停留點太多」還是「分頭段落太多」才知道怎麼收斂。
+  if ((stopRows?.length ?? 0) > STOP_LIMIT) {
+    return NextResponse.json({ error: 'too many stops to sync', limit: STOP_LIMIT }, { status: 413 })
+  }
+  if ((legRows?.length ?? 0) > LEG_LIMIT) {
+    return NextResponse.json({ error: 'too many legs to sync', limit: LEG_LIMIT }, { status: 413 })
   }
 
   // 牆鐘預算（審查 I-1，R-1 前移）：從 413 閘門之後就起算，讓預算涵蓋下面的結構同步
@@ -72,7 +97,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const stops: SyncStop[] = (stopRows ?? []).map(s => ({
     id: s.id, lat: s.lat, lng: s.lng,
     startsAt: new Date(s.starts_at).getTime(), endsAt: new Date(s.ends_at).getTime(),
+    participantIds: s.participant_ids,
   }))
+  const roster = parseRoster(tripRow?.participants).map(p => p.id)
   const legs: SyncLeg[] = (legRows ?? []).map(l => ({
     id: l.id, fromStopId: l.from_stop_id, toStopId: l.to_stop_id,
     source: l.source as SyncLeg['source'],
@@ -82,7 +109,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     stale: l.stale,
     estimatedCost: l.estimated_cost,
   }))
-  const plan = planLegSync(stops, legs, now)
+  const plan = planLegSync(stops, legs, now, roster)
 
   // 結構同步——一律逐列寫入（legs 表註解的鎖序規約），user client（RLS editor 生效）。
   // 【審查 C-1 強制要求】計算對象在寫入成功「當下」連同起訖與模式一起入列 computeQueue，

@@ -167,6 +167,7 @@ export type Database = {
           locked: boolean
           name: string
           notes: string | null
+          participant_ids: string[] | null
           place_id: string | null
           place_refreshed_at: string | null
           starts_at: string
@@ -186,6 +187,7 @@ export type Database = {
           locked?: boolean
           name: string
           notes?: string | null
+          participant_ids?: string[] | null
           place_id?: string | null
           place_refreshed_at?: string | null
           starts_at: string
@@ -205,6 +207,7 @@ export type Database = {
           locked?: boolean
           name?: string
           notes?: string | null
+          participant_ids?: string[] | null
           place_id?: string | null
           place_refreshed_at?: string | null
           starts_at?: string
@@ -376,6 +379,7 @@ export type Database = {
           end_date: string
           id: string
           owner_id: string | null
+          participants: Json
           share_token: string
           start_date: string
           title: string
@@ -386,6 +390,7 @@ export type Database = {
           end_date: string
           id?: string
           owner_id?: string | null
+          participants?: Json
           share_token?: string
           start_date: string
           title: string
@@ -396,6 +401,7 @@ export type Database = {
           end_date?: string
           id?: string
           owner_id?: string | null
+          participants?: Json
           share_token?: string
           start_date?: string
           title?: string
@@ -421,6 +427,20 @@ export type Database = {
       is_trip_owner: { Args: { p_trip_id: string }; Returns: boolean }
       my_trip_ids: { Args: never; Returns: string[] }
       regenerate_share_token: { Args: { p_trip_id: string }; Returns: string }
+      remove_trip_participant: {
+        Args: { p_participant_id: string; p_trip_id: string }
+        Returns: undefined
+      }
+      upsert_trip_participant: {
+        Args: {
+          p_color: string
+          p_id: string
+          p_name: string
+          p_trip_id: string
+          p_user_id: string | null
+        }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never

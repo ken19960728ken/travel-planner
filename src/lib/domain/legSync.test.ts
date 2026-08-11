@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { adjacentPairs, planLegSync, AUTO_TTL_MS, type SyncStop, type SyncLeg } from './legSync'
+import { adjacentPairs, participantPairs, planLegSync, AUTO_TTL_MS, type SyncStop, type SyncLeg } from './legSync'
 
 const H = 60 * 60 * 1000
 const NOW = Date.UTC(2026, 7, 1, 0)
-const stop = (id: string, s: number, e: number): SyncStop =>
-  ({ id, lat: 33, lng: 130, startsAt: NOW + s * H, endsAt: NOW + e * H })
+const stop = (id: string, s: number, e: number, participantIds: unknown = null): SyncStop =>
+  ({ id, lat: 33, lng: 130, startsAt: NOW + s * H, endsAt: NOW + e * H, participantIds })
 const leg = (over: Partial<SyncLeg>): SyncLeg => ({
   id: 'L', fromStopId: 'a', toStopId: 'b', source: 'auto',
   durationMinutes: 10, departsAtMs: NOW + 2 * H, computedAtMs: NOW, stale: false,
@@ -103,5 +103,55 @@ describe('planLegSync', () => {
     expect(plan.removeAuto).toEqual([])
     expect(plan.markStale).toEqual([])
     expect(plan.recompute).toEqual([])
+  })
+})
+
+describe('participantPairs', () => {
+  const keys = (pairs: Array<[SyncStop, SyncStop]>) => pairs.map(([f, t]) => `${f.id}→${t.id}`).sort()
+
+  it('名冊為空時逐項等同 adjacentPairs（既有行程零變化——最重要的回歸防線）', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4), stop('c', 5, 6)]
+    expect(participantPairs(stops, [])).toEqual(adjacentPairs(stops))
+  })
+
+  it('全員同行（participant_ids 全為 null）時逐項等同 adjacentPairs', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4), stop('c', 5, 6)]
+    expect(participantPairs(stops, ['p1', 'p2'])).toEqual(adjacentPairs(stops))
+  })
+
+  it('純 fork：產生 a→b 與 a→c，不產生幻影的 b→c', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4, ['p1']), stop('c', 3, 4, ['p2'])]
+    expect(keys(participantPairs(stops, ['p1', 'p2']))).toEqual(['a→b', 'a→c'])
+  })
+
+  it('fork 後會合：兩條鏈各自連回共同的終點', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4, ['p1']), stop('c', 3, 4, ['p2']), stop('d', 6, 7)]
+    expect(keys(participantPairs(stops, ['p1', 'p2']))).toEqual(['a→b', 'a→c', 'b→d', 'c→d'])
+  })
+
+  it('同一配對只出現一次（兩人走同一段不重複生成）', () => {
+    const stops = [stop('a', 1, 2, ['p1', 'p2']), stop('b', 3, 4, ['p1', 'p2'])]
+    expect(participantPairs(stops, ['p1', 'p2'])).toHaveLength(1)
+  })
+
+  it('某人只有一個停留點時不產生任何配對（不會連到別人的點）', () => {
+    const stops = [stop('a', 1, 2, ['p1']), stop('b', 3, 4, ['p2']), stop('c', 5, 6, ['p2'])]
+    expect(keys(participantPairs(stops, ['p1', 'p2']))).toEqual(['b→c'])
+  })
+
+  it('planLegSync 帶 roster 時，幻影段（脫離配對的 auto 無花費）進 removeAuto', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4, ['p1']), stop('c', 3, 4, ['p2'])]
+    const phantom = leg({ id: 'phantom', fromStopId: 'b', toStopId: 'c', source: 'auto', estimatedCost: null })
+    const plan = planLegSync(stops, [phantom], NOW, ['p1', 'p2'])
+    expect(plan.removeAuto).toEqual(['phantom'])
+    expect(plan.create.map(c => `${c.fromStopId}→${c.toStopId}`).sort()).toEqual(['a→b', 'a→c'])
+  })
+
+  it('幻影段**有花費**時轉存 manual 而非刪除（使用者資料不可無聲丟失）', () => {
+    const stops = [stop('a', 1, 2), stop('b', 3, 4, ['p1']), stop('c', 3, 4, ['p2'])]
+    const phantom = leg({ id: 'phantom', fromStopId: 'b', toStopId: 'c', source: 'auto', estimatedCost: 1200 })
+    const plan = planLegSync(stops, [phantom], NOW, ['p1', 'p2'])
+    expect(plan.removeAuto).toEqual([])
+    expect(plan.detachAuto).toEqual(['phantom'])
   })
 })

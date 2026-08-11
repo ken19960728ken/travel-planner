@@ -1,12 +1,18 @@
-import { adjacentPairs } from './legSync'
+import { nextIdsByStop } from './legSync'
 import { tripDayKeys, filterDayStops } from './days'
 import { formatLocalTime, localDateKey } from './tz'
-import { totalEstimatedCost, costByCategory } from './cost'
+import { totalEstimatedCost, costByCategory, costByParticipant } from './cost'
+import { parseRoster, resolveStopParticipants, legParticipants, type Participant } from './participants'
 import { legDurationText } from './legStatus'
 import { CATEGORY_ORDER, CATEGORY_LABEL, normalizeCategory, type StopCategory } from './placeCategory'
 
 /** exportRows 屬 domain 層，輸入型別自帶最小欄位（不 import app 層的 TripView/legUi）。 */
-export type ExportTrip = { start_date: string; end_date: string }
+export type ExportTrip = {
+  start_date: string
+  end_date: string
+  /** 參與人名冊。形狀不可信，builder 內用 parseRoster 清洗。 */
+  participants: unknown
+}
 export type ExportStop = {
   id: string
   name: string
@@ -16,6 +22,8 @@ export type ExportStop = {
   estimated_cost: number | null
   notes: string | null
   category: StopCategory
+  /** 誰會去。形狀不可信（來自 DB），一律經 resolveStopParticipants 解讀。 */
+  participant_ids: unknown
 }
 export type ExportLegMode = 'transit' | 'walking' | 'driving' | 'flight' | 'custom'
 export type ExportLeg = {
@@ -32,10 +40,12 @@ export type ExportLeg = {
 /** xlsx 行別模型：discriminated union，逐列對應 exceljs worksheet 的一列。 */
 export type ItineraryRow =
   | { kind: 'day'; label: string }
-  | { kind: 'stop'; time: string; name: string; category: string; stayMinutes: number; cost: number | null; notes: string | null }
-  | { kind: 'leg'; modeLabel: string; durationText: string; cost: number | null; crossDay: string | null; detached: boolean }
+  | { kind: 'stop'; time: string; name: string; category: string; stayMinutes: number; cost: number | null; notes: string | null; participants: string }
+  | { kind: 'leg'; modeLabel: string; durationText: string; cost: number | null; crossDay: string | null; detached: boolean; participants: string }
   | { kind: 'categoryTotal'; label: string; cost: number }
   | { kind: 'total'; cost: number }
+  /** 每人應付（分頭行動的分帳）。排在 total 之後；不變量：sum(participantTotal) === total */
+  | { kind: 'participantTotal'; name: string; cost: number }
 
 const MODE_LABEL: Record<ExportLegMode, string> = {
   transit: '大眾運輸', walking: '步行', driving: '開車', flight: '航班', custom: '自訂',
@@ -48,9 +58,28 @@ const MODE_LABEL: Record<ExportLegMode, string> = {
 export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: ExportLeg[]): ItineraryRow[] {
   const rows: ItineraryRow[] = []
   const stopById = new Map(stops.map(s => [s.id, s]))
-  const nextByStopId = new Map(
-    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-      .map(([f, t]) => [f.id, t.id]),
+  const roster: Participant[] = parseRoster(trip.participants)
+  const rosterIds = roster.map(p => p.id)
+  const whoOf = (s: ExportStop) => resolveStopParticipants(s.participant_ids, rosterIds)
+  /** 「全員」不列出所有名字——共同行程是常態，逐格重複整份名單會把表塞爆而零資訊。 */
+  const nameList = (ids: readonly string[]): string => {
+    if (rosterIds.length === 0) return ''
+    if (ids.length === rosterIds.length) return '全員'
+    return ids.map(id => roster.find(p => p.id === id)?.name ?? '?').join('、')
+  }
+  /** 交通段專用：交集為空時標示「全員（無交集）」而非留白，與分帳側的處理一致。 */
+  const legNameList = (ids: readonly string[]): string => {
+    if (rosterIds.length === 0) return ''
+    if (ids.length === 0) return '全員（無交集）'
+    return nameList(ids)
+  }
+  // participantPairs（非 adjacentPairs）：決定「哪個交通段接在哪個停留點之後」。
+  // 分頭時單軌配對會把甲的停留點接到乙的停留點上，匯出的表會多一列沒有人走過的交通、
+  // 少一列真正走過的（與地圖幻影段是同一個 bug 的匯出版本）。
+  // 多值 Map：分頭時一個停留點有多條出邊（甲往 B、乙往 C），單值 Map 會讓第二條靜默蓋掉第一條
+  const nextIds = nextIdsByStop(
+    stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+    rosterIds,
   )
   const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
   const dayOf = (s: ExportStop) => localDateKey(new Date(s.starts_at).getTime(), s.timezone)
@@ -58,9 +87,15 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
   const legRow = (leg: ExportLeg, day: string, detached: boolean): ItineraryRow => {
     const to = stopById.get(leg.to_stop_id)
     const crossDay = to && dayOf(to) !== day ? `→ ${dayOf(to).slice(5)} ${to.name}` : null
+    const from = stopById.get(leg.from_stop_id)
     return {
       kind: 'leg', modeLabel: MODE_LABEL[leg.mode], durationText: legDurationText(leg),
       cost: leg.estimated_cost, crossDay, detached,
+      // 交通段的參與人＝前後兩個停留點的交集（設計文件 §2：不獨立儲存，結構上不可能矛盾）。
+      // 交集為空只可能出現在「已脫離順序」的段落（起點只有甲、終點只有乙）。此時分帳側是
+      // 算給全員的（維持加總不變量，見 cost.ts），欄位若留白就會變成「沒有人參與、卻每個人
+      // 都付錢」——兩欄必須講同一個故事（審查 m-4）。
+      participants: from && to ? legNameList(legParticipants(whoOf(from), whoOf(to))) : '',
     }
   }
 
@@ -81,17 +116,20 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
         stayMinutes: Math.round((new Date(stop.ends_at).getTime() - new Date(stop.starts_at).getTime()) / 60_000),
         cost: stop.estimated_cost,
         notes: stop.notes,
+        participants: nameList(whoOf(stop)),
       })
-      const nextId = nextByStopId.get(stop.id)
-      const leg = nextId ? legByPair.get(`${stop.id}→${nextId}`) : undefined
-      if (leg) rows.push(legRow(leg, day, false))
+      // 分頭時同一個停留點會有多條出邊，逐條輸出（不是只輸出第一條）
+      for (const nextId of nextIds.get(stop.id) ?? []) {
+        const leg = legByPair.get(`${stop.id}→${nextId}`)
+        if (leg) rows.push(legRow(leg, day, false))
+      }
     }
 
     // Important-2 根治的匯出對應：配對脫離的 leg 不會出現在上面的正常插入位置（legByPair 命中不到，
     // 因為 to_stop_id 不是 from_stop_id 的 nextByStopId），歸屬 from 停留點所屬日，列在該日末尾。
     const detached = legs.filter(l => {
       const from = stopById.get(l.from_stop_id)
-      return from !== undefined && dayOf(from) === day && nextByStopId.get(l.from_stop_id) !== l.to_stop_id
+      return from !== undefined && dayOf(from) === day && !(nextIds.get(l.from_stop_id) ?? []).includes(l.to_stop_id)
     })
     for (const leg of detached) rows.push(legRow(leg, day, true))
   }
@@ -112,5 +150,25 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
     ...legs.map(l => ({ estimatedCost: l.estimated_cost })),
   ])
   rows.push({ kind: 'total', cost: total })
+
+  // 每人應付：每筆花費只分攤給該項目的參與人（交通段取前後停留點的交集）。
+  // 不變量（exportRows.test.ts 鎖住）：sum(participantTotal) === **totalForSplit**，
+  // 在最小單位上嚴格成立。⚠️ 不是 total 列的 cost——後者是原始浮點加總，有小數金額時
+  // 兩者可能差幾分（審查 M-4：舊註解宣稱等於 total，實測 total 100.5 而每人加總 101）。
+  if (roster.length > 0) {
+    const splitItems = [
+      ...stops.map(s => ({ estimatedCost: s.estimated_cost, participantIds: s.participant_ids })),
+      ...legs.map(l => {
+        const from = stopById.get(l.from_stop_id)
+        const to = stopById.get(l.to_stop_id)
+        return {
+          estimatedCost: l.estimated_cost,
+          participantIds: from && to ? legParticipants(whoOf(from), whoOf(to)) : null,
+        }
+      }),
+    ]
+    const perParticipant = costByParticipant(splitItems, rosterIds)
+    for (const p of roster) rows.push({ kind: 'participantTotal', name: p.name, cost: perParticipant[p.id] ?? 0 })
+  }
   return rows
 }

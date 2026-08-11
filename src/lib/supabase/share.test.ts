@@ -17,11 +17,21 @@ function newUserClient(): SupabaseClient {
 
 // migration 的顯式欄位白名單（審查 M-3）；斷言用 Object.keys().sort() 全等鎖住「新增欄位預設外洩」的回歸——
 // 不是「包含」，任何多出或少掉的欄位都要讓測試變紅
-const TRIP_KEYS = ['id', 'title', 'start_date', 'end_date', 'currency'].sort()
+const TRIP_KEYS = [
+  'id', 'title', 'start_date', 'end_date', 'currency',
+  // participants：migration 20260811000000 加入白名單。分享頁重用同一套 TripView 渲染，
+  // 沒有名冊的話旅伴看到的播放圖示會與擁有者不一致。**但只放行 id/name/color**——
+  // 名冊在 DB 裡還有 user_id（auth.users UUID），RPC 逐鍵投影掉了，下方有專門的斷言鎖住。
+  'participants',
+].sort()
 const STOP_KEYS = [
   'id', 'name', 'lat', 'lng', 'place_id', 'is_custom', 'timezone',
   'starts_at', 'ends_at', 'locked', 'estimated_cost', 'category',
+  // participant_ids：同上。停留點沒有指派時值為 null，但 jsonb_build_object 仍產生這個 key
+  'participant_ids',
 ].sort()
+/** 分享頁允許外洩的參與人欄位。刻意不含 user_id。 */
+const SHARED_PARTICIPANT_KEYS = ['id', 'name', 'color'].sort()
 const LEG_KEYS = [
   'id', 'from_stop_id', 'to_stop_id', 'mode', 'duration_minutes', 'distance_meters',
   'detail',
@@ -56,6 +66,7 @@ describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
   let ownerId: string
   let tripId: string
   let shareToken: string
+  let participantId: string
   const suffix = Math.random().toString(36).slice(2, 8)
   const password = 'test-password-1234'
 
@@ -106,6 +117,27 @@ describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
         mode: 'custom', source: 'manual', duration_minutes: 30, estimated_cost: 100,
       })
     if (legErr) throw legErr
+
+    // 名冊必須含**真實的 user_id**，否則下方「不外洩 user_id」的斷言會在空名冊上恆真，
+    // 看起來綠燈但其實什麼都沒測到（share-token-leak 那條測試就是這樣長期假綠的）
+    // 走 RPC 而非 .update({ participants })：審查 M-1 後 participants 已從 trips 的欄位級
+    // UPDATE 授權移除，直接寫會被 PostgREST 靜默忽略（不報錯、資料沒進去，下面的斷言就在
+    // 空名冊上恆真）。改走 RPC 順帶讓這個 fixture 真的覆蓋正式寫入路徑。
+    participantId = crypto.randomUUID()
+    const { error: rosterErr } = await owner.rpc('upsert_trip_participant', {
+      p_trip_id: tripId,
+      p_id: participantId,
+      p_user_id: ownerId,
+      p_name: '分享測試參與人',
+      p_color: '#84cc16',
+    })
+    if (rosterErr) throw rosterErr
+
+    const { error: assignErr } = await owner
+      .from('stops')
+      .update({ participant_ids: [participantId] })
+      .eq('id', stopA.id)
+    if (assignErr) throw assignErr
   })
 
   afterAll(async () => {
@@ -126,6 +158,46 @@ describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
     for (const leg of data.legs) {
       expect(Object.keys(leg).sort()).toEqual(LEG_KEYS)
     }
+  })
+
+  it('editor 無法直接 UPDATE trips.participants（名冊寫入只有 RPC 一條路）', async () => {
+    // 審查 M-1：若這條授權被人補回去，兩支 RPC 的所有驗證（名字空值/長度/控制字元、
+    // color 格式、user_id 必為成員、人數上限）與整段防 lost update 的設計都會被一個
+    // PATCH /trips 繞過。第一版 migration 正是這樣，實測任意垃圾 jsonb 皆可寫入。
+    const before = await owner.from('trips').select('participants').eq('id', tripId).single()
+    const { error } = await owner
+      .from('trips')
+      .update({ participants: [{ id: crypto.randomUUID(), user_id: null, name: '繞過', color: '#000000' }] })
+      .eq('id', tripId)
+    // 42501：欄位級授權下寫入未授權欄位會**明確報錯**，不是靜默忽略（實測更正——
+    // 我原本以為 PostgREST 會默默丟掉那個欄位，那個假設是錯的）
+    expect(error?.code).toBe('42501')
+    const after = await owner.from('trips').select('participants').eq('id', tripId).single()
+    expect(after.data!.participants).toEqual(before.data!.participants)
+  })
+
+  it('editor 仍可正常改行程標題（上面的 revoke 沒有誤傷其他欄位）', async () => {
+    const { error } = await owner.from('trips').update({ title: '分享測試行程' }).eq('id', tripId)
+    expect(error).toBeNull()
+  })
+
+  it('參與人只放行 id/name/color——user_id 是 auth.users UUID，絕不可給匿名訪客', async () => {
+    const { data, error } = await anon.rpc('get_shared_trip', { p_token: shareToken })
+    expect(error).toBeNull()
+    // 前置確認：名冊非空，否則下面的迴圈跑零次而測試假綠
+    expect(data.trip.participants).toHaveLength(1)
+    for (const p of data.trip.participants) {
+      expect(Object.keys(p).sort()).toEqual(SHARED_PARTICIPANT_KEYS)
+    }
+    // 整包序列化再找一次：擋掉「未來有人在巢狀結構某處又把 user_id 帶進來」
+    expect(JSON.stringify(data)).not.toContain(ownerId)
+  })
+
+  it('停留點的參與人指派照常放行（分享頁需要它才能與擁有者顯示一致）', async () => {
+    const { data } = await anon.rpc('get_shared_trip', { p_token: shareToken })
+    const assigned = data.stops.filter((s: { participant_ids: string[] | null }) => s.participant_ids !== null)
+    expect(assigned).toHaveLength(1)
+    expect(assigned[0].participant_ids).toEqual([participantId])
   })
 
   it('亂造 token → null（與撤銷/不存在不可區分，對外一律「連結已失效」）', async () => {

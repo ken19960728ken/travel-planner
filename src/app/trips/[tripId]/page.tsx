@@ -5,6 +5,8 @@ import TripView from './TripView'
 import type { Leg, Stop } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
+import ParticipantsPanel from './ParticipantsPanel'
+import { parseRoster } from '@/lib/domain/participants'
 import type { Candidate } from './CandidatesPanel'
 
 export default async function TripDetailPage({
@@ -21,7 +23,7 @@ export default async function TripDetailPage({
 
   const { data: trip, error: tripError } = await supabase
     .from('trips')
-    .select('id, title, start_date, end_date, currency, share_token')
+    .select('id, title, start_date, end_date, currency, share_token, participants')
     .eq('id', tripId)
     .maybeSingle()
   if (tripError) {
@@ -46,7 +48,7 @@ export default async function TripDetailPage({
     supabase.from('trip_members').select('user_id, role').eq('trip_id', tripId),
     supabase
       .from('stops')
-      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category')
+      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category, participant_ids')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })
@@ -101,6 +103,23 @@ export default async function TripDetailPage({
   // 不然 profiles 失敗會讓所有成員顯示「已離開的成員」、invites 失敗會讓 owner 誤以為沒有邀請連結，兩者都是靜默誤導
   const membersPanelLoadError = Boolean(profilesError || invitesError)
 
+  // 參與人名冊 + 每人被指派到幾個停留點（移除前的後果提示）。在 server 端算完傳純資料下去——
+  // 函式無法序列化給 client component。
+  // 只計「明確指派」。兩層過濾都必要（審查 m-3）：
+  //   (1) participant_ids 為 null 的是共同行程，移除某人不會改變它們；
+  //   (2) 陣列存在但內容全是**已失效的 id** 時，resolveStopParticipants 會回傳整份名冊，
+  //       那一列會替每一個人 +1，提示的數字虛胖成整趟行程。改用明確交集，空的就跳過。
+  const roster = parseRoster(trip.participants)
+  const rosterIds = roster.map(p => p.id)
+  const affectedStopCounts: Record<string, number> = Object.fromEntries(rosterIds.map(id => [id, 0]))
+  for (const s of stops ?? []) {
+    if (!Array.isArray(s.participant_ids)) continue
+    const explicit = (s.participant_ids as unknown[]).filter(
+      (id): id is string => typeof id === 'string' && rosterIds.includes(id),
+    )
+    for (const id of explicit) affectedStopCounts[id] += 1
+  }
+
   return (
     <main className="flex h-screen flex-col">
       <header className="flex flex-col gap-2 border-b p-3 md:flex-row md:items-baseline md:gap-3">
@@ -123,6 +142,13 @@ export default async function TripDetailPage({
         </div>
         <div className="flex items-center gap-2 overflow-x-auto md:contents">
           <ExportButtons tripId={tripId} trip={trip} stops={stops ?? []} legs={(legs ?? []) as Leg[]} disabled={Boolean(stopsError || legsError)} canEdit={canEdit} />
+          <ParticipantsPanel
+            tripId={tripId}
+            roster={roster}
+            members={members}
+            canEdit={canEdit}
+            affectedStopCounts={affectedStopCounts}
+          />
           <MembersPanel
             tripId={tripId}
             currentUserId={user.id}

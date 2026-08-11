@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { buildItineraryRows, type ExportTrip, type ExportStop, type ExportLeg } from './exportRows'
+import { totalForSplit } from './cost'
 
 const TZ = 'Asia/Tokyo' // UTC+9 無夏令，結果與執行機器時區無關
 const trip = (over: Partial<ExportTrip> = {}): ExportTrip => ({
-  start_date: '2026-08-01', end_date: '2026-08-03', ...over,
+  start_date: '2026-08-01', end_date: '2026-08-03', participants: null, ...over,
 })
 const mkStop = (over: Partial<ExportStop> & { id: string; startsAt: number; endsAt: number }): ExportStop => ({
-  name: over.id, timezone: TZ, estimated_cost: null, notes: null, category: 'other',
+  name: over.id, timezone: TZ, estimated_cost: null, notes: null, category: 'other', participant_ids: null,
   starts_at: new Date(over.startsAt).toISOString(), ends_at: new Date(over.endsAt).toISOString(),
   ...over,
 })
@@ -159,5 +160,112 @@ describe('分類欄與分類小計（Plan 7 Task 9）', () => {
     const labels = rows.filter(r => r.kind === 'categoryTotal').map(r => (r.kind === 'categoryTotal' ? `${r.label}:${r.cost}` : ''))
     expect(labels).toContain('交通站:50')
     expect(labels).toContain('交通段:1200')
+  })
+})
+
+describe('buildItineraryRows 參與人', () => {
+  const H = 3_600_000
+  const D = Date.UTC(2026, 7, 1)
+  const P = [
+    { id: 'p1', user_id: null, name: '甲野', color: '#84cc16' },
+    { id: 'p2', user_id: null, name: '乙川', color: '#22c55e' },
+  ]
+
+  it('名冊為空時不加參與人欄內容、也不出每人小計（既有行程零變化）', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01' }),
+      [mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H, estimated_cost: 900 })],
+      [],
+    )
+    expect(rows.filter(r => r.kind === 'participantTotal')).toHaveLength(0)
+    const stopRow = rows.find(r => r.kind === 'stop')!
+    expect(stopRow).toMatchObject({ participants: '' })
+  })
+
+  it('全員的停留點顯示「全員」，不逐一列名（共同行程是常態，列名只會塞爆表格）', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }),
+      [mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H })],
+      [],
+    )
+    expect(rows.find(r => r.kind === 'stop')).toMatchObject({ participants: '全員' })
+  })
+
+  it('分頭的停留點列出實際參與者', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }),
+      [mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H, participant_ids: ['p1'] })],
+      [],
+    )
+    expect(rows.find(r => r.kind === 'stop')).toMatchObject({ participants: '甲野' })
+  })
+
+  it('交通段的參與人取前後停留點的交集', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }),
+      [
+        mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H }),
+        mkStop({ id: 'b', startsAt: D + 4 * H, endsAt: D + 5 * H, participant_ids: ['p2'] }),
+      ],
+      [mkLeg({ id: 'L', from_stop_id: 'a', to_stop_id: 'b' })],
+    )
+    expect(rows.find(r => r.kind === 'leg')).toMatchObject({ participants: '乙川' })
+  })
+
+  it('每人小計排在總計之後，且 sum(每人) === 總計（整數金額，分帳不變量）', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }),
+      [
+        mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H, estimated_cost: 1000 }),
+        mkStop({ id: 'b', startsAt: D + 4 * H, endsAt: D + 5 * H, estimated_cost: 333, participant_ids: ['p1'] }),
+      ],
+      [mkLeg({ id: 'L', from_stop_id: 'a', to_stop_id: 'b', estimated_cost: 77 })],
+    )
+    const totalIdx = rows.findIndex(r => r.kind === 'total')
+    const perRows = rows.filter(r => r.kind === 'participantTotal')
+    expect(rows.findIndex(r => r.kind === 'participantTotal')).toBeGreaterThan(totalIdx)
+    expect(perRows.map(r => r.name)).toEqual(['甲野', '乙川'])
+    const total = (rows[totalIdx] as { cost: number }).cost
+    expect(perRows.reduce((s, r) => s + r.cost, 0)).toBe(total)
+  })
+
+  // 審查 M-4：小數金額下「總計」（原始浮點加總）與「每人應付」（最小單位重算）可能差幾分。
+  // 這裡鎖住的是真正成立的那條：每人加總 === totalForSplit，在最小單位上嚴格相等。
+  it('小數金額：每人小計加總等於分帳基準（最小單位）', () => {
+    const cents = (n: number) => Math.round(n * 100)
+    const stops = [
+      mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H, estimated_cost: 100.5 }),
+      mkStop({ id: 'b', startsAt: D + 4 * H, endsAt: D + 5 * H, estimated_cost: 0.4, participant_ids: ['p1'] }),
+    ]
+    const legs = [mkLeg({ id: 'L', from_stop_id: 'a', to_stop_id: 'b', estimated_cost: 0.15 })]
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }), stops, legs)
+    const perRows = rows.filter(r => r.kind === 'participantTotal')
+    const splitItems = [
+      ...stops.map(s => ({ estimatedCost: s.estimated_cost, participantIds: s.participant_ids })),
+      // 交通段 a→b 的交集：a 全員、b 只有 p1 → 交集 [p1]
+      { estimatedCost: 0.15, participantIds: ['p1'] },
+    ]
+    expect(perRows.reduce((s, r) => s + cents(r.cost), 0)).toBe(cents(totalForSplit(splitItems)))
+  })
+
+  it('分頭時交通列不接到別人的停留點（匯出版的幻影段）', () => {
+    const rows = buildItineraryRows(
+      trip({ start_date: '2026-08-01', end_date: '2026-08-01', participants: P }),
+      [
+        mkStop({ id: 'a', startsAt: D + H, endsAt: D + 2 * H }),
+        mkStop({ id: 'b', startsAt: D + 4 * H, endsAt: D + 5 * H, participant_ids: ['p1'] }),
+        mkStop({ id: 'c', startsAt: D + 4 * H, endsAt: D + 5 * H, participant_ids: ['p2'] }),
+      ],
+      // b→c 是幻影段（沒有人從 b 走到 c）；a→b 與 a→c 才是真的
+      [
+        mkLeg({ id: 'phantom', from_stop_id: 'b', to_stop_id: 'c' }),
+        mkLeg({ id: 'ab', from_stop_id: 'a', to_stop_id: 'b' }),
+      ],
+    )
+    // 幻影段不會出現在正常插入位置，只會被歸到「脫離配對」區塊
+    const inline = rows.filter(r => r.kind === 'leg' && !r.detached)
+    expect(inline).toHaveLength(1)
+    expect(rows.filter(r => r.kind === 'leg' && r.detached)).toHaveLength(1)
   })
 })

@@ -18,12 +18,16 @@
  */
 
 import { parseCustomPath } from './routePath'
+import { parseRoster, resolveStopParticipants } from './participants'
 
 export type SnapshotTrip = {
   title: string
   start_date: string
   end_date: string
   currency: string
+  /** 參與人名冊。宣告為 unknown 是刻意的——來源是 DB／分享 RPC（兩者形狀不同，
+   *  後者少了 user_id），builder 內用 parseRoster 清洗後才落進快照。 */
+  participants: unknown
 }
 
 export type SnapshotStop = {
@@ -39,6 +43,8 @@ export type SnapshotStop = {
   locked: boolean
   notes: string | null
   estimated_cost: number | null
+  /** 誰會去。同上，宣告為 unknown，經 resolveStopParticipants 清洗。 */
+  participant_ids: unknown
 }
 
 export type SnapshotLegMode = 'transit' | 'walking' | 'driving' | 'flight' | 'custom'
@@ -56,6 +62,10 @@ export type SnapshotLeg = {
   custom_path: unknown
 }
 
+/** 快照裡的參與人：**不含 user_id**。下游（回憶專案、匯出檔）沒有任何消費端需要它，
+ *  而它是 auth.users 的 UUID——不收錄就少一個外洩面。 */
+export type SnapshotParticipant = { id: string; name: string; color: string }
+
 export type SnapshotStopOut = {
   id: string
   name: string
@@ -69,6 +79,8 @@ export type SnapshotStopOut = {
   estimated_cost: number | null
   lat?: number
   lng?: number
+  /** 誰會去。全員（或沒有名冊）時不帶這個鍵，與其他 optional 同慣例。 */
+  participant_ids?: string[]
 }
 
 export type SnapshotLegOut = {
@@ -84,15 +96,27 @@ export type SnapshotLegOut = {
   custom_path?: [number, number][]
 }
 
+export type TripSnapshotTripOut = {
+  title: string
+  start_date: string
+  end_date: string
+  currency: string
+  participants: SnapshotParticipant[]
+}
+
 export type TripSnapshot = {
   snapshot_version: 1
-  trip: SnapshotTrip
+  trip: TripSnapshotTripOut
   stops: SnapshotStopOut[]
   legs: SnapshotLegOut[]
 }
 
 /** 純函式：把 trip/stops/legs 凍結成快照/JSON 匯出用的結構。 */
 export function buildTripSnapshot(trip: SnapshotTrip, stops: SnapshotStop[], legs: SnapshotLeg[]): TripSnapshot {
+  // 參與人是使用者資料（非 Google 衍生），與 custom_path 同屬上面那條例外——永久收錄。
+  // 少了它，快照裡的 participant_ids 會變成一堆指不到任何人的 uuid。
+  const roster = parseRoster(trip.participants)
+  const rosterIds = roster.map(p => p.id)
   return {
     snapshot_version: 1,
     trip: {
@@ -100,6 +124,7 @@ export function buildTripSnapshot(trip: SnapshotTrip, stops: SnapshotStop[], leg
       start_date: trip.start_date,
       end_date: trip.end_date,
       currency: trip.currency,
+      participants: roster.map(p => ({ id: p.id, name: p.name, color: p.color })),
     },
     stops: stops.map(s => ({
       id: s.id,
@@ -113,6 +138,11 @@ export function buildTripSnapshot(trip: SnapshotTrip, stops: SnapshotStop[], leg
       notes: s.notes,
       estimated_cost: s.estimated_cost,
       ...(s.is_custom ? { lat: s.lat, lng: s.lng } : {}),
+      // 全員（含沒有名冊）時不帶鍵——那是預設值，逐格寫進去只是把檔案撐大
+      ...(() => {
+        const who = resolveStopParticipants(s.participant_ids, rosterIds)
+        return who.length > 0 && who.length < rosterIds.length ? { participant_ids: who } : {}
+      })(),
     })),
     legs: legs.map(l => {
       // 清洗後才落進快照——快照是永久保存的凍結副本，不讓畸形資料進去

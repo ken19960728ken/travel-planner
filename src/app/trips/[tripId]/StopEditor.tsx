@@ -7,6 +7,8 @@ import { utcMsToWallInput, wallInputToUtcMs } from '@/lib/domain/tz'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
 import { CATEGORY_ICON } from './categoryUi'
+import type { Participant } from '@/lib/domain/participants'
+import ParticipantPicker from './ParticipantPicker'
 import type { Stop } from './TripView'
 
 type Notice = { kind: 'error' | 'success'; text: string } | null
@@ -14,11 +16,14 @@ type Notice = { kind: 'error' | 'success'; text: string } | null
 export default function StopEditor({
   stop,
   currency,
+  roster,
   onDeleted,
   onChanged,
 }: {
   stop: Stop
   currency: string
+  /** 參與人名冊；為空時 ParticipantPicker 整個不渲染 */
+  roster: readonly Participant[]
   onDeleted?: () => void
   onChanged?: () => void
 }) {
@@ -30,6 +35,12 @@ export default function StopEditor({
   const [notes, setNotes] = useState(stop.notes ?? '')
   const [cost, setCost] = useState(stop.estimated_cost?.toString() ?? '')
   const [locked, setLocked] = useState(stop.locked)
+  // stop.participant_ids 型別是 unknown（DB 形狀不可信）。非陣列一律當成 null＝全員，
+  // 與 resolveStopParticipants 的規則一致——這裡不另做「未知 id 過濾」，
+  // 那會讓使用者一打開編輯器就被靜默改寫指派；未知 id 在渲染與計算時才被忽略。
+  const [participantIds, setParticipantIds] = useState<string[] | null>(
+    Array.isArray(stop.participant_ids) ? (stop.participant_ids as string[]) : null,
+  )
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
@@ -57,6 +68,7 @@ export default function StopEditor({
           estimated_cost: cost === '' ? null : Number(cost),
           locked,
           category,
+          participant_ids: participantIds,
         })
         // 樂觀鎖：以「當下 props 值」比對 starts_at/ends_at，防的是本分頁尚未觀察到的
         // 外部改動（跨分頁／協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫。
@@ -135,6 +147,7 @@ export default function StopEditor({
         value={cost}
         onChange={e => setCost(e.target.value)}
       />
+      <ParticipantPicker roster={roster} value={participantIds} onChange={setParticipantIds} disabled={busy} />
       <label className="flex items-center gap-2">
         <input type="checkbox" checked={locked} onChange={e => setLocked(e.target.checked)} />
         🔒 鎖定時間（航班、訂位等不可順延的行程）

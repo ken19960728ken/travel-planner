@@ -147,6 +147,15 @@ describe('costByParticipant', () => {
       .toEqual({ p1: 300, p2: 300, p3: 300 })
   })
 
+  // 端點參與人無交集的交通段（只可能出現在「已脫離順序」的段落：起點只有甲、終點只有乙）。
+  // 交集為空 → resolveStopParticipants 視同全員 → 該筆算給所有人。
+  // 這是**刻意**的：不算給任何人會讓「sum(每人) === 總計」的不變量破掉，帳面對不起來，
+  // 而錢確實花掉了。脫離順序的段落在 UI 上本就另外標示，使用者看得到它的存在。
+  it('端點無交集的交通段算給全員（維持分帳不變量，不是漏判）', () => {
+    expect(costByParticipant([{ estimatedCost: 900, participantIds: [] }], roster))
+      .toEqual({ p1: 300, p2: 300, p3: 300 })
+  })
+
   it('不變量：任意組合下 sum(每人應付) === 總額', () => {
     const items = Array.from({ length: 50 }, (_, i) => ({
       estimatedCost: (i * 37) % 1000,

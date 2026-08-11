@@ -120,13 +120,17 @@ describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
 
     // 名冊必須含**真實的 user_id**，否則下方「不外洩 user_id」的斷言會在空名冊上恆真，
     // 看起來綠燈但其實什麼都沒測到（share-token-leak 那條測試就是這樣長期假綠的）
+    // 走 RPC 而非 .update({ participants })：審查 M-1 後 participants 已從 trips 的欄位級
+    // UPDATE 授權移除，直接寫會被 PostgREST 靜默忽略（不報錯、資料沒進去，下面的斷言就在
+    // 空名冊上恆真）。改走 RPC 順帶讓這個 fixture 真的覆蓋正式寫入路徑。
     participantId = crypto.randomUUID()
-    const { error: rosterErr } = await owner
-      .from('trips')
-      .update({
-        participants: [{ id: participantId, user_id: ownerId, name: '分享測試參與人', color: '#84cc16' }],
-      })
-      .eq('id', tripId)
+    const { error: rosterErr } = await owner.rpc('upsert_trip_participant', {
+      p_trip_id: tripId,
+      p_id: participantId,
+      p_user_id: ownerId,
+      p_name: '分享測試參與人',
+      p_color: '#84cc16',
+    })
     if (rosterErr) throw rosterErr
 
     const { error: assignErr } = await owner
@@ -154,6 +158,27 @@ describe.skipIf(!hasEnv)('get_shared_trip RPC（需本地 Supabase）', () => {
     for (const leg of data.legs) {
       expect(Object.keys(leg).sort()).toEqual(LEG_KEYS)
     }
+  })
+
+  it('editor 無法直接 UPDATE trips.participants（名冊寫入只有 RPC 一條路）', async () => {
+    // 審查 M-1：若這條授權被人補回去，兩支 RPC 的所有驗證（名字空值/長度/控制字元、
+    // color 格式、user_id 必為成員、人數上限）與整段防 lost update 的設計都會被一個
+    // PATCH /trips 繞過。第一版 migration 正是這樣，實測任意垃圾 jsonb 皆可寫入。
+    const before = await owner.from('trips').select('participants').eq('id', tripId).single()
+    const { error } = await owner
+      .from('trips')
+      .update({ participants: [{ id: crypto.randomUUID(), user_id: null, name: '繞過', color: '#000000' }] })
+      .eq('id', tripId)
+    // 42501：欄位級授權下寫入未授權欄位會**明確報錯**，不是靜默忽略（實測更正——
+    // 我原本以為 PostgREST 會默默丟掉那個欄位，那個假設是錯的）
+    expect(error?.code).toBe('42501')
+    const after = await owner.from('trips').select('participants').eq('id', tripId).single()
+    expect(after.data!.participants).toEqual(before.data!.participants)
+  })
+
+  it('editor 仍可正常改行程標題（上面的 revoke 沒有誤傷其他欄位）', async () => {
+    const { error } = await owner.from('trips').update({ title: '分享測試行程' }).eq('id', tripId)
+    expect(error).toBeNull()
   })
 
   it('參與人只放行 id/name/color——user_id 是 auth.users UUID，絕不可給匿名訪客', async () => {

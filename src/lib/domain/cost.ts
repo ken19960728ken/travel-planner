@@ -39,31 +39,67 @@ export function costByCategory(
 
 export type ParticipantCostItem = { estimatedCost: number | null; participantIds: unknown }
 
+/** 分攤用的最小單位倒數：全部金額都是整數時為 1（日圓／新台幣的實務情況），
+ *  只要有任何一筆帶小數就切到 1/100。
+ *
+ *  為何要適應而不是一律用「分」：JPY 沒有小數，1000 ÷ 3 分成 333.34 / 333.33 / 333.33
+ *  是付不出來的金額；一律用整數又會讓 numeric(12,2) 的小數輸入被丟掉（審查 M-4）。
+ *  currency 欄位是自由的三碼字串（init.sql:42），沒有可靠的「這個幣別有幾位小數」來源，
+ *  改由**實際資料**決定精度——使用者真的輸入了小數，就代表這趟行程的幣別有小數。 */
+function splitScale(items: ReadonlyArray<ParticipantCostItem>): number {
+  for (const item of items) {
+    const v = item.estimatedCost ?? 0
+    if (!Number.isInteger(v)) return 100
+  }
+  return 1
+}
+
+/** 分帳用的總額。**必須與 costByParticipant 用同一份基底**，否則兩個數字對不起來。
+ *
+ *  為何不直接用 totalEstimatedCost：後者是原始浮點加總，而分攤是在最小單位上做整數運算。
+ *  審查 M-4 實測：三筆 0.4 的花費，totalEstimatedCost 得 1.2，而舊版分攤先 Math.round(0.4)=0
+ *  再分，每人 0——畫面上「總計 1.2」配「甲 0 / 乙 0」。金額欄位是 numeric(12,2)、
+ *  StopEditor 的輸入框是 step="0.01"，小數是這個系統明確支援的輸入，不是邊界情況。 */
+export function totalForSplit(items: ReadonlyArray<ParticipantCostItem>): number {
+  const scale = splitScale(items)
+  let units = 0
+  for (const item of items) units += Math.round((item.estimatedCost ?? 0) * scale)
+  return units / scale
+}
+
 /** 每筆花費只分攤給該項目的參與人（設計文件 2026-08-11-participants §6）。
  *
- *  【整數分攤，不用浮點除法】這是要拿去分帳的數字，1000 ÷ 3 再加回來不等於 1000。
- *  base = floor(金額 ÷ 人數)，餘數按 participant id **字典序**分給前幾人各 +1——排序讓分配
+ *  【在最小單位上做整數運算】這是要拿去分帳的數字，浮點除法加回來不等於原值。
+ *  精度由 splitScale 依實際資料決定（全整數 → 1，有小數 → 1/100）。
+ *  base = floor(單位 ÷ 人數)，餘數按 participant id **字典序**分給前幾人各 +1——排序讓分配
  *  決定性（同一份資料每次算出同樣的帳，不隨 participantIds 的儲存順序漂移）。
- *  不變量（cost.test.ts 以 50 筆組合鎖住）：sum(每人應付) === totalEstimatedCost(全部)。
  *
- *  金額先 Math.round：JPY/TWD 無小數，這是刻意的簡化（設計文件 §10 殘留風險）。
+ *  不變量（cost.test.ts 以隨機組合 + 小數案例鎖住）：
+ *      sum(每人應付的最小單位) === totalForSplit 的最小單位
+ *  ⚠️ 兩點要注意。一、是 totalForSplit **不是** totalEstimatedCost；舊版註解宣稱對後者成立，
+ *  那是錯的（審查 M-4 實測：total 100.5 而每人加總 101）。二、相等**只在最小單位上嚴格成立**——
+ *  scale 為 100 時把各人的值除回「元」再相加會有浮點誤差（0.4+0.4+0.4 = 1.2000000000000002），
+ *  這是 IEEE 754 的性質，不是分攤演算法的缺陷。顯示層照著各人的值印即可；
+ *  要驗證加總請在最小單位上比較。
+ *
  *  <= 0 一律略過——負數走 Math.floor 會得到反直覺的分配，而 UI 本就不允許負花費。 */
 export function costByParticipant(
   items: ReadonlyArray<ParticipantCostItem>,
   roster: readonly string[],
 ): Record<string, number> {
-  const out: Record<string, number> = Object.fromEntries(roster.map(p => [p, 0]))
-  if (roster.length === 0) return out
+  const acc: Record<string, number> = Object.fromEntries(roster.map(p => [p, 0]))
+  if (roster.length === 0) return acc
+  const scale = splitScale(items)
   for (const item of items) {
-    const amount = Math.round(item.estimatedCost ?? 0)
-    if (amount <= 0) continue
+    const units = Math.round((item.estimatedCost ?? 0) * scale)
+    if (units <= 0) continue
     const who = [...resolveStopParticipants(item.participantIds, roster)].sort()
-    const base = Math.floor(amount / who.length)
-    let remainder = amount - base * who.length
+    const base = Math.floor(units / who.length)
+    let remainder = units - base * who.length
     for (const p of who) {
-      out[p] += base + (remainder > 0 ? 1 : 0)
+      acc[p] += base + (remainder > 0 ? 1 : 0)
       if (remainder > 0) remainder -= 1
     }
   }
-  return out
+  return scale === 1 ? acc : Object.fromEntries(Object.entries(acc).map(([k, v]) => [k, v / scale]))
 }

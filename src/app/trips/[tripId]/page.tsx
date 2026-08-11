@@ -6,7 +6,7 @@ import type { Leg, Stop } from './TripView'
 import ExportButtons from './ExportButtons'
 import MembersPanel, { type Member, type Invite } from './MembersPanel'
 import ParticipantsPanel from './ParticipantsPanel'
-import { parseRoster, resolveStopParticipants } from '@/lib/domain/participants'
+import { parseRoster } from '@/lib/domain/participants'
 import type { Candidate } from './CandidatesPanel'
 
 export default async function TripDetailPage({
@@ -105,14 +105,19 @@ export default async function TripDetailPage({
 
   // 參與人名冊 + 每人被指派到幾個停留點（移除前的後果提示）。在 server 端算完傳純資料下去——
   // 函式無法序列化給 client component。
-  // 只計「明確指派」：resolveStopParticipants 對 participant_ids 為 null 的停留點回傳全員，
-  // 那些是共同行程，移除某人不會改變它們，算進去會讓提示的數字虛胖到整趟行程。
+  // 只計「明確指派」。兩層過濾都必要（審查 m-3）：
+  //   (1) participant_ids 為 null 的是共同行程，移除某人不會改變它們；
+  //   (2) 陣列存在但內容全是**已失效的 id** 時，resolveStopParticipants 會回傳整份名冊，
+  //       那一列會替每一個人 +1，提示的數字虛胖成整趟行程。改用明確交集，空的就跳過。
   const roster = parseRoster(trip.participants)
   const rosterIds = roster.map(p => p.id)
   const affectedStopCounts: Record<string, number> = Object.fromEntries(rosterIds.map(id => [id, 0]))
   for (const s of stops ?? []) {
     if (!Array.isArray(s.participant_ids)) continue
-    for (const id of resolveStopParticipants(s.participant_ids, rosterIds)) affectedStopCounts[id] += 1
+    const explicit = (s.participant_ids as unknown[]).filter(
+      (id): id is string => typeof id === 'string' && rosterIds.includes(id),
+    )
+    for (const id of explicit) affectedStopCounts[id] += 1
   }
 
   return (

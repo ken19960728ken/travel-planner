@@ -905,6 +905,12 @@ export default function TripView({
   // ---- 多軌播放（2026-08-11 參與人）----
   // 名冊為空時只有一條 null 軌道，下面每一步都逐字退回改版前的單軌行為——既有行程零變化。
   // 聚焦某人時也只有一條，成本與單軌相同。
+  // 聚焦對象被移除後清掉 state（審查 m-6）：留著的話 <select value={不存在的 id}> 會讓瀏覽器
+  // 顯示第一項「全部一起」，但 focusedParticipant !== null 又讓下方的顏色圖例被藏起來——
+  // 畫面說全部、圖例卻不在，且永久卡著。沿用本檔既有的 render 期比對樣式，不另開 effect。
+  if (focusedParticipant !== null && !rosterIds.includes(focusedParticipant)) {
+    setFocusedParticipant(null)
+  }
   const trackIds: (string | null)[] =
     rosterIds.length === 0
       ? [null]
@@ -922,6 +928,12 @@ export default function TripView({
    *  **以配對為單位而非相鄰索引**：分頭時同一個停留點會有多條出邊（甲往 B、乙往 C），
    *  索引式的 ordered[i]→ordered[i+1] 迴圈表達不了，會漏掉其中一條並虛構另一條。
    *  memo 讓長 polyline 不逐秒重解（同改版前 completedPaths 的目的）。 */
+  // scopeIds：目前實際在播的人。聚焦某人時只建他的配對（審查 M-6）——用全名冊建的話，
+  // 「只看甲野」會在地圖上同時畫出甲的 A→B 與**乙的 A→C** 兩條紅線，而畫面只有一個甲圖示。
+  const scopeIds = useMemo(
+    () => (focusedParticipant !== null && rosterIds.includes(focusedParticipant) ? [focusedParticipant] : rosterIds),
+    [focusedParticipant, rosterIds],
+  )
   const dayPathByPair = useMemo(() => {
     const dayStops = filterDayStops(stops, activeDay)
     const byId = new globalThis.Map(dayStops.map(s => [s.id, s]))
@@ -929,7 +941,7 @@ export default function TripView({
     const out = new globalThis.Map<string, { toStartsAt: number; path: LatLng[] }>()
     const pairs = participantPairs(
       dayStops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
-      rosterIds,
+      scopeIds,
     )
     for (const [f, t] of pairs) {
       const from = byId.get(f.id)
@@ -945,13 +957,25 @@ export default function TripView({
       })
     }
     return out
-  }, [stops, activeDay, legs, rosterIds])
+  }, [stops, activeDay, legs, scopeIds])
 
   /** 每條軌道在播放頭時刻的分段與位置。逐秒重算（成本低，路徑本身已在 dayPathByPair memo 過）。 */
   const trackViews = trackStops.map(t => {
     const segment = clampedPlayheadMs === null ? null : segmentAt(t.stops, clampedPlayheadMs)
     const pairKey = segment?.kind === 'travel' ? `${segment.fromStopId}→${segment.toStopId}` : null
-    const path = pairKey ? (dayPathByPair.get(pairKey)?.path ?? null) : null
+    // ⚠️ 兩點直線 fallback 不可省（審查 M-5，純既有行程就能觸發）：dayPathByPair 只裝
+    // participantPairs 產出的**相鄰**配對，而 segmentAt 在「當日有時間重疊的停留點」時會配出
+    // 非相鄰的一對（A 09:00-12:00、B 10:00-11:00、C 13:00-14:00，播放頭 12:30 → travel A→C）。
+    // miss 時若回 null，進行中紅線會整段消失、PlaybackCamera 的分段取景也不觸發——
+    // 而橘點仍靠 interpolatePosition 正常移動，症狀是「點在動、線不見了」，最難察覺的退化。
+    // 語義與 dayPathByPair 內的 `?? [fromPos, toPos]` 同一套。
+    const path = pairKey
+      ? (dayPathByPair.get(pairKey)?.path ?? (() => {
+          const f = stopById.get((segment as { fromStopId: string }).fromStopId)
+          const to = stopById.get((segment as { toStopId: string }).toStopId)
+          return f && to ? [{ lat: f.lat, lng: f.lng }, { lat: to.lat, lng: to.lng }] : null
+        })())
+      : null
     const travel = segment?.kind === 'travel' && path ? pathPosition(path, segment.progress) : null
     return {
       participantId: t.participantId,
@@ -965,8 +989,11 @@ export default function TripView({
     }
   })
 
-  /** 主軌道：鏡頭與（名冊為空時的）單一標記樣式沿用它。 */
-  const primary = trackViews[0] ?? null
+  /** 主軌道：鏡頭與（名冊為空時的）單一標記樣式沿用它。
+   *  取**第一個有位置的**而非固定 trackViews[0]（審查 m-1）：名冊第一人當天不在行程時
+   *  （例如先回國），他的軌道 stops 為空 → segmentAt 回 null → pos 為 null → PlaybackCamera
+   *  的邊緣跟隨閘門永遠早退，其他人跑出視窗也不會 panTo。 */
+  const primary = trackViews.find(v => v.pos !== null) ?? trackViews[0] ?? null
   const travelLeg = primary?.leg ?? null
   const travelPos = primary?.travel ?? null
   const playheadDisplayPos = primary?.pos ?? null
@@ -1012,9 +1039,16 @@ export default function TripView({
   // 已走完的段落：當日所有配對中，終點開始時刻早於播放頭者。
   // memo key 取「所有軌道的分段識別」——換段才重算。逐秒重建陣列會讓 PlaybackTrail 的 effect
   // 每秒全量拆建 Polyline（閃爍），這顆 memo 存在的目的就是擋住它。
+  // key 除了各軌道的分段，還要納入「已完成的配對數」（審查 M-6 第二層）：
+  // 聚焦時 segmentKey 只反映被聚焦者的換段，別人的段落完成（toStartsAt <= playhead）不會
+  // 讓 memo 失效，那條紅線要等被聚焦者換段才補畫出來，出現時機與資料無關、看起來像隨機閃現。
+  let completedCount = 0
+  if (clampedPlayheadMs !== null) {
+    for (const v of dayPathByPair.values()) if (v.toStartsAt <= clampedPlayheadMs) completedCount += 1
+  }
   const segmentKey = trackViews
     .map(v => (v.segment === null ? 'none' : v.segment.kind === 'stay' ? `s:${v.segment.stopId}` : `t:${v.pairKey}`))
-    .join('|')
+    .join('|') + `#${completedCount}`
   const completedPaths = useMemo(() => {
     if (clampedPlayheadMs === null) return []
     const out: LatLng[][] = []

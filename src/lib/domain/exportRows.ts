@@ -67,6 +67,12 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
     if (ids.length === rosterIds.length) return '全員'
     return ids.map(id => roster.find(p => p.id === id)?.name ?? '?').join('、')
   }
+  /** 交通段專用：交集為空時標示「全員（無交集）」而非留白，與分帳側的處理一致。 */
+  const legNameList = (ids: readonly string[]): string => {
+    if (rosterIds.length === 0) return ''
+    if (ids.length === 0) return '全員（無交集）'
+    return nameList(ids)
+  }
   // participantPairs（非 adjacentPairs）：決定「哪個交通段接在哪個停留點之後」。
   // 分頭時單軌配對會把甲的停留點接到乙的停留點上，匯出的表會多一列沒有人走過的交通、
   // 少一列真正走過的（與地圖幻影段是同一個 bug 的匯出版本）。
@@ -85,8 +91,11 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
     return {
       kind: 'leg', modeLabel: MODE_LABEL[leg.mode], durationText: legDurationText(leg),
       cost: leg.estimated_cost, crossDay, detached,
-      // 交通段的參與人＝前後兩個停留點的交集（設計文件 §2：不獨立儲存，結構上不可能矛盾）
-      participants: from && to ? nameList(legParticipants(whoOf(from), whoOf(to))) : '',
+      // 交通段的參與人＝前後兩個停留點的交集（設計文件 §2：不獨立儲存，結構上不可能矛盾）。
+      // 交集為空只可能出現在「已脫離順序」的段落（起點只有甲、終點只有乙）。此時分帳側是
+      // 算給全員的（維持加總不變量，見 cost.ts），欄位若留白就會變成「沒有人參與、卻每個人
+      // 都付錢」——兩欄必須講同一個故事（審查 m-4）。
+      participants: from && to ? legNameList(legParticipants(whoOf(from), whoOf(to))) : '',
     }
   }
 
@@ -143,9 +152,11 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
   rows.push({ kind: 'total', cost: total })
 
   // 每人應付：每筆花費只分攤給該項目的參與人（交通段取前後停留點的交集）。
-  // 不變量（exportRows.test.ts 鎖住）：sum(participantTotal) === total 列的 cost。
+  // 不變量（exportRows.test.ts 鎖住）：sum(participantTotal) === **totalForSplit**，
+  // 在最小單位上嚴格成立。⚠️ 不是 total 列的 cost——後者是原始浮點加總，有小數金額時
+  // 兩者可能差幾分（審查 M-4：舊註解宣稱等於 total，實測 total 100.5 而每人加總 101）。
   if (roster.length > 0) {
-    const perParticipant = costByParticipant([
+    const splitItems = [
       ...stops.map(s => ({ estimatedCost: s.estimated_cost, participantIds: s.participant_ids })),
       ...legs.map(l => {
         const from = stopById.get(l.from_stop_id)
@@ -155,7 +166,8 @@ export function buildItineraryRows(trip: ExportTrip, stops: ExportStop[], legs: 
           participantIds: from && to ? legParticipants(whoOf(from), whoOf(to)) : null,
         }
       }),
-    ], rosterIds)
+    ]
+    const perParticipant = costByParticipant(splitItems, rosterIds)
     for (const p of roster) rows.push({ kind: 'participantTotal', name: p.name, cost: perParticipant[p.id] ?? 0 })
   }
   return rows

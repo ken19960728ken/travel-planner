@@ -1,6 +1,6 @@
 'use client'
 
-import { costByCategory, costByParticipant, type CategoryCostItem, type CostItem, type ParticipantCostItem } from '@/lib/domain/cost'
+import { costByCategory, costByParticipant, totalForSplit, type CategoryCostItem, type CostItem, type ParticipantCostItem } from '@/lib/domain/cost'
 import { CATEGORY_ORDER, CATEGORY_LABEL } from '@/lib/domain/placeCategory'
 import type { Participant } from '@/lib/domain/participants'
 import ParticipantChip from './ParticipantChip'
@@ -26,6 +26,10 @@ export default function CostSummary({
 }) {
   const { byCategory, legs: legsTotal, total } = costByCategory(stops, legs)
   const perParticipant = costByParticipant(participantItems, roster.map(p => p.id))
+  // 每人應付的基底必須與它自己的總額一致（審查 M-4）：costByCategory 的 total 是原始浮點加總，
+  // 與分攤用的最小單位基底可能差幾分。並列顯示時取自同一份 totalForSplit，
+  // 否則使用者會看到「明細加不回總計」。
+  const splitTotal = totalForSplit(participantItems)
   if (total === 0) return null
 
   const rows: { label: string; amount: number }[] = [
@@ -52,8 +56,15 @@ export default function CostSummary({
           <span>總計</span>
           <span className="tabular-nums">{currency} {total}</span>
         </li>
-        {/* 每人應付：每筆花費只分攤給該項目的參與人。不變量（cost.test.ts）：加總等於總計，
-            所以這幾列與上面的總計一定對得起來，不會出現「明細加不回總數」的分帳爭議。 */}
+        {/* 每人應付：每筆花費只分攤給該項目的參與人。不變量（cost.test.ts）是在**最小單位**上
+            成立——這幾列加起來等於 splitTotal。splitTotal 與上面的「總計」在有小數金額時可能
+            差幾分（前者以分為單位重算、後者是原始浮點加總），故不同時，另外標示出來。 */}
+        {roster.length > 0 && splitTotal !== total && (
+          <li className="flex justify-between gap-2 text-xs text-gray-400">
+            <span>分帳基準（四捨五入到最小單位）</span>
+            <span className="tabular-nums">{currency} {splitTotal}</span>
+          </li>
+        )}
         {roster.length > 0 && roster.map(p => (
           <li key={p.id} className="flex justify-between gap-2 text-gray-600">
             <span className="flex items-center gap-1">

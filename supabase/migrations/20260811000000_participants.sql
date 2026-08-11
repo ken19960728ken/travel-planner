@@ -34,12 +34,24 @@ alter table public.trips
     and length(participants::text) <= 4000
   );
 
--- ⚠️ trips 是**欄位級**授權（20260803000000_invites_and_grants.sql:83），新欄位不會自動繼承，
--- 必須重下一次涵蓋 participants 的 grant。這與 stops/legs（表級授權，新欄位自動繼承，見
--- 20260803000004_stop_category.sql:10）刻意不同。
--- 漏掉這行的症狀是「儲存沒反應」而非明確報錯——PostgREST 對無權限的欄位是靜默忽略，
--- 不是回 403，所以很難從症狀反推原因。
-grant update (title, start_date, end_date, currency, participants) on public.trips to authenticated;
+-- ⚠️⚠️ **participants 刻意不加進欄位級 UPDATE 授權**（審查 M-1）。
+-- trips 是欄位級授權（20260803000000_invites_and_grants.sql:83），新欄位不會自動繼承——
+-- 這裡「不補 grant」是刻意的，不是遺漏。
+--
+-- 第一版補了 grant，結果與下方兩支 RPC 的存在理由自相矛盾：既然開放直接 UPDATE，
+-- 任何人都能用 PATCH /trips 繞過 RPC 的全部驗證。審查實測寫入成功的垃圾包括：純量元素、
+-- null 元素、缺 id 的物件、空名字、重複 id、任意 user_id、任意 color——trips_participants_shape
+-- 只驗頂層形狀（是陣列 / ≤20 / ≤4000 字元），逐元素一項都攔不下，而 lost update 也一併回來。
+--
+-- 名冊一律走 upsert_trip_participant / remove_trip_participant 寫入。
+-- 若未來要開放直接 UPDATE（例如做名冊排序），必須先把 trips_participants_shape 補到能驗逐元素形狀。
+-- ⚠️ 必須顯式 REVOKE，不能只是「從 grant 清單拿掉」——grant 只會**加**權限，把欄位從清單移除
+-- 對已經授予過的資料庫完全沒有效果。本專案的本地 DB 就跑過含 participants 的第一版，
+-- 重跑修正後的 migration 時那個授權原封不動留著（share.test.ts 的迴歸測試抓到的正是這件事）。
+-- 這一行也讓 migration 對「已套用過舊版」的環境仍然收斂到正確狀態。
+revoke update (participants) on public.trips from authenticated;
+-- 這行保持與 20260803000000:83 完全相同，僅為自我文件化（重下同樣的 grant 是冪等的）：
+grant update (title, start_date, end_date, currency) on public.trips to authenticated;
 
 -- ---------- 指派：stops.participant_ids ----------
 -- null ＝ 全員。**DB 禁止空陣列**——一種語義只有一種表示，不留 null 與 [] 誰是誰的模糊地帶
@@ -66,21 +78,65 @@ create or replace function public.upsert_trip_participant(
   p_trip_id uuid, p_id uuid, p_user_id uuid, p_name text, p_color text)
 returns void language plpgsql security definer set search_path = public, pg_temp as $$
 declare v_entry jsonb;
+declare v_name text;
 begin
   if not public.is_trip_editor(p_trip_id) then
     raise exception 'not authorized' using errcode = '42501';
   end if;
-  if coalesce(btrim(p_name), '') = '' then
+
+  -- 審查 M-4：p_id 為 NULL 時 `e->>'id' = NULL` 恆為 NULL、`not exists(... = NULL)` 恆為真，
+  -- 於是每次呼叫都 append 一筆 {"id": null}。parseRoster 會在 UI 濾掉，所以症狀是
+  -- 「按了新增、名冊沒變、但配額被吃掉」——最難從症狀反推原因的一類 bug。
+  if p_id is null then
+    raise exception 'participant id required' using errcode = '22023';
+  end if;
+
+  -- btrim 的單參數版本**只**移除空格（U+0020），不含 tab／換行（審查 m-3 實測：
+  -- E'\t\n\n' 可以通過「name required」寫進去，播放圖示的首字會是一個 tab）。
+  -- 三處（空值檢查、長度檢查、實際寫入）必須用同一個 v_name，否則檢查的與寫入的不是同一個值。
+  v_name := btrim(p_name, E' \t\n\r\f\v');
+  if coalesce(v_name, '') = '' then
     raise exception 'name required' using errcode = '22023';
   end if;
   -- 名稱長度上限：與 trips_participants_shape 的 4000 字元總量互補。單筆過長會讓總量提早撞頂，
   -- 使用者看到的是「加不進去」而非「這個名字太長」——在這裡明確擋下才給得出有意義的錯誤。
-  if length(btrim(p_name)) > 40 then
+  if length(v_name) > 40 then
     raise exception 'name too long' using errcode = '22023';
+  end if;
+  -- 控制字元在 JSON text 會展開成 \uXXXX（1 字元變 6），把 4000 字元的總量上限放大 6 倍消耗。
+  -- 審查實測：每人 40 個 chr(1) 的名字，第 8 人就撞 23514——20 人的配額實際只剩 7 人。
+  if v_name ~ '[\x00-\x1F\x7F]' then
+    raise exception 'name has control characters' using errcode = '22023';
+  end if;
+
+  -- 審查 M-2：color 原本零驗證，而 get_shared_trip 會把它原封不動吐給**匿名訪客**
+  -- （實測寫入 `red;background:url(...);--"><script>` 成功並外流）。同樣有上述的長度放大問題。
+  -- 用 regex 而非白名單，未來擴色票不必改 DB；格式與 participantUi.ts 的 PARTICIPANT_COLORS 一致。
+  if p_color is null or p_color !~ '^#[0-9a-fA-F]{6}$' then
+    raise exception 'invalid color' using errcode = '22023';
+  end if;
+
+  -- 審查 m-2：user_id 必須真的是這個行程的成員。目前 user_id 沒有任何消費端（分享 RPC 投影掉、
+  -- 快照排除），所以現在無害；但只要未來有一段程式碼用 `roster.find(p => p.user_id === myUid)`
+  -- 判斷「這是我」，未驗證就變成冒名的入口。
+  if p_user_id is not null and not exists (
+       select 1 from public.trip_members m
+        where m.trip_id = p_trip_id and m.user_id = p_user_id) then
+    raise exception 'user is not a trip member' using errcode = '23503';
+  end if;
+
+  -- 審查 m-1：人數上限與資料量上限都會撞 23514，client 無從區分，於是 7 個人的名冊也會
+  -- 顯示「最多 20 人」。人數這一種在這裡先擋掉並給專屬 errcode，23514 留給真正的資料量超限。
+  -- constraint 仍是最終防線（這裡到 UPDATE 之間有 TOCTOU 窗口，由它兜底）。
+  if (select jsonb_array_length(participants) from public.trips where id = p_trip_id) >= 20
+     and not exists (
+       select 1 from public.trips t, jsonb_array_elements(t.participants) e
+        where t.id = p_trip_id and e->>'id' = p_id::text) then
+    raise exception 'roster full' using errcode = 'P0001';
   end if;
 
   v_entry := jsonb_build_object(
-    'id', p_id, 'user_id', p_user_id, 'name', btrim(p_name), 'color', p_color);
+    'id', p_id, 'user_id', p_user_id, 'name', v_name, 'color', p_color);
 
   update public.trips
      set participants = (
@@ -114,6 +170,24 @@ begin
     raise exception 'not authorized' using errcode = '42501';
   end if;
 
+  -- ⚠️⚠️ 審查 C-1（實測復現，唯一一條「一次呼叫、靜默、不可復原」的資料遺失路徑）：
+  -- p_participant_id 為 NULL 時，下方 `e->>'id' is distinct from NULL` 雖已安全，但
+  -- `participant_ids @> array[NULL::uuid]` 仍然一列都不命中。少了這道守衛的第一版更糟——
+  -- 當時用的是 `<>`，NULL 讓 WHERE 濾掉全部元素，名冊被寫成 [] 而所有 stop 的指派原封不動
+  -- 留成孤兒 id，函式還回傳成功。任何 editor 發一次帶 null 的 RPC 就能抹掉整趟行程的名冊。
+  if p_participant_id is null then
+    raise exception 'participant id required' using errcode = '22023';
+  end if;
+
+  -- ⚠️ stops 表註解（20260801000002_cascade_shift_v3.sql:45-48）的硬性約束（審查 M-3）：
+  -- 對 stops 的**多列批次 UPDATE** 必須先取這把鎖，與 cascade_shift_stops 共用同一把，
+  -- 否則與該 RPC 併發時鎖序可能成環。以目前的 plan（兩邊都 ctid 遞增）構造不出實際 deadlock，
+  -- 但那個結論依賴 planner 選擇——任何一次索引調整就可能讓它失效，這正是當初把約束寫進
+  -- 表註解而不是靠推理維持的原因。
+  -- 附帶好處：關掉「A 正在把某人指派給 stop、B 同時移除該人」這條產生孤兒 id 的競態。
+  -- 鎖序仍是 advisory → stops → trips，全 repo 無 trips → stops 的取鎖路徑，不成環。
+  perform pg_advisory_xact_lock(hashtextextended(p_trip_id::text, 0));
+
   -- nullif(…, '{}') 是關鍵：最後一個參與人被移除時該停留點回到 null（全員），而不是產生
   -- 會被 stops_participant_ids_shape 擋下的空陣列讓整個交易失敗。
   -- 語義後果：「只有甲會去」的停留點在甲被移除後變成「全員都去」。這是「無法表達 0 人」的
@@ -126,7 +200,10 @@ begin
      set participants = (
        select coalesce(jsonb_agg(e), '[]'::jsonb)
          from jsonb_array_elements(participants) e
-        where e->>'id' <> p_participant_id::text)
+        -- is distinct from（非 <>）：審查 m-4——`<>` 對畸形元素（缺 id → e->>'id' 為 NULL）
+        -- 求值成 NULL，會被 WHERE 濾掉，於是移除甲的同時順手刪掉一筆使用者沒點的資料。
+        -- upsert 那側是保留畸形元素的，兩支行為必須一致。這也是 C-1 的第二層保險。
+        where e->>'id' is distinct from p_participant_id::text)
    where id = p_trip_id;
 end;
 $$;
@@ -186,12 +263,17 @@ commit;
 --   僅解除格式限制、保留資料：
 --     alter table public.trips drop constraint trips_participants_shape;
 --     alter table public.stops drop constraint stops_participant_ids_shape;
---   移除移除用的 RPC：
+--   移除兩支 RPC（審查 s-1：第一版漏列 upsert，回滾後它仍留在 pg_proc，
+--   呼叫時噴 42703「column participants does not exist」而不是乾淨的 404）：
 --     drop function public.remove_trip_participant(uuid, uuid);
+--     drop function public.upsert_trip_participant(uuid, uuid, uuid, text, text);
 --   完整移除欄位（連同所有指派，不可復原）：
 --     alter table public.trips drop column participants;
 --     alter table public.stops drop column participant_ids;
 --
 -- ⚠️ 回滾順序：要移除欄位，必須**先**把 get_shared_trip 還原成 20260810000000 的版本——
 -- 函式本體引用 t.participants 與 s.participant_ids，欄位不存在時該函式呼叫即報錯，分享頁全面失效。
+-- 【機制，審查 s-2 實測】不還原就直接 drop column **會成功**，不會被 DB 擋下：本函式用字串
+-- 形式的 SQL 本體（as $$ … $$）而非 PG 14+ 的 begin atomic，所以不建立依賴。錯誤會延到第一個
+-- 訪客打開分享頁時才出現。**沒有任何機制會提醒你順序搞反了**，只能靠這段註解。
 -- 何時不該回滾：本 migration 對舊版程式碼完全透明，單獨保留無副作用。

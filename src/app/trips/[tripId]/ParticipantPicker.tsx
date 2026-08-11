@@ -25,16 +25,30 @@ export default function ParticipantPicker({
 }) {
   if (roster.length === 0) return null
 
-  const everyone = value === null
-  const selected = new Set(value ?? [])
+  // ⚠️ 先正規化再做任何判斷（審查 M-7）。value 可能含名冊裡已不存在的 id——協作者在編輯器
+  // 開著時移除某人就會這樣，而 StopEditor 刻意保留 state 裡的未知 id（不在掛載時靜默改寫指派）。
+  // 不正規化的後果實測有二：
+  //   (a) value=['丙'（已移除）] 時勾「甲」→ next 長度 2 === roster 長度 2 → 收斂成 null，
+  //       使用者只勾了甲，結果變成「全員」；
+  //   (b) lastOne 用 selected.size 判斷，value=['丙','甲'] 時 size 為 2 → 甲的核取方塊不 disabled
+  //       → 取消它得到 ['丙']（過得了長度守衛）→ 寫進 DB → resolveStopParticipants 判「全部無效
+  //       → 全員」。使用者以為取消了所有人，實際是全員都去。
+  // 正規化後「所有指派都失效」在 UI 上直接顯示成「全員」，與 resolveStopParticipants 的解讀
+  // 一致——三層守衛不再各說各話。
+  const rosterIds = roster.map(p => p.id)
+  const known = value === null ? null : value.filter(id => rosterIds.includes(id))
+  const effective = known === null || known.length === 0 ? null : known
+
+  const everyone = effective === null
+  const selected = new Set(effective ?? [])
 
   function toggle(id: string) {
     // 從「全員」取消掉一個人：先展開成完整名單再拿掉他
-    const base = value ?? roster.map(p => p.id)
+    const base = effective ?? rosterIds
     const next = base.includes(id) ? base.filter(x => x !== id) : [...base, id]
     if (next.length === 0) return // 至少一人；UI 上該核取方塊已 disabled，這是第二道防線
     // 展開後剛好等於全體時收斂回 null——避免產生「當下等於全員但不會跟著名冊成長」的快照
-    onChange(next.length === roster.length ? null : next)
+    onChange(next.length === rosterIds.length ? null : next)
   }
 
   return (
@@ -45,7 +59,7 @@ export default function ParticipantPicker({
           type="checkbox"
           checked={everyone}
           disabled={disabled}
-          onChange={e => onChange(e.target.checked ? null : roster.map(p => p.id))}
+          onChange={e => onChange(e.target.checked ? null : rosterIds)}
         />
         <span className="text-sm">全員（之後加入的人也算）</span>
       </label>

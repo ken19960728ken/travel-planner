@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { totalEstimatedCost, perPersonCost, costByCategory, costByParticipant } from './cost'
+import { totalEstimatedCost, perPersonCost, costByCategory, costByParticipant, totalForSplit } from './cost'
 import { CATEGORY_ORDER, type StopCategory } from './placeCategory'
 
 describe('totalEstimatedCost', () => {
@@ -156,7 +156,47 @@ describe('costByParticipant', () => {
       .toEqual({ p1: 300, p2: 300, p3: 300 })
   })
 
-  it('不變量：任意組合下 sum(每人應付) === 總額', () => {
+  // 審查 M-4：estimated_cost 是 numeric(12,2)、輸入框是 step="0.01"，小數是明確支援的輸入。
+  // 舊版先 Math.round 到整數再分，導致 total 100.5 而每人加總 101、三筆 0.4 直接歸零。
+  // 在最小單位上比較——scale=100 時把各人的值除回「元」再相加有浮點誤差
+  // （0.4+0.4+0.4 = 1.2000000000000002），那是 IEEE 754 的性質不是演算法缺陷
+  const cents = (n: number) => Math.round(n * 100)
+  const sumCents = (per: Record<string, number>) =>
+    Object.values(per).reduce((s, v) => s + cents(v), 0)
+
+  it('全整數金額時以「元」為單位分攤，不會產生付不出來的 333.34 日圓', () => {
+    const r = costByParticipant([{ estimatedCost: 1000, participantIds: null }], roster)
+    expect(r).toEqual({ p1: 334, p2: 333, p3: 333 })
+  })
+
+  it('小數金額：切到 1/100 分攤，總和在最小單位上嚴格相等', () => {
+    const items = [{ estimatedCost: 100.5, participantIds: ['p1', 'p2'] }]
+    const r = costByParticipant(items, roster)
+    expect(sumCents(r)).toBe(cents(totalForSplit(items)))
+    expect(totalForSplit(items)).toBe(100.5)
+    expect(r).toEqual({ p1: 50.25, p2: 50.25, p3: 0 })
+  })
+
+  it('小額不再被整包丟棄（舊版 Math.round(0.4) = 0 讓三筆 0.4 全歸零）', () => {
+    const items = [
+      { estimatedCost: 0.4, participantIds: null },
+      { estimatedCost: 0.4, participantIds: null },
+      { estimatedCost: 0.4, participantIds: null },
+    ]
+    const r = costByParticipant(items, roster)
+    expect(sumCents(r)).toBe(cents(totalForSplit(items)))
+    expect(sumCents(r)).toBe(120)
+  })
+
+  it('不變量：任意組合（含小數）下 sum(每人應付) === totalForSplit（最小單位）', () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      estimatedCost: ((i * 37) % 1000) + (i % 4) * 0.25,
+      participantIds: i % 3 === 0 ? null : ['p1', 'p2', 'p3'].slice(0, (i % 3) + 1),
+    }))
+    expect(sumCents(costByParticipant(items, roster))).toBe(cents(totalForSplit(items)))
+  })
+
+  it('不變量：整數組合下 sum(每人應付) === 總額', () => {
     const items = Array.from({ length: 50 }, (_, i) => ({
       estimatedCost: (i * 37) % 1000,
       participantIds: i % 3 === 0 ? null : ['p1', 'p2', 'p3'].slice(0, (i % 3) + 1),

@@ -10,7 +10,8 @@ import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
-import { parseRoster } from '@/lib/domain/participants'
+import { parseRoster, resolveStopParticipants, type Participant } from '@/lib/domain/participants'
+import ParticipantChip from './ParticipantChip'
 import { participantPairs } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
@@ -823,6 +824,14 @@ export default function TripView({
   // 本就不同——分享版少了 user_id），下游一律只吃這裡產出的 id 陣列。
   const roster = useMemo(() => parseRoster(trip.participants), [trip.participants])
   const rosterIds = useMemo(() => roster.map(p => p.id), [roster])
+  const rosterById = useMemo(() => new globalThis.Map(roster.map(p => [p.id, p])), [roster])
+  /** 側欄圖章用：只在「不是全員」時回傳人選，全員回空陣列（見呼叫處註解）。 */
+  const stopParticipants = (stop: Stop): Participant[] => {
+    if (rosterIds.length === 0) return []
+    const ids = resolveStopParticipants(stop.participant_ids, rosterIds)
+    if (ids.length === rosterIds.length) return []
+    return ids.map(id => rosterById.get(id)).filter((p): p is Participant => p !== undefined)
+  }
   const nextByStopId = useMemo(
     () => new globalThis.Map(
       // participantPairs（非 adjacentPairs）：單軌配對在分頭時會把甲的停留點接到乙的停留點上，
@@ -1186,6 +1195,11 @@ export default function TripView({
                       </span>
                       <span className="mr-1">{CATEGORY_ICON[normalizeCategory(stop.category)]}</span>
                       <span className="font-medium">{stop.name}</span>
+                      {/* 首字圖章只在「不是全員」時出現。共同行程本就不需標註，每一列都掛滿圖示
+                          反而會讓真正的分頭段落淹沒在雜訊裡 */}
+                      {stopParticipants(stop).map(p => (
+                        <ParticipantChip key={p.id} participant={p} size={16} />
+                      ))}
                     </button>
                     {/* M-3（critic 審查）：writesBlocked 走同一條 canEdit 通道——斷線/讀取失敗時整顆
                         編輯器連同任何已開啟的「確認刪除」狀態一併卸載，寫入路徑物理上不可能被觸發，
@@ -1195,6 +1209,7 @@ export default function TripView({
                         key={stop.id}
                         stop={stop}
                         currency={trip.currency}
+                        roster={roster}
                         onDeleted={() => setSelectedId(null)}
                         onChanged={() => void syncLegs()}
                       />

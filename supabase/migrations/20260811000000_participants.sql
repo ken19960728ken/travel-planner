@@ -69,6 +69,31 @@ alter table public.stops
 -- stops 是表級授權（authenticated=arwd，pg_attribute.attacl 為空），新欄位自動繼承
 -- INSERT/UPDATE/SELECT，不需 column grant。既有 policy「editor 以上可改停留點」自動涵蓋本欄位。
 
+-- ---------- 指派解讀（resolveStopParticipants 的 SQL 對應版） ----------
+-- 應用層的唯一解讀入口是 src/lib/domain/participants.ts 的 resolveStopParticipants；
+-- cascade_shift_stops（20260811000001）在 SQL 裡也要做同一件事，兩份規則必須逐條對齊，
+-- 否則「拖曳會推遲誰」與「畫面上顯示誰會去」會各說各話。三條規則：
+--   1. participant_ids 為 null → 全員
+--   2. 過濾掉名冊裡沒有的 id
+--   3. 過濾後為空 → 全員（否則該停留點不在任何人的鏈上，前後段落會無聲消失）
+-- roster 為空時回空陣列，呼叫端據此退回單軌行為。
+-- immutable：純函式、不讀表，讓 planner 可以在 UPDATE 的 WHERE 裡自由重排與快取。
+create or replace function public.resolve_stop_participants(
+  p_participant_ids uuid[], p_roster uuid[])
+returns uuid[] language sql immutable set search_path = public, pg_temp as $$
+  select case
+    when coalesce(cardinality(p_roster), 0) = 0 then '{}'::uuid[]
+    when p_participant_ids is null then p_roster
+    else coalesce(
+      nullif(
+        (select array_agg(r order by ord)
+           from unnest(p_roster) with ordinality as t(r, ord)
+          where r = any(p_participant_ids)),
+        '{}'::uuid[]),
+      p_roster)
+  end
+$$;
+
 -- ---------- 新增／更新參與人（在 SQL 端合併，不做 client 端 read-modify-write） ----------
 -- 為何是 RPC 而不是 client 讀出整份名冊改完再寫回：後者是典型的 lost update——兩個人同時各自
 -- 加一個參與人，後寫入者會把前一個人加的整個蓋掉，而且沒有任何錯誤。jsonb 欄位也無法用

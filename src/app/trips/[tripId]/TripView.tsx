@@ -1122,7 +1122,13 @@ export default function TripView({
     .filter(l => activeDayStops.some(s => s.id === l.from_stop_id))
 
   // Important-3 根治：Timeline 連接條與側欄交通列的「趕不上」警示同讀這份單一計算來源（審查 M-4）
-  const dayView = buildDayView(activeDayStops, stops, legs, rosterIds)
+  // useMemo：buildDayView 內含 nextIdsByStop（全行程 × 名冊）與 detectConflicts（名冊 × O(N²)），
+  // 沒有 memo 的話每次 render（含每秒播放 tick）都重跑一輪。改版前只是一次 adjacentPairs，
+  // 分軌後在 20 人／500 停留點量級是數十倍（實測 nextIdsByStop 單次 1.5ms）。
+  const dayView = useMemo(
+    () => buildDayView(activeDayStops, stops, legs, rosterIds),
+    [activeDayStops, stops, legs, rosterIds],
+  )
 
   // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
   // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件

@@ -101,7 +101,12 @@ export default function Timeline({
 
   // dayLegs/conflictIds/tightPairs 的計算單一來源：dayView 由 TripView 呼叫 buildDayView 產出
   // （審查 M-4：連接條渲染與側欄警示同讀一份，不各自組裝）
-  const { dayLegs, conflictIds, tightPairs } = dayView
+  const { dayLegs, conflictIds, tightPairs, lanes } = dayView
+  // 分軌版面（審查 M-8）：軌道高度依 lane 數成長。laneCount 為 1 時 h-12（3rem）與改版前
+  // 完全相同——既有行程的版面零變化。每條 lane 固定 2.5rem，加上上下各 0.25rem 內距。
+  const LANE_REM = 2.5
+  const trackHeightRem = lanes.laneCount * LANE_REM + 0.5
+  const laneTopRem = (id: string) => 0.25 + (lanes.laneOf.get(id) ?? 0) * LANE_REM
 
   return (
     <div className="border-t bg-background p-2">
@@ -141,7 +146,11 @@ export default function Timeline({
               {Math.round(drag.deltaMs / 60000)} 分鐘（放開套用，之後行程自動順延）
             </div>
           )}
-          <div ref={trackRef} className={`relative h-12 rounded border ${busy ? 'opacity-60' : ''}`}>
+          <div
+            ref={trackRef}
+            className={`relative rounded border ${busy ? 'opacity-60' : ''}`}
+            style={{ height: `${trackHeightRem}rem` }}
+          >
             {dayStops.map(stop => {
               const s = new Date(stop.starts_at).getTime()
               const e = new Date(stop.ends_at).getTime()
@@ -170,10 +179,19 @@ export default function Timeline({
                   // 使用者一點下去就看不出這格是什麼類型了。
                   // 註：bg-emerald-600 原本是「一般色塊」的預設 fallback，Plan 7 起重新賦義為「景點」；
                   // 分類接上後這個顏色只會在該格真的是景點時出現，語意不衝突。
-                  className={`absolute top-1 bottom-1 touch-none truncate rounded px-1 text-left text-xs text-white ${
+                  className={`absolute touch-none truncate rounded px-1 text-left text-xs text-white ${
                     conflictIds.has(stop.id) ? 'bg-red-600' : CATEGORY_BLOCK_CLASS[normalizeCategory(stop.category)]
                   } ${selectedId === stop.id ? 'ring-2 ring-blue-500' : ''}`}
-                  style={{ left: `${pct(s + offset)}%`, width: `${Math.max(pct(e + offset) - pct(s + offset), 1.5)}%` }}
+                  // top 改由 lane 決定（不再是 top-1 bottom-1）：時間完全相同的兩個色塊在單軌時
+                  // left/width 一模一樣，DOM 後者會整個蓋住前者——下層那格看不到、點不到、拖不動。
+                  // 分頭行動正是這個情境的常態，而它原本靠「衝突紅色」被間接標示；紅色被正確
+                  // 拿掉之後（不同人重疊不是衝突），可辨識性必須由分軌補上（審查 M-8）。
+                  style={{
+                    left: `${pct(s + offset)}%`,
+                    width: `${Math.max(pct(e + offset) - pct(s + offset), 1.5)}%`,
+                    top: `${laneTopRem(stop.id)}rem`,
+                    height: `${LANE_REM - 0.25}rem`,
+                  }}
                 >
                   {stop.locked && '🔒'}
                   {CATEGORY_ICON[normalizeCategory(stop.category)]}
@@ -205,12 +223,18 @@ export default function Timeline({
                       ? '畫路徑中，請先儲存或取消'
                       : `${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`
                   }
-                  className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
+                  className={`absolute z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
                     isDeadZone ? 'pointer-events-none' : ''
                   } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${
                     selectedLegId === leg.id ? 'ring-1 ring-blue-500' : ''
                   }`}
-                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                  // 連接條掛在**出發點所在的 lane** 的垂直中央——fork 的兩條交通段
+                  // （A→B 與 A→C）left 相同，單軌時同樣會疊在一起。
+                  style={{
+                    left: `${leftPct}%`,
+                    width: `${widthPct}%`,
+                    top: `${laneTopRem(to.id) + (LANE_REM - 0.25) / 2}rem`,
+                  }}
                 >
                   {MODE_ICON[leg.mode]}
                   {leg.stale && '⚠️'}

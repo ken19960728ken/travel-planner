@@ -9,14 +9,6 @@ export function totalEstimatedCost(items: CostItem[]): number {
   return items.reduce((sum, item) => sum + (item.estimatedCost ?? 0), 0)
 }
 
-/** 平均每人預估花費；memberCount < 1 時回傳總額，防禦性避免除以 0 或負值。
- *  @deprecated 2026-08-11 起由 costByParticipant 取代——全員均分不考慮分頭行動，
- *  沒去的人也被算進去，分帳會錯。保留是因為刪除與本次改動無關；目前沒有任何 UI 消費端。 */
-export function perPersonCost(total: number, memberCount: number): number {
-  if (memberCount < 1) return total
-  return total / memberCount
-}
-
 /** 帶分類的花費項目（stops 專用；legs 沒有 category）。 */
 export type CategoryCostItem = CostItem & { category: StopCategory }
 

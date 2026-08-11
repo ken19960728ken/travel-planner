@@ -1,6 +1,7 @@
 import type { Stop, Leg } from './TripView'
 import { nextIdsByStop } from '@/lib/domain/legSync'
 import { detectConflicts } from '@/lib/domain/conflicts'
+import { assignLanes, type LaneLayout } from '@/lib/domain/lanes'
 import type { ScheduleWarning } from '@/lib/domain/types'
 
 export type DayView = {
@@ -8,6 +9,9 @@ export type DayView = {
   warnings: ScheduleWarning[]
   conflictIds: Set<string>
   tightPairs: Set<string>
+  /** Timeline 的分軌版面（審查 M-8）：時間重疊的停留點分到不同水平軌道。
+   *  無重疊時 laneCount 恆為 1，Timeline 的高度與版面與改版前完全相同。 */
+  lanes: LaneLayout
 }
 
 /** 當日 leg 配對 + 衝突/趕不上警示的單一計算來源（審查 M-4 根治：Timeline 的連接條渲染與側欄
@@ -55,5 +59,14 @@ export function buildDayView(dayStops: Stop[], stops: Stop[], legs: Leg[], roste
     warnings.filter(w => w.type === 'transit_too_tight').map(w => `${w.fromStopId}→${w.toStopId}`),
   )
 
-  return { dayLegs, warnings, conflictIds, tightPairs }
+  // 分軌只看**時間**不看參與人：真正要解決的是「兩個色塊疊在同一個矩形上，下層看不到也點不到」，
+  // 而那與誰去無關。依參與人分軌反而會在「同一個人的兩段行程重疊」（真衝突）時只給一條 lane，
+  // 把最該看見的那種重疊藏起來。
+  const lanes = assignLanes(dayStops.map(s => ({
+    id: s.id,
+    startsAt: new Date(s.starts_at).getTime(),
+    endsAt: new Date(s.ends_at).getTime(),
+  })))
+
+  return { dayLegs, warnings, conflictIds, tightPairs, lanes }
 }

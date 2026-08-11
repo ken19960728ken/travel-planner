@@ -110,3 +110,31 @@ describe('buildDayView', () => {
     expect(view.dayLegs).toEqual([{ from: a, to: bNextDay, leg: legAB }])
   })
 })
+
+describe('buildDayView 分軌版面（審查 M-8）', () => {
+  it('不重疊的一天 laneCount 為 1（既有行程的 Timeline 版面零變化）', () => {
+    const stops = [stop('a', 9 * HOUR, 10 * HOUR), stop('b', 11 * HOUR, 12 * HOUR)]
+    expect(buildDayView(stops, stops, []).lanes.laneCount).toBe(1)
+  })
+
+  it('分頭的同時段停留點分到不同 lane（單軌時它們會完全疊在一起）', () => {
+    const stops = [
+      stop('a', 9 * HOUR, 10 * HOUR),
+      stop('b', 11 * HOUR, 12 * HOUR),
+      stop('c', 11 * HOUR, 12 * HOUR),
+    ]
+    const { lanes } = buildDayView(stops, stops, [])
+    expect(lanes.laneCount).toBe(2)
+    expect(lanes.laneOf.get('b')).not.toBe(lanes.laneOf.get('c'))
+  })
+
+  it('分軌只看時間不看參與人——同一個人的兩段重疊（真衝突）也會被分開顯示', () => {
+    const stops = [
+      stop('a', 9 * HOUR, 12 * HOUR, { participant_ids: ['p1'] }),
+      stop('b', 10 * HOUR, 13 * HOUR, { participant_ids: ['p1'] }),
+    ]
+    const { lanes, conflictIds } = buildDayView(stops, stops, [], ['p1', 'p2'])
+    expect(lanes.laneCount).toBe(2) // 看得見
+    expect(conflictIds.has('a')).toBe(true) // 而且照樣標紅
+  })
+})

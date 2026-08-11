@@ -160,6 +160,22 @@ test('分頭行動：交通段分軌生成、不產生幻影段、重疊不誤�
   await expect(marker).toHaveText('甲')
   await page.getByLabel('看誰的行程').selectOption({ label: '全部一起' })
 
+  // ---- Timeline 分軌：分頭的兩個色塊不得疊在一起（審查 M-8）----
+  // 單軌時 left/width 完全相同，DOM 後者整個蓋住前者——下層那格看不到、點不到、拖不動。
+  const blockBox = async (name: string) =>
+    page.locator(`[data-stop-block]`, { hasText: name }).boundingBox()
+  const boxA = await blockBox('E2E甲的下午')
+  const boxB = await blockBox('E2E乙的下午')
+  expect(boxA).not.toBeNull()
+  expect(boxB).not.toBeNull()
+  // 時間相同 → 水平位置相同；分軌後**垂直**必須錯開
+  expect(Math.abs(boxA!.x - boxB!.x)).toBeLessThan(2)
+  expect(Math.abs(boxA!.y - boxB!.y)).toBeGreaterThan(10)
+  // 兩格都真的可以點到（不是被蓋住的死區）
+  for (const name of ['E2E甲的下午', 'E2E乙的下午']) {
+    await expect(page.locator('[data-stop-block]', { hasText: name })).toBeVisible()
+  }
+
   // ---- 移除甲野：只指派給他的停留點回到「全員」（null），名冊也一併清掉 ----
   await page.getByRole('button', { name: /參與人（2）/ }).click()
   await expect(page.getByText(/1 個停留點指派了這個人/)).toHaveCount(0) // 尚未按下移除，提示不該先出現

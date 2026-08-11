@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { buildTripSnapshot, type SnapshotTrip, type SnapshotStop, type SnapshotLeg } from './snapshot'
 
 const trip = (over: Partial<SnapshotTrip> = {}): SnapshotTrip => ({
-  title: '九州行', start_date: '2026-08-02', end_date: '2026-08-08', currency: 'JPY', ...over,
+  title: '九州行', start_date: '2026-08-02', end_date: '2026-08-08', currency: 'JPY', participants: null, ...over,
 })
 const mkStop = (over: Partial<SnapshotStop> & { id: string }): SnapshotStop => ({
   name: over.id, lat: 33.59, lng: 130.4, place_id: 'ChIJ-google', is_custom: false,
   timezone: 'Asia/Tokyo', starts_at: '2026-08-02T00:00:00Z', ends_at: '2026-08-02T01:00:00Z',
-  locked: false, notes: null, estimated_cost: null, ...over,
+  locked: false, notes: null, estimated_cost: null, participant_ids: null, ...over,
 })
 const mkLeg = (over: Partial<SnapshotLeg> & { from_stop_id: string; to_stop_id: string }): SnapshotLeg => ({
   mode: 'transit', source: 'auto', estimated_cost: null,
@@ -15,13 +15,13 @@ const mkLeg = (over: Partial<SnapshotLeg> & { from_stop_id: string; to_stop_id: 
 })
 
 describe('buildTripSnapshot', () => {
-  it('trip 只凍結四個計畫欄位，頂層帶 snapshot_version: 1', () => {
+  it('trip 只凍結四個計畫欄位＋名冊，頂層帶 snapshot_version: 1', () => {
     const result = buildTripSnapshot(trip(), [], [])
     expect(result.snapshot_version).toBe(1)
     expect(result.trip).toEqual({
-      title: '九州行', start_date: '2026-08-02', end_date: '2026-08-08', currency: 'JPY',
+      title: '九州行', start_date: '2026-08-02', end_date: '2026-08-08', currency: 'JPY', participants: [],
     })
-    expect(Object.keys(result.trip).sort()).toEqual(['currency', 'end_date', 'start_date', 'title'])
+    expect(Object.keys(result.trip).sort()).toEqual(['currency', 'end_date', 'participants', 'start_date', 'title'])
   })
 
   it('custom 地點的座標是使用者資料，快照收錄 lat/lng', () => {
@@ -106,5 +106,50 @@ describe('buildTripSnapshot', () => {
     const legs = [mkLeg({ from_stop_id: 'A', to_stop_id: 'B', custom_path: 'not-an-array' })]
     const result = buildTripSnapshot(trip(), [mkStop({ id: 'A' }), mkStop({ id: 'B' })], legs)
     expect(result.legs[0]).not.toHaveProperty('custom_path')
+  })
+})
+
+describe('buildTripSnapshot 參與人', () => {
+  const P = [
+    { id: 'p1', user_id: 'u-secret', name: '甲野', color: '#84cc16' },
+    { id: 'p2', user_id: null, name: '乙川', color: '#22c55e' },
+  ]
+
+  it('收錄名冊，但**不含 user_id**（auth.users UUID，下游無消費端）', () => {
+    const result = buildTripSnapshot(trip({ participants: P }), [], [])
+    expect(result.trip.participants).toEqual([
+      { id: 'p1', name: '甲野', color: '#84cc16' },
+      { id: 'p2', name: '乙川', color: '#22c55e' },
+    ])
+    expect(JSON.stringify(result)).not.toContain('u-secret')
+  })
+
+  it('分頭的停留點收錄 participant_ids', () => {
+    const result = buildTripSnapshot(
+      trip({ participants: P }),
+      [mkStop({ id: 'A', participant_ids: ['p1'] })],
+      [],
+    )
+    expect(result.stops[0].participant_ids).toEqual(['p1'])
+  })
+
+  it('全員的停留點不帶 participant_ids 鍵（預設值，逐格寫入只是把檔案撐大）', () => {
+    const result = buildTripSnapshot(trip({ participants: P }), [mkStop({ id: 'A' })], [])
+    expect(result.stops[0]).not.toHaveProperty('participant_ids')
+  })
+
+  it('沒有名冊時，停留點一律不帶 participant_ids 鍵', () => {
+    const result = buildTripSnapshot(trip(), [mkStop({ id: 'A', participant_ids: ['ghost'] })], [])
+    expect(result.trip.participants).toEqual([])
+    expect(result.stops[0]).not.toHaveProperty('participant_ids')
+  })
+
+  it('指向已移除參與人的 id 被清掉（不留指不到人的孤兒外鍵）', () => {
+    const result = buildTripSnapshot(
+      trip({ participants: P }),
+      [mkStop({ id: 'A', participant_ids: ['p1', 'ghost'] })],
+      [],
+    )
+    expect(result.stops[0].participant_ids).toEqual(['p1'])
   })
 })

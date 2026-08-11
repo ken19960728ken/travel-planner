@@ -1,7 +1,9 @@
 'use client'
 
-import { costByCategory, type CategoryCostItem, type CostItem } from '@/lib/domain/cost'
+import { costByCategory, costByParticipant, type CategoryCostItem, type CostItem, type ParticipantCostItem } from '@/lib/domain/cost'
 import { CATEGORY_ORDER, CATEGORY_LABEL } from '@/lib/domain/placeCategory'
+import type { Participant } from '@/lib/domain/participants'
+import ParticipantChip from './ParticipantChip'
 
 /** 分類花費摘要（Plan 7 D5）：六個停留點分類桶 + 獨立的「交通段」桶。
  *  純展示元件——不抓資料、不持有 state、不做圖表；所有數字由 costByCategory 一次算完。
@@ -11,12 +13,19 @@ export default function CostSummary({
   stops,
   legs,
   currency,
+  roster,
+  participantItems,
 }: {
   stops: readonly CategoryCostItem[]
   legs: readonly CostItem[]
   currency: string
+  /** 參與人名冊；為空時不顯示「每人應付」區塊 */
+  roster: readonly Participant[]
+  /** 分帳用的項目（停留點＋交通段，交通段的參與人已由呼叫端取前後交集） */
+  participantItems: readonly ParticipantCostItem[]
 }) {
   const { byCategory, legs: legsTotal, total } = costByCategory(stops, legs)
+  const perParticipant = costByParticipant(participantItems, roster.map(p => p.id))
   if (total === 0) return null
 
   const rows: { label: string; amount: number }[] = [
@@ -43,6 +52,17 @@ export default function CostSummary({
           <span>總計</span>
           <span className="tabular-nums">{currency} {total}</span>
         </li>
+        {/* 每人應付：每筆花費只分攤給該項目的參與人。不變量（cost.test.ts）：加總等於總計，
+            所以這幾列與上面的總計一定對得起來，不會出現「明細加不回總數」的分帳爭議。 */}
+        {roster.length > 0 && roster.map(p => (
+          <li key={p.id} className="flex justify-between gap-2 text-gray-600">
+            <span className="flex items-center gap-1">
+              <ParticipantChip participant={p} size={16} />
+              {p.name}
+            </span>
+            <span className="tabular-nums">{currency} {perParticipant[p.id] ?? 0}</span>
+          </li>
+        ))}
       </ul>
     </details>
   )

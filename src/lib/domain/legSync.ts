@@ -102,3 +102,21 @@ export function planLegSync(
   }
   return plan
 }
+
+/** from → 該停留點的所有後繼（分頭時一條出邊不夠：甲往 B、乙往 C）。
+ *
+ *  取代各處手寫的 `new Map(pairs.map(([f,t]) => [f.id, t.id]))`——那種單值 Map 會讓
+ *  同一個 from 的第二條邊靜默蓋掉第一條，於是側欄／匯出各少一列交通、多一列不存在的交通。
+ *  值一律是陣列（即使只有一個），呼叫端用 includes/迴圈處理，不再有「只有一個後繼」的假設。 */
+export function nextIdsByStop<T extends { id: string; startsAt: number; participantIds: unknown }>(
+  stops: T[],
+  roster: readonly string[],
+): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  for (const [f, t] of participantPairs(stops, roster)) {
+    const list = out.get(f.id)
+    if (list) list.push(t.id)
+    else out.set(f.id, [t.id])
+  }
+  return out
+}

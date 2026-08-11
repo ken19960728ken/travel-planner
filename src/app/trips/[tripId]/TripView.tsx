@@ -10,10 +10,10 @@ import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
-import { parseRoster, resolveStopParticipants, type Participant } from '@/lib/domain/participants'
+import { parseRoster, resolveStopParticipants, legParticipants, type Participant } from '@/lib/domain/participants'
 import { participantColorAt, participantInitial, MERGED_MARKER_COLOR, MERGED_MARKER_TEXT } from './participantUi'
 import ParticipantChip from './ParticipantChip'
-import { participantPairs } from '@/lib/domain/legSync'
+import { participantPairs, nextIdsByStop } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
@@ -835,14 +835,14 @@ export default function TripView({
     if (ids.length === rosterIds.length) return []
     return ids.map(id => rosterById.get(id)).filter((p): p is Participant => p !== undefined)
   }
-  const nextByStopId = useMemo(
-    () => new globalThis.Map(
-      // participantPairs（非 adjacentPairs）：單軌配對在分頭時會把甲的停留點接到乙的停留點上，
-      // 於是側欄與 Timeline 畫出一條沒有人走過的連接條（與 sync 產生幻影段是同一個 bug 的顯示層版本）
-      participantPairs(
-        stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
-        rosterIds,
-      ).map(([f, t]) => [f.id, t.id]),
+  // nextIdsByStop（非 adjacentPairs 的單值 Map）：兩層修正。
+  // (1) 單軌配對在分頭時會把甲的停留點接到乙的停留點上，畫出沒有人走過的連接條；
+  // (2) 單值 Map 表達不了 fork——a→b 與 a→c 都以 a 為 key，後者會靜默蓋掉前者，
+  //     於是側欄少一列交通、多一列不存在的交通。值一律是陣列。
+  const nextIdsByStopId = useMemo(
+    () => nextIdsByStop(
+      stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+      rosterIds,
     ),
     [stops, rosterIds],
   )
@@ -862,8 +862,8 @@ export default function TripView({
   // 的 legs prop 不換新參照 → 其內部 effect 不會每秒重跑、全量拆建 overlays（2026-08-04 總審 M-2）
   const routeLegs = useMemo(() => {
     const activeDayStopIds = new Set(filterDayStops(stops, activeDay).map(s => s.id))
-    return legs.filter(l => activeDayStopIds.has(l.from_stop_id) && nextByStopId.get(l.from_stop_id) === l.to_stop_id)
-  }, [legs, stops, activeDay, nextByStopId])
+    return legs.filter(l => activeDayStopIds.has(l.from_stop_id) && (nextIdsByStopId.get(l.from_stop_id) ?? []).includes(l.to_stop_id))
+  }, [legs, stops, activeDay, nextIdsByStopId])
 
   // 正在手繪路徑的那一段（含其起訖停留點座標，供 RouteEditor 與圖釘高亮使用）
   const editingLegRaw = routeEditingLegId ? (legs.find(l => l.id === routeEditingLegId) ?? null) : null
@@ -1084,7 +1084,7 @@ export default function TripView({
   // Important-2 根治：配對脫離（插入停留點/調整順序）的 legs 不再出現在上面的正常交通列（legByPair
   // 命中不到），過去因此從畫面消失；改收進側欄專屬區塊，過濾出 from 停留點屬 activeDay 者（歸屬規則同 M-4）
   const detachedLegs = legs
-    .filter(l => nextByStopId.get(l.from_stop_id) !== l.to_stop_id)
+    .filter(l => !(nextIdsByStopId.get(l.from_stop_id) ?? []).includes(l.to_stop_id))
     .filter(l => activeDayStops.some(s => s.id === l.from_stop_id))
 
   // Important-3 根治：Timeline 連接條與側欄交通列的「趕不上」警示同讀這份單一計算來源（審查 M-4）
@@ -1223,17 +1223,15 @@ export default function TripView({
           )}
           <ul className="flex flex-col gap-2">
             {activeDayStops.map((stop, i) => {
-              const next = stopById.get(nextByStopId.get(stop.id) ?? '')
-              const leg = next ? legByPair.get(`${stop.id}→${next.id}`) : undefined
-              const crossDay = Boolean(next && !activeDayStops.some(s => s.id === next.id))
-              // Important-3 根治：趕不上警示——命中 dayView.tightPairs 時，兩個數值取自對應的
-              // warning 物件（非重新計算），gapMinutes 可能是小數，顯示前四捨五入
-              const tightWarning = next
-                ? dayView.warnings.find(
-                    (w): w is Extract<typeof w, { type: 'transit_too_tight' }> =>
-                      w.type === 'transit_too_tight' && w.fromStopId === stop.id && w.toStopId === next.id,
-                  )
-                : undefined
+              // 分頭時一個停留點會有多條出邊（甲往 B、乙往 C），逐條渲染——
+              // 舊寫法只取單一 next，第二條交通會整列消失
+              const outgoing = (nextIdsByStopId.get(stop.id) ?? [])
+                .map(nextId => {
+                  const next = stopById.get(nextId)
+                  const leg = next ? legByPair.get(`${stop.id}→${next.id}`) : undefined
+                  return next && leg ? { next, leg } : null
+                })
+                .filter((x): x is { next: Stop; leg: Leg } => x !== null)
               return (
                 <Fragment key={stop.id}>
                   <li
@@ -1276,8 +1274,16 @@ export default function TripView({
                       />
                     )}
                   </li>
-                  {leg && next && (
-                    <li className="pl-5 text-xs">
+                  {outgoing.map(({ next, leg }) => {
+                    const crossDay = !activeDayStops.some(s => s.id === next.id)
+                    // Important-3 根治：趕不上警示——命中 dayView.tightPairs 時，兩個數值取自對應的
+                    // warning 物件（非重新計算），gapMinutes 可能是小數，顯示前無條件捨去
+                    const tightWarning = dayView.warnings.find(
+                      (w): w is Extract<typeof w, { type: 'transit_too_tight' }> =>
+                        w.type === 'transit_too_tight' && w.fromStopId === stop.id && w.toStopId === next.id,
+                    )
+                    return (
+                    <li key={leg.id} className="pl-5 text-xs">
                       <button
                         type="button"
                         aria-pressed={selectedLegId === leg.id}
@@ -1324,7 +1330,8 @@ export default function TripView({
                         />
                       )}
                     </li>
-                  )}
+                    )
+                  })}
                 </Fragment>
               )
             })}
@@ -1343,6 +1350,25 @@ export default function TripView({
             stops={stops.map(s => ({ category: normalizeCategory(s.category), estimatedCost: s.estimated_cost }))}
             legs={legs.map(l => ({ estimatedCost: l.estimated_cost }))}
             currency={trip.currency}
+            roster={roster}
+            // 交通段的參與人＝前後兩個停留點的交集（設計文件 §2），在這裡算好再傳下去——
+            // CostSummary 是純展示元件，不該自己去 join stops
+            participantItems={[
+              ...stops.map(s => ({ estimatedCost: s.estimated_cost, participantIds: s.participant_ids })),
+              ...legs.map(l => {
+                const f = stopById.get(l.from_stop_id)
+                const t = stopById.get(l.to_stop_id)
+                return {
+                  estimatedCost: l.estimated_cost,
+                  participantIds: f && t
+                    ? legParticipants(
+                        resolveStopParticipants(f.participant_ids, rosterIds),
+                        resolveStopParticipants(t.participant_ids, rosterIds),
+                      )
+                    : null,
+                }
+              }),
+            ]}
           />
           {detachedLegs.length > 0 && (
             <details className="mt-2 rounded border p-2" open>

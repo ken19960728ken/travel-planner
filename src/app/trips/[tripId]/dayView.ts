@@ -1,5 +1,5 @@
 import type { Stop, Leg } from './TripView'
-import { participantPairs } from '@/lib/domain/legSync'
+import { nextIdsByStop } from '@/lib/domain/legSync'
 import { detectConflicts } from '@/lib/domain/conflicts'
 import type { ScheduleWarning } from '@/lib/domain/types'
 
@@ -20,20 +20,19 @@ export type DayView = {
  *  停留點上——側欄與 Timeline 會畫出一條沒有人走過的連接條，與 sync 產生幻影段是同一個 bug
  *  的顯示層版本。省略 roster 時退回單軌行為。 */
 export function buildDayView(dayStops: Stop[], stops: Stop[], legs: Leg[], roster: readonly string[] = []): DayView {
-  const nextByStopId = new Map(
-    participantPairs(
-      stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
-      roster,
-    ).map(([f, t]) => [f.id, t.id]),
+  // 多值 Map：分頭時一個停留點有多條出邊，單值 Map 會讓第二條靜默蓋掉第一條
+  const nextIds = nextIdsByStop(
+    stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+    roster,
   )
   const stopById = new Map(stops.map(s => [s.id, s]))
   const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
   const dayLegs = dayStops
-    .map(s => {
-      const next = stopById.get(nextByStopId.get(s.id) ?? '')
+    .flatMap(s => (nextIds.get(s.id) ?? []).map(nextId => {
+      const next = stopById.get(nextId)
       const leg = next ? legByPair.get(`${s.id}→${next.id}`) : undefined
       return next && leg ? { from: s, to: next, leg } : null
-    })
+    }))
     .filter((x): x is NonNullable<typeof x> => x !== null)
 
   const warnings = detectConflicts(

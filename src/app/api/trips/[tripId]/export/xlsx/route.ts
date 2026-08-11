@@ -19,7 +19,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
 
   const { data: trip, error: tripErr } = await supabase
     .from('trips')
-    .select('title, start_date, end_date, currency')
+    .select('title, start_date, end_date, currency, participants')
     .eq('id', tripId)
     .maybeSingle()
   if (tripErr || !trip) return Response.json({ error: 'not found' }, { status: 404 })
@@ -28,7 +28,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
   const [{ data: stopRows, error: stopsErr }, { data: legRows, error: legsErr }] = await Promise.all([
     supabase
       .from('stops')
-      .select('id, name, timezone, starts_at, ends_at, estimated_cost, notes, category')
+      .select('id, name, timezone, starts_at, ends_at, estimated_cost, notes, category, participant_ids')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })
@@ -52,6 +52,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
     { header: '分類', key: 'category', width: 10 },
     { header: '分鐘', key: 'minutes', width: 8 },
     { header: `花費（${trip.currency}）`, key: 'cost', width: 14 },
+    // ⚠️ exceljs 的 columns 是位置對應：新增欄位後，下面每一個 addRow 的物件都必須帶上這個 key。
+    // 漏掉的列不會報錯，只會空白——但若某些列帶、某些列不帶，欄位不會錯位（key 對應非陣列對應），
+    // 只是該格空著。仍逐列補齊，讓「這一列本來就沒有參與人」與「忘了寫」在程式碼上分得出來。
+    { header: '參與人', key: 'participants', width: 18 },
     { header: '備註', key: 'notes', width: 32 },
   ]
   sheet.getRow(1).font = { bold: true }
@@ -62,21 +66,26 @@ export async function GET(_req: Request, { params }: { params: Promise<{ tripId:
   // （不同於沒有型別資訊的 CSV 匯出，那類格式才有公式注入攻擊面）。
   for (const row of rows) {
     if (row.kind === 'day') {
-      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: '', notes: '' })
+      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: '', participants: '', notes: '' })
       r.font = { bold: true }
       r.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } } })
     } else if (row.kind === 'stop') {
-      sheet.addRow({ time: row.time, item: row.name, category: row.category, minutes: row.stayMinutes, cost: row.cost ?? '', notes: row.notes ?? '' })
+      sheet.addRow({ time: row.time, item: row.name, category: row.category, minutes: row.stayMinutes, cost: row.cost ?? '', participants: row.participants, notes: row.notes ?? '' })
     } else if (row.kind === 'leg') {
       const item = `${row.modeLabel} ${row.durationText}${row.crossDay ?? ''}${row.detached ? '（已脫離順序）' : ''}`
-      sheet.addRow({ time: '', item, category: '', minutes: '', cost: row.cost ?? '', notes: '' })
+      sheet.addRow({ time: '', item, category: '', minutes: '', cost: row.cost ?? '', participants: row.participants, notes: '' })
     } else if (row.kind === 'categoryTotal') {
       // 分類小計：淺灰底與 Day 標題區隔（Day 是深灰 E0E0E0），不加粗以免與總計混淆
-      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: row.cost, notes: '' })
+      const r = sheet.addRow({ time: '', item: row.label, category: '', minutes: '', cost: row.cost, participants: '', notes: '' })
       r.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5F5' } } })
-    } else {
-      const r = sheet.addRow({ time: '', item: '總計', category: '', minutes: '', cost: row.cost, notes: '' })
+    } else if (row.kind === 'total') {
+      const r = sheet.addRow({ time: '', item: '總計', category: '', minutes: '', cost: row.cost, participants: '', notes: '' })
       r.font = { bold: true }
+    } else {
+      // 每人應付：縮排一格掛在總計之下。不加粗——它是總計的明細，不是另一個總計。
+      // 名字是使用者輸入，走與其他欄位相同的純字串路徑（見上方防公式注入不變量），
+      // 不可為了排版改用 rich text 或 formula 物件。
+      sheet.addRow({ time: '', item: `　${row.name}`, category: '', minutes: '', cost: row.cost, participants: '', notes: '' })
     }
   }
 

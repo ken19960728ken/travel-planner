@@ -267,7 +267,9 @@ alter table public.stops add column if not exists participant_ids uuid[];
 alter table public.stops drop constraint if exists stops_participant_ids_shape;
 alter table public.stops
   add constraint stops_participant_ids_shape check (
-    participant_ids is null or array_length(participant_ids, 1) between 1 and 20
+    -- ⚠️ 必須用 cardinality 而非 array_length：array_length('{}', 1) 回傳 **NULL** 不是 0，
+    -- 而 CHECK 在運算式為 NULL 時視為通過。本機實測：array_length 版本讓空陣列完全通行。
+    participant_ids is null or cardinality(participant_ids) between 1 and 20
   );
 -- stops 是表級授權（authenticated=arwd，attacl 為空），新欄位自動繼承，不需 column grant。
 

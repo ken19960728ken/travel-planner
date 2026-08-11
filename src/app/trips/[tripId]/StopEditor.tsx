@@ -30,9 +30,13 @@ export default function StopEditor({
   onDeleted?: () => void
   onChanged?: () => void
   /** 順延後續行程。回傳實際被移動的筆數；undefined 代表呼叫端不支援（例如唯讀情境）。 */
-  onShiftFollowing?: (anchorId: string, afterIso: string, deltaMs: number) => Promise<number | null>
+  onShiftFollowing?: (
+    anchorId: string, afterIso: string, deltaMs: number, expectedCount: number,
+  ) => Promise<{ moved: number } | { moved: null; code?: string }>
   /** 有幾筆「會被順延」的後續停留點（已扣除鎖定與不同參與人者），用來決定要不要問、以及提示文案 */
-  followingCount?: (anchorId: string, afterIso: string) => number
+  followingCount?: (
+    anchorId: string, afterIso: string, deltaMs: number, anchorWho: readonly string[],
+  ) => { total: number; outOfRange: number }
 }) {
   const router = useRouter()
   const [name, setName] = useState(stop.name)
@@ -52,7 +56,9 @@ export default function StopEditor({
   /** 儲存成功後，若結束時間有變且後面還有行程，停在這裡等使用者決定要不要一起順延。
    *  刻意**不自動順延**：時間軸拖曳是「你正看著它移動」，編輯器是填表單，
    *  預設幫使用者做大幅改動（例如把某個景點改到下午）並不安全。 */
-  const [pendingCascade, setPendingCascade] = useState<{ afterIso: string; deltaMs: number; count: number } | null>(null)
+  const [pendingCascade, setPendingCascade] = useState<
+    { afterIso: string; deltaMs: number; count: number; outOfRange: number } | null
+  >(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
@@ -65,6 +71,20 @@ export default function StopEditor({
    *
    *  仍然擋得住真正的外部改動：協作者改過之後 DB 的值就不等於我們上次寫入的值，一樣 0 列。 */
   const lockRef = useRef({ startsAt: stop.starts_at, endsAt: stop.ends_at })
+  /** 順延詢問的基準。與 lockRef **刻意分開**——兩者的生命週期不同：
+   *
+   *  - `lockRef` 每次成功寫入就推進（樂觀鎖要比對「DB 現在是什麼」）
+   *  - `cascadeBaseRef` **只在使用者回答詢問框之後才推進**（順延要算的是「距離上次做過順延決策
+   *    以來，總共移動了多少」）
+   *
+   *  混用一份的後果（審查 C-1，無競態即可復現）：A 12:00-13:00、後面 B 14:00-15:00。
+   *  把 A 結束改成 14:00 存檔 → 跳「順延 60 分」；發現打錯，**不回答**、改回 13:00 再存 →
+   *  基準已被推到 14:00，於是 delta 變成 −60，詢問框改問「要一起提前 60 分嗎」。按下去之後
+   *  A 淨變化為零、**B 卻早了一小時**，而畫面顯示綠色的「已順延 1 個行程 ✓」。
+   *  同向的變體則是漏移：兩次各 +1h 只順延 +1h，A 移了 +2h 直接壓到 B 身上。
+   *
+   *  分開之後，未回答就連續編輯會正確累加成一次總量。 */
+  const cascadeBaseRef = useRef({ startsAt: stop.starts_at, endsAt: stop.ends_at })
 
   async function save() {
     if (busyRef.current) return
@@ -76,6 +96,10 @@ export default function StopEditor({
     if (cost !== '' && Number(cost) < 0) return setNotice({ kind: 'error', text: '花費不能是負數' })
     busyRef.current = true
     setBusy(true)
+    // 詢問框的生命週期嚴格綁在「最近一次成功寫入」上（審查 C-2）：不先清掉的話，
+    // 這次儲存若失敗（例如撞上協作者的改動），畫面會同時留著舊的詢問框與新的錯誤訊息，
+    // 使用者按下去等於在別人已經動過的狀態上再疊一次位移。
+    setPendingCascade(null)
     try {
       const supabase = createClient()
       const { data, error } = await supabase
@@ -90,10 +114,12 @@ export default function StopEditor({
           category,
           participant_ids: participantIds,
         })
-        // 樂觀鎖：以「當下 props 值」比對 starts_at/ends_at，防的是本分頁尚未觀察到的
-        // 外部改動（跨分頁／協作者）——比對不到列時 data 為空陣列且無 error，不可再靜默覆寫。
-        // 同分頁的舊表單覆寫（拖曳連鎖）由 TripView 的 moveStop 成功後關閉編輯器負責；
-        // 若未來新增「同分頁改時間但不關編輯器」的寫入路徑，此守衛擋不住，需改為掛載時快照
+        // 樂觀鎖：以 lockRef（掛載時取 props、每次成功寫入後推進）比對 starts_at/ends_at，
+        // 防的是本分頁尚未觀察到的外部改動（跨分頁／協作者）——比對不到列時 data 為空陣列
+        // 且無 error，不可再靜默覆寫。
+        // 註：這裡原本讀的是 props，舊註解也寫「需改為掛載時快照」——那件事已經做了（見
+        // lockRef 的說明）。同分頁的拖曳連鎖仍由 TripView 的 moveStop 成功後關閉編輯器負責；
+        // 本次新增的 shiftFollowingStops 動的是後續停留點、不動錨點，繞不過這道守衛。
         .eq('id', stop.id)
         .eq('starts_at', lockRef.current.startsAt)
         .eq('ends_at', lockRef.current.endsAt)
@@ -111,19 +137,30 @@ export default function StopEditor({
         router.refresh()
         return
       }
-      // 寫入成功：基準推進到剛寫進去的值，讓連續儲存不會誤判成外部衝突
-      const prevEndsAt = lockRef.current.endsAt
+      // 樂觀鎖基準推進到剛寫進去的值，讓連續儲存不會誤判成外部衝突
       lockRef.current = {
         startsAt: new Date(startMs).toISOString(),
         endsAt: new Date(endMs).toISOString(),
       }
       setNotice({ kind: 'success', text: '已儲存 ✓' })
-      // 「後續要不要一起順延」取**結束時間**的變化量（followingShiftMs 的檔頭說明了為什麼
-      // 不是開始時間）。0 就完全不問——例如「提早到但同時離開」，後面本來就不用動。
-      const deltaMs = followingShiftMs(new Date(prevEndsAt).getTime(), endMs)
-      if (deltaMs !== 0 && onShiftFollowing && followingCount) {
-        const count = followingCount(stop.id, stop.starts_at)
-        if (count > 0) setPendingCascade({ afterIso: stop.starts_at, deltaMs, count })
+      // 「後續要不要一起順延」取**結束時間**的變化量（followingShiftMs 的檔頭有四種情況對照表），
+      // 基準是 cascadeBaseRef——不是 props、也不是 lockRef（見該 ref 的說明：審查 C-1）。
+      // afterIso 同樣取基準的開始時間（審查 M-1）：用 props 會在「連續儲存、第一次把錨點挪到
+      // 很後面」時把切點算在舊位置，連錨點前面的行程都被判成後續而一起移動。
+      const base = cascadeBaseRef.current
+      const deltaMs = followingShiftMs(new Date(base.endsAt).getTime(), endMs)
+      const count =
+        deltaMs !== 0 && onShiftFollowing && followingCount
+          // anchorWho 傳**表單當下**的參與人，不是 props（審查 M-1）：同一次儲存也可能改了
+          // 指派，props 還是舊值而 RPC 讀到的是剛寫入的新值，實測「畫面說 1、實際動 2」。
+          // participantIds 為 null＝全員，展開成完整名冊。
+          ? followingCount(stop.id, base.startsAt, deltaMs, participantIds ?? roster.map(p => p.id))
+          : null
+      if (count !== null && count.total > 0) {
+        setPendingCascade({ afterIso: base.startsAt, deltaMs, count: count.total, outOfRange: count.outOfRange })
+      } else {
+        // 沒有可順延的對象（或 delta 為 0）：這一步不會有順延決策，基準直接跟上
+        cascadeBaseRef.current = { ...lockRef.current }
       }
       onChanged?.()
       router.refresh()
@@ -137,6 +174,8 @@ export default function StopEditor({
     if (busyRef.current) return
     busyRef.current = true
     setBusy(true)
+    // 停留點都要被刪了，殘留的順延詢問沒有意義（錨點即將不存在，RPC 會回 P0001）
+    setPendingCascade(null)
     try {
       const supabase = createClient()
       const { error } = await supabase.from('stops').delete().eq('id', stop.id)
@@ -204,6 +243,15 @@ export default function StopEditor({
             {Math.abs(Math.round(pendingCascade.deltaMs / 60000))} 分鐘嗎？
           </span>
           <span className="text-gray-500">鎖定 🔒 的行程不會被移動。</span>
+          {/* 出界警示（審查 M-3）：Timeline 的日期分頁只展開 start_date~end_date，被移出範圍的
+              停留點在側欄與時間軸都沒有任何分頁能顯示它，但花費彙總與匯出照算——
+              使用者只會看到「已順延 N 個行程 ✓」，然後某一筆從此看不到也編不到。 */}
+          {pendingCascade.outOfRange > 0 && (
+            <span className="text-red-600">
+              ⚠ 其中 {pendingCascade.outOfRange} 個會被移出行程的日期範圍，移出後在畫面上看不到
+              （需要先延長行程的結束日期）。
+            </span>
+          )}
           <div className="flex gap-2">
             <button
               className="rounded bg-foreground px-2 py-0.5 text-background disabled:opacity-50"
@@ -213,12 +261,22 @@ export default function StopEditor({
                 busyRef.current = true
                 setBusy(true)
                 try {
-                  const moved = await onShiftFollowing!(stop.id, pendingCascade.afterIso, pendingCascade.deltaMs)
-                  setNotice(
-                    moved === null
-                      ? { kind: 'error', text: '順延失敗，請稍後再試' }
-                      : { kind: 'success', text: `已順延 ${moved} 個行程 ✓` },
+                  const result = await onShiftFollowing!(
+                    stop.id, pendingCascade.afterIso, pendingCascade.deltaMs, pendingCascade.count,
                   )
+                  const verb = pendingCascade.deltaMs > 0 ? '順延' : '提前'
+                  setNotice(
+                    result.moved === null
+                      // 錯誤碼分流（審查 m-3）：這些多半**不是**暫時性的，叫使用者「稍後再試」
+                      // 只會讓他一直重試。40001 是我們自己的一致性守衛，語義最明確。
+                      ? result.code === '40001'
+                        ? { kind: 'error', text: '後續行程在這段時間內被改過了，請重新整理再確認一次' }
+                        : result.code === '42883' || result.code === '42501'
+                          ? { kind: 'error', text: '這個功能目前無法使用，請重新整理頁面' }
+                          : { kind: 'error', text: `${verb}失敗，請稍後再試` }
+                      : { kind: 'success', text: `已${verb} ${result.moved} 個行程 ✓` },
+                  )
+                  cascadeBaseRef.current = { ...lockRef.current }
                 } finally {
                   busyRef.current = false
                   setBusy(false)
@@ -226,12 +284,16 @@ export default function StopEditor({
                 }
               }}
             >
-              一起順延
+              {pendingCascade.deltaMs > 0 ? '一起順延' : '一起提前'}
             </button>
             <button
               className="rounded border px-2 py-0.5 disabled:opacity-50"
               disabled={busy}
-              onClick={() => setPendingCascade(null)}
+              onClick={() => {
+                // 「不順延」也是一次順延決策，基準要跟上——否則下次儲存會把這次的位移再算一遍
+                cascadeBaseRef.current = { ...lockRef.current }
+                setPendingCascade(null)
+              }}
             >
               只改這一筆
             </button>

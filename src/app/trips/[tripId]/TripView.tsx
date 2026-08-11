@@ -14,7 +14,7 @@ import { parseRoster, resolveStopParticipants, legParticipants, type Participant
 import { participantColorAt, participantInitial, MERGED_MARKER_COLOR, MERGED_MARKER_TEXT } from './participantUi'
 import ParticipantChip from './ParticipantChip'
 import { participantPairs, nextIdsByStop } from '@/lib/domain/legSync'
-import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
+import { pendingShiftResolved, countFollowingStops, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
 import PlacePreviewCard from './PlacePreviewCard'
@@ -804,36 +804,51 @@ export default function TripView({
   //  ⚠️ 錨點一律用 **id** 定位，不可用 starts_at 比對：使用者按下「一起順延」時資料已經
   //  refresh 過，錨點的 starts_at 已是新值，靠時間戳會找不到它——或更糟，找到另一筆剛好
   //  同時間的停留點（分頭行程正是同時間多筆的常態）。afterIso 只當「切點」用。
-  const countFollowingStops = (anchorId: string, afterIso: string): number => {
-    const after = new Date(afterIso).getTime()
-    const anchor = stops.find(s => s.id === anchorId)
-    const anchorWho = anchor ? resolveStopParticipants(anchor.participant_ids, rosterIds) : []
-    return stops.filter(s => {
-      if (s.id === anchorId) return false
-      if (s.locked) return false
-      if (new Date(s.starts_at).getTime() <= after) return false
-      if (rosterIds.length === 0) return true
-      return resolveStopParticipants(s.participant_ids, rosterIds).some(id => anchorWho.includes(id))
-    }).length
+  //  判準本體在 domain 層（schedule.ts 的 countFollowingStops），與 RPC 的 WHERE 逐條對齊
+  //  並有表格式測試鎖住；這裡只負責把 app 層的形狀翻譯過去。
+  const countFollowing = (anchorId: string, afterIso: string, deltaMs: number, anchorWho: readonly string[]) => {
+    const dayKeys = tripDayKeys(trip.start_date, trip.end_date)
+    const first = dayKeys[0]
+    const last = dayKeys[dayKeys.length - 1]
+    return countFollowingStops(
+      stops.map(s => ({
+        id: s.id,
+        startsAt: new Date(s.starts_at).getTime(),
+        endsAt: new Date(s.ends_at).getTime(),
+        locked: s.locked,
+        participants: resolveStopParticipants(s.participant_ids, rosterIds),
+      })),
+      {
+        anchorId,
+        afterMs: new Date(afterIso).getTime(),
+        anchorWho,
+        rosterEmpty: rosterIds.length === 0,
+        deltaMs,
+        // 行程可顯示的範圍：Timeline 只展開 start_date~end_date 的日期分頁，
+        // 被移出去的停留點在側欄與時間軸都沒有任何分頁能顯示（審查 M-3）
+        range: { startMs: Date.parse(`${first}T00:00:00Z`), endMs: Date.parse(`${last}T23:59:59Z`) },
+      },
+    )
   }
 
-  /** 順延後續行程（側欄編輯器改完時間後由使用者確認觸發）。回傳實際移動筆數，失敗回 null。 */
-  const shiftFollowingStops = async (anchorId: string, afterIso: string, deltaMs: number): Promise<number | null> => {
-    if (!canEdit || writesBlocked) return null
+  /** 順延後續行程（側欄編輯器改完時間後由使用者確認觸發）。
+   *  回傳實際移動筆數；失敗時回傳 PostgREST 的錯誤碼供呼叫端給出對症的文案（審查 m-3）。 */
+  const shiftFollowingStops = async (
+    anchorId: string, afterIso: string, deltaMs: number, expectedCount: number,
+  ): Promise<{ moved: number } | { moved: null; code?: string }> => {
+    if (!canEdit || writesBlocked) return { moved: null, code: 'blocked' }
     const supabase = createClient()
     const { data, error } = await supabase.rpc('shift_following_stops', {
       p_trip_id: trip.id,
       p_anchor_stop_id: anchorId,
       p_after: afterIso,
       p_delta_seconds: Math.round(deltaMs / 1000),
+      p_expected_count: expectedCount,
     })
-    if (error) {
-      console.error('[shiftFollowingStops]', { code: error.code, message: error.message })
-      return null
-    }
+    if (error) return { moved: null, code: error.code }
     void syncLegs()
     router.refresh()
-    return data ?? 0
+    return { moved: data ?? 0 }
   }
 
   // 切換 Day：連動重置播放頭、播放狀態，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
@@ -1346,7 +1361,7 @@ export default function TripView({
                         stop={stop}
                         currency={trip.currency}
                         roster={roster}
-                        followingCount={countFollowingStops}
+                        followingCount={countFollowing}
                         onShiftFollowing={shiftFollowingStops}
                         onDeleted={() => setSelectedId(null)}
                         onChanged={() => void syncLegs()}

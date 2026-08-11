@@ -87,3 +87,52 @@ export function pendingShiftResolved(
 export function followingShiftMs(oldEndsAtMs: number, newEndsAtMs: number): number {
   return newEndsAtMs - oldEndsAtMs
 }
+
+/** 「一起順延」會影響幾筆，以及其中幾筆會被移出行程的日期範圍。
+ *
+ *  【為何在 domain 層】這份判準必須與 shift_following_stops 的 WHERE **逐條一致**——
+ *  使用者是看著詢問框上那個數字決定要不要按的，對不起來就是在騙人。埋在 client component
+ *  裡沒辦法用表格式測試逐條鎖住，而這正是最容易隨改動漂移的一段（cascadeShift 當年抽到
+ *  domain 層是同一個理由）。RPC 端另有 p_expected_count 守衛作為第二道防線。
+ *
+ *  【anchorWho 由呼叫端傳入，不從 stops 裡查】審查 M-1：同一次儲存可能**也改了錨點的參與人
+ *  指派**，此時 stops（props）裡還是舊指派，而 RPC 讀到的是已寫入的新指派。實測「畫面說 1、
+ *  實際動 2」，另一條分軌的行程被推遲。所以要傳表單當下的值。 */
+export type FollowingStop = {
+  id: string
+  startsAt: number
+  endsAt: number
+  locked: boolean
+  /** 已解讀過的參與人（roster 的子集）；名冊為空時傳空陣列 */
+  participants: readonly string[]
+}
+
+export function countFollowingStops(
+  stops: readonly FollowingStop[],
+  opts: {
+    anchorId: string
+    /** 錨點編輯**前**的開始時間（切點） */
+    afterMs: number
+    /** 錨點當下的參與人（表單值，不是 props） */
+    anchorWho: readonly string[]
+    /** 名冊是否為空——為空時不做參與人過濾 */
+    rosterEmpty: boolean
+    /** 順延量；用來判斷會不會被移出行程範圍 */
+    deltaMs: number
+    /** 行程可顯示的時間範圍（含頭尾）。超出這個範圍的停留點在 UI 上沒有任何分頁能顯示 */
+    range: { startMs: number; endMs: number }
+  },
+): { total: number; outOfRange: number } {
+  let total = 0
+  let outOfRange = 0
+  for (const s of stops) {
+    if (s.id === opts.anchorId) continue
+    if (s.locked) continue
+    if (s.startsAt <= opts.afterMs) continue
+    if (!opts.rosterEmpty && !s.participants.some(id => opts.anchorWho.includes(id))) continue
+    total += 1
+    const movedStart = s.startsAt + opts.deltaMs
+    if (movedStart < opts.range.startMs || movedStart > opts.range.endMs) outOfRange += 1
+  }
+  return { total, outOfRange }
+}

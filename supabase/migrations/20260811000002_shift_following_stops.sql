@@ -16,13 +16,28 @@
 -- 【分軌】與 cascade_shift_stops（20260811000001）同一套判準：只順延「與錨點有共同參與人」
 -- 的後續停留點。名冊為空時全部順延。兩支必須一致，否則同樣的意圖走兩條路徑會得到不同結果。
 
+-- 【p_expected_count：詢問框上的數字必須等於實際會動的數字】審查 M-1/M-2。
+-- 這是兩步式設計（先儲存跳詢問、使用者稍後才確認）獨有的風險，拖曳路徑沒有——那是同一個
+-- 手勢的一部分，窗口只有毫秒。這裡的窗口**沒有上限**，使用者可以看著詢問框去吃午餐。
+-- 兩個實際會發生的落點：
+--   (a) 同一次儲存也改了錨點的 participant_ids：client 用舊指派算筆數、RPC 用新指派算，
+--       實測「畫面說 1、實際動 2」，乙的下午被推遲（審查 M-1）；
+--   (b) 協作者在詢問窗口內新增／刪除／鎖定了後續停留點。
+-- 對不上就整筆退回（40001）讓使用者重看一次，而不是照著一個過期的數字動手。
+
 begin;
+
+-- drop 而非只靠 create or replace：本支尚未上雲但**簽章改過一次**（多了 p_expected_count）。
+-- create or replace 對簽章改變不會取代舊的那支，會留下 overload，PostgREST 的解析結果不可靠。
+-- 本專案已經在「grant 只加不減」上踩過同型別的坑（20260811000000:48-51）。
+drop function if exists public.shift_following_stops(uuid, uuid, timestamptz, bigint);
 
 create or replace function public.shift_following_stops(
   p_trip_id uuid,
   p_anchor_stop_id uuid,
   p_after timestamptz,
-  p_delta_seconds bigint
+  p_delta_seconds bigint,
+  p_expected_count integer
 ) returns integer
 language plpgsql security invoker set search_path = public, pg_temp as $$
 declare
@@ -42,50 +57,56 @@ begin
   if p_after is null or p_anchor_stop_id is null then
     raise exception 'anchor required' using errcode = '22023';
   end if;
-  if p_delta_seconds = 0 then
-    return 0;
-  end if;
 
   -- stops 表註解（20260801000002:45-48）：多列批次 UPDATE 必須先取這把鎖，與 cascade_shift_stops
   -- 共用同一把，否則兩者併發時鎖序可能成環
   perform pg_advisory_xact_lock(hashtextextended(p_trip_id::text, 0));
 
-  select coalesce(array_agg((e->>'id')::uuid), '{}'::uuid[])
-    into v_roster
-    from public.trips t, jsonb_array_elements(t.participants) e
-   where t.id = p_trip_id
-     and (e->>'id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+  -- 取法與 cascade_shift_stops 共用同一個函式（審查 s-1）：兩支的判準必須逐條一致，
+  -- 靠兩份手抄的 SQL 維持不住。
+  v_roster := public.trip_roster_ids(p_trip_id);
 
   select public.resolve_stop_participants(participant_ids, v_roster)
     into v_anchor_who
     from public.stops
    where id = p_anchor_stop_id and trip_id = p_trip_id;
 
+  -- 錨點驗證放在 delta=0 早退**之前**（審查 m-1）：順序與 cascade_shift_stops 一致。
+  -- 反過來的話「錨點根本不存在」在 delta=0 時會被靜默吞掉並回 0。
   if v_anchor_who is null then
     raise exception 'stop not found in trip';
   end if;
+  if p_delta_seconds = 0 then
+    return 0;
+  end if;
 
-  with moved as (
-    update public.stops s
-       set starts_at = starts_at + make_interval(secs => p_delta_seconds),
-           ends_at   = ends_at   + make_interval(secs => p_delta_seconds)
-     where s.trip_id = p_trip_id
-       and s.id <> p_anchor_stop_id          -- ← 與 cascade_shift_stops 的唯一實質差異
-       and s.locked = false
-       and s.starts_at > p_after
-       and (cardinality(v_roster) = 0
-            or public.resolve_stop_participants(s.participant_ids, v_roster) && v_anchor_who)
-    returning 1)
-  select count(*) into v_count from moved;
+  update public.stops s
+     set starts_at = starts_at + make_interval(secs => p_delta_seconds),
+         ends_at   = ends_at   + make_interval(secs => p_delta_seconds)
+   where s.trip_id = p_trip_id
+     and s.id <> p_anchor_stop_id          -- ← 與 cascade_shift_stops 的唯一實質差異
+     and s.locked = false
+     and s.starts_at > p_after
+     and (cardinality(v_roster) = 0
+          or public.resolve_stop_participants(s.participant_ids, v_roster) && v_anchor_who);
+  -- GET DIAGNOSTICS 而非 with moved as (… returning 1) select count(*)：語義等價
+  -- （stops_touch 是 BEFORE trigger 且永遠回 NEW，不會抑制列），但少一層 CTE 與 tuplestore
+  get diagnostics v_count = row_count;
+
+  if p_expected_count is null or v_count <> p_expected_count then
+    raise exception 'following stop set changed (expected %, matched %)', p_expected_count, v_count
+      using errcode = '40001';
+  end if;
 
   return v_count;
 end $$;
 
-revoke execute on function public.shift_following_stops(uuid, uuid, timestamptz, bigint) from public;
-grant execute on function public.shift_following_stops(uuid, uuid, timestamptz, bigint) to authenticated;
+revoke execute on function public.shift_following_stops(uuid, uuid, timestamptz, bigint, integer) from public;
+grant execute on function public.shift_following_stops(uuid, uuid, timestamptz, bigint, integer) to authenticated;
 
 commit;
 
--- 回滾：drop function public.shift_following_stops(uuid, uuid, timestamptz, bigint);
+-- 回滾：drop function if exists public.shift_following_stops(uuid, uuid, timestamptz, bigint, integer);
+--   （if exists：雲端若從未套用成功，裸 drop 會中斷整個回滾腳本）
 -- 回滾後 StopEditor 的「一起順延」按鈕會拿到 42883（函式不存在），需連同程式碼一起回退。
 -- 本函式不被其他物件引用，單獨 drop 無副作用。

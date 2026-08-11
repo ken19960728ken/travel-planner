@@ -208,7 +208,24 @@ test('分頭行動：交通段分軌生成、不產生幻影段、重疊不誤�
     // 會推進到剛寫進去的值，所以第二次不該誤判成「已被其他操作變更」
     await page.locator('input[type="datetime-local"]').nth(1).fill('2026-12-05T15:00')
     await page.getByRole('button', { name: '儲存' }).click()
+    // ⚠️ 先等詢問框出現再斷言錯誤不存在。反過來寫（緊接著 click 就 toHaveCount(0)）是空轉的：
+    // 那一刻請求還沒回來，斷言必然通過，樂觀鎖的回歸抓不到（審查 m-6）。
+    // 60 而非 120：「只改這一筆」也是一次順延決策，基準已經跟著推進到 14:00
+    await expect(page.getByText(/要一起順延 60 分鐘嗎/)).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('此停留點的時間已被其他操作變更，請重新整理後再編輯')).toHaveCount(0)
+
+    // C-1 迴歸：**不回答**詢問框就再改一次，順延量必須從「上次順延決策」起算而不是
+    // 「上次寫入」起算。這裡 14:00→15:00 之後再改回 14:00，淨變化為零 →
+    // 詢問框應該消失（delta 0），而不是變成「要一起提前 60 分鐘」。
+    await page.locator('input[type="datetime-local"]').nth(1).fill('2026-12-05T14:00')
+    await page.getByRole('button', { name: '儲存' }).click()
+    await expect(page.getByText('已儲存 ✓')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(/要一起/)).toHaveCount(0)
+
+    // 再改一次並真的順延
+    await page.locator('input[type="datetime-local"]').nth(1).fill('2026-12-05T15:00')
+    await page.getByRole('button', { name: '儲存' }).click()
+    await expect(page.getByText(/要一起順延 60 分鐘嗎/)).toBeVisible({ timeout: 10_000 })
     await page.getByRole('button', { name: '一起順延' }).click()
     await expect(page.getByText(/已順延 1 個行程/)).toBeVisible({ timeout: 10_000 })
 

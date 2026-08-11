@@ -124,7 +124,7 @@ grant execute on function public.remove_trip_participant(uuid, uuid) to authenti
 /** 解讀停留點的參與人：null → 全員；過濾掉名冊裡沒有的 id；過濾後為空 → 全員。
  *  回傳一定是 roster 的子集且長度 >= 1（roster 本身為空時回傳空陣列）。 */
 export function resolveStopParticipants(
-  participantIds: readonly string[] | null | undefined,
+  participantIds: unknown,
   roster: readonly string[],
 ): string[]
 ```
@@ -157,9 +157,9 @@ export function resolveStopParticipants(
 ```ts
 /** 每個參與人各自的相鄰配對，聯集去重。
  *  未指派（participantIds 為 null）的停留點屬於全員，出現在每個人的鏈上。 */
-export function participantPairs<T extends { id: string; startsAt: number; participantIds: string[] | null }>(
+export function participantPairs<T extends { id: string; startsAt: number; participantIds: unknown }>(
   stops: T[],
-  participantIds: string[],
+  roster: readonly string[],
 ): Array<[T, T]>
 ```
 
@@ -207,16 +207,33 @@ export function participantPairs<T extends { id: string; startsAt: number; parti
 大部分時間全員在同一點，N 個圖示會完全重疊。合併規則：
 
 - 以四捨五入到小數 5 位（約 1 公尺）的座標分組
-- 每組渲染一個圖示；組內人數 > 1 時，圖示顯示人數，顏色用中性色
-- 組內人數 = 1 時，用該參與人的顏色
+- 組內 1 人 → 顯示該參與人的首字，底色用其顏色
+- 組內 > 1 人 → 顯示人數（「3」），底色用中性的 `#334155`
 
 軌跡線（`PlaybackTrail`）不合併——重疊時本來就疊在一起，視覺上無差別，而分岔時必須各自可見。
 
-### 5.3 顏色
+### 5.3 識別：名字首字為主，顏色為輔
 
-`categoryUi.ts:18-44` 已有嚴格規約：六個分類桶 + 五個交通模式色 + 選取／草稿針做過全配對 CIE ΔE 掃描，最小 ΔE 30.0。**參與人色盤必須加進同一次掃描重跑**，不能自己挑顏色。度量用 ΔE，不用 WCAG 對比度（該檔 L36-39 說明了原因）。
+**參與人不以顏色作為主要識別。** 播放圖示顯示名字的首字（「明」「華」），顏色只是輔助分組。
 
-誠實的上限：色盤提供 8 色。超過 8 人時循環使用，顏色不再是唯一識別，此時圖例（名字對顏色）是必要的，不是裝飾。實務上分頭行動很少超過 4 組。
+這個決定來自實際測量，不是偏好。`categoryUi.ts:18-44` 記錄了既有規約：度量用 CIE ΔE 而非 WCAG 對比度（該檔 L36-39 說明原因），判讀 <10 難分辨、10-25 需留意、>25 一眼可辨。對既有的 **19 個保留色**（六個分類桶、五個交通模式色、選取／當日／他日／草稿針／選中備選／播放頭／紅線／步行灰）做全配對掃描並窮舉最佳子集，結果是：
+
+| 色盤大小 | 可達的最小 ΔE | 判讀 |
+|---|---|---|
+| 4 色 | 28.8 | 一眼可辨 |
+| 5 色 | 26.1 | 一眼可辨（勉強） |
+| 6 色 | 23.7 | 需留意 |
+| 8 色 | 20.6 | 需留意 |
+
+窮舉已確認這是上限，不是搜尋不力。更關鍵的是 5 色解的實際內容——`lime-500`、`green-500`、`lime-700`、`teal-700`、`fuchsia-500`，**四個綠色系**。既有保留色把紅、藍、紫、橘、粉全佔走了，只剩綠。ΔE 26 在數字上是「可辨」，但那讀起來是「深淺不同的綠」，不是四個不同的人。硬撐八色會得到一個數字合格、實際上沒人分得出誰是誰的色盤。
+
+改用首字之後：
+
+- 不消耗 ΔE 預算，也不排擠未來的功能配色
+- 20 人都能區分，不需要圖例——字本身就是說明
+- 顏色降為輔助，只需 4 色（ΔE 28.8：`#84cc16`、`#22c55e`、`#d946ef`、`#4d7c0f`），超過 4 人循環
+
+首字取名稱的第一個字元。使用者自己控制名稱，想要「明」而不是「小」就把名字打成「明」。完整名稱在 hover 與側欄顯示。
 
 ### 5.4 相機
 
@@ -280,10 +297,10 @@ sum(每人應付) === totalEstimatedCost(全部項目)
 |---|---|
 | `MembersPanel.tsx` | 新增「參與人」區塊：列出名冊，可新增（從成員挑 or 直接打名字）、改名、換色、移除。移除時提示受影響的停留點數 |
 | `StopEditor.tsx` | 參與人多選；預設「全員」（`null`）。清空到 0 人時 UI 擋下並提示 |
-| `TripView.tsx` 側欄 | 停留點列顯示參與人色點；全員時不顯示（避免每一列都掛滿圖示） |
+| `TripView.tsx` 側欄 | 停留點列顯示參與人首字圖章；全員時不顯示——共同行程本就不需標註，標了反而讓真正的分頭段落淹沒在雜訊裡 |
 | 播放列 | 「看誰的行程」下拉：全部 ／ 個別參與人 |
 | `CostSummary.tsx` | 總計下方列出每人應付 |
-| 地圖 | 播放圖示依 §5.2 合併，圖例顯示名字對顏色 |
+| 地圖 | 播放圖示依 §5.2 合併；首字自我說明，不需常駐圖例，hover 顯示完整名字 |
 
 分頭時段在 Timeline 上需要可辨識——同一時段有多個色塊並列，而不是被判為衝突的紅色。
 
@@ -309,7 +326,8 @@ sum(每人應付) === totalEstimatedCost(全部項目)
 |---|---|
 | 名冊為空 | 等同單一虛擬參與人，全部退回現行單軌行為 |
 | 停留點只剩一個參與人而該人被移除 | 回到 `null`（全員），見 §3.3。UI 事前提示 |
-| 超過 8 人 | 顏色循環，靠圖例區分。不阻止 |
+| 超過 4 人 | 顏色循環。首字是主要識別，顏色重複不影響區分（§5.3） |
+| 兩人名字首字相同 | 首字會一樣。允許——使用者可自行改名區分，系統不強制 |
 | `participant_ids` 指向不存在的 id | 無外鍵保證。由 §3.4 的 `resolveStopParticipants` 統一處理：忽略未知 id，全部無效則視同全員 |
 | 非整數金額 | `Math.round` 後分攤。JPY/TWD 無小數，可接受 |
 | 同兩點之間兩組人搭不同交通工具 | **不支援**（`legs_from_to_unique`）。變通：中間插一個停留點 |

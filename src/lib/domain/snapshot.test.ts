@@ -11,7 +11,7 @@ const mkStop = (over: Partial<SnapshotStop> & { id: string }): SnapshotStop => (
 })
 const mkLeg = (over: Partial<SnapshotLeg> & { from_stop_id: string; to_stop_id: string }): SnapshotLeg => ({
   mode: 'transit', source: 'auto', estimated_cost: null,
-  duration_minutes: null, departs_at: null, arrives_at: null, ...over,
+  duration_minutes: null, departs_at: null, arrives_at: null, custom_path: null, ...over,
 })
 
 describe('buildTripSnapshot', () => {
@@ -73,5 +73,38 @@ describe('buildTripSnapshot', () => {
       expect(leg).not.toHaveProperty('distance_meters')
       expect(leg).not.toHaveProperty('computed_at')
     }
+  })
+
+  // custom_path 是 Google 衍生欄位排除規則的**刻意例外**：使用者自己畫的路線不受 30 天 TTL 限制，
+  // 永久保存正是目的——為日本電車段畫的路線不該在快照裡消失（2026-08-10 手繪路徑）
+  it('收錄使用者手繪路徑，且與 auto/manual 無關', () => {
+    const legs = [
+      mkLeg({ from_stop_id: 'A', to_stop_id: 'B', source: 'auto', custom_path: [[25, 121], [26, 122]] }),
+    ]
+    const result = buildTripSnapshot(trip(), [mkStop({ id: 'A' }), mkStop({ id: 'B' })], legs)
+    expect(result.legs[0].custom_path).toEqual([[25, 121], [26, 122]])
+  })
+
+  it('沒畫過的段落不帶 custom_path 鍵', () => {
+    const legs = [mkLeg({ from_stop_id: 'A', to_stop_id: 'B' })]
+    const result = buildTripSnapshot(trip(), [mkStop({ id: 'A' }), mkStop({ id: 'B' })], legs)
+    expect(result.legs[0]).not.toHaveProperty('custom_path')
+  })
+
+  it('畸形的手繪路徑被清洗，不進入永久保存的凍結副本', () => {
+    const legs = [
+      mkLeg({
+        from_stop_id: 'A', to_stop_id: 'B',
+        custom_path: [[25, 121], ['x', 'y'], [999, 999], null, [26, 122]],
+      }),
+    ]
+    const result = buildTripSnapshot(trip(), [mkStop({ id: 'A' }), mkStop({ id: 'B' })], legs)
+    expect(result.legs[0].custom_path).toEqual([[25, 121], [26, 122]])
+  })
+
+  it('手繪路徑全部畸形時，等同沒畫過（不帶鍵）', () => {
+    const legs = [mkLeg({ from_stop_id: 'A', to_stop_id: 'B', custom_path: 'not-an-array' })]
+    const result = buildTripSnapshot(trip(), [mkStop({ id: 'A' }), mkStop({ id: 'B' })], legs)
+    expect(result.legs[0]).not.toHaveProperty('custom_path')
   })
 })

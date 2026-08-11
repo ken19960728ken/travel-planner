@@ -2,7 +2,9 @@
 
 import { useEffect } from 'react'
 import { useMap } from '@vis.gl/react-google-maps'
-import { decodePolyline, greatCirclePoints } from '@/lib/domain/polyline'
+import { greatCirclePoints } from '@/lib/domain/polyline'
+import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
+import { isNoTransitData } from './legUi'
 import type { Leg, Stop } from './TripView'
 
 // 2026-08-04 總審 m-6：CIE ΔE（sRGB→XYZ→Lab 歐氏距離，方法同 categoryUi.ts）全配對掃描結果——
@@ -15,14 +17,27 @@ const MODE_COLOR: Record<Leg['mode'], string> = {
   transit: '#1e3a8a', walking: '#166534', driving: '#a16207', flight: '#6b21a8', custom: '#1e293b',
 }
 
-/** 選中日的交通段路線：有 polyline（Google 衍生）解碼實線；無 polyline 者（flight／manual／無資料的
- *  transit）畫大圓弧虛線。google.maps.Polyline 非 React 元件，用 effect 管生命週期，cleanup 全量移除。 */
+/** 「無大眾運輸資料」且使用者未手繪時的路線色（設計文件 §7）。Google 對日本 transit 回的是
+ *  **純步行路線**，卻被畫得跟真實交通路線一模一樣——使用者無從得知那是走路的。灰虛線讓它
+ *  一眼可辨。灰是既有 custom 模式色 #1e293b 的近親，語義相通（「不確定實際怎麼走」），
+ *  不新增保留色、不需重跑 ΔE 掃描。 */
+const WALKING_FALLBACK_COLOR = '#6b7280'
+
+/** 選中日的交通段路線。路徑優先序由 `resolveRoutePath` 單一來源決定（使用者手繪 → Google
+ *  polyline → flight 大圓弧 → 兩點大圓弧兜底），與播放的三個消費點共用同一份語義。
+ *  google.maps.Polyline 非 React 元件，用 effect 管生命週期，cleanup 全量移除。
+ *
+ *  `dimmed`：手繪路徑編輯模式下，其他段落淡化保留（需求方選擇——保有方向感，不會畫完才發現
+ *  跟鄰段對不起來），但不可點擊、不搶視覺焦點。 */
 export default function RoutePolylines({
-  legs, stops, selectedLegId,
+  legs, stops, selectedLegId, dimmed = false, hiddenLegId = null,
 }: {
   legs: Leg[]
   stops: Stop[]
   selectedLegId: string | null
+  dimmed?: boolean
+  /** 不要畫這一段（手繪編輯中的那段由 RouteEditor 自己畫，重複畫會疊影並攔截點擊） */
+  hiddenLegId?: string | null
 }) {
   const map = useMap()
 
@@ -31,24 +46,46 @@ export default function RoutePolylines({
     const stopById = new Map(stops.map(s => [s.id, s]))
     const overlays: google.maps.Polyline[] = []
     for (const leg of legs) {
+      if (leg.id === hiddenLegId) continue
       const from = stopById.get(leg.from_stop_id)
       const to = stopById.get(leg.to_stop_id)
       if (!from || !to) continue
-      const decoded = leg.polyline ? decodePolyline(leg.polyline) : null
+      const fromPos = { lat: from.lat, lng: from.lng }
+      const toPos = { lat: to.lat, lng: to.lng }
+      const resolved = resolveRoutePath(leg, fromPos, toPos)
+      // 實線 vs 虛線的判準是「這條線代表真實走法嗎」：手繪路徑與 Google 路線是實線；
+      // 無資料兜底的大圓弧、以及步行 fallback 都用虛線表示「不確定」
+      const hasCustom = parseCustomPath(leg.custom_path).length > 0
+      const walkingFallback = !hasCustom && isNoTransitData(leg)
+      const solid = resolved !== null && !walkingFallback
+      const color = walkingFallback ? WALKING_FALLBACK_COLOR : MODE_COLOR[leg.mode]
       overlays.push(new google.maps.Polyline({
         map,
-        path: decoded ?? greatCirclePoints({ lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng }),
-        strokeColor: MODE_COLOR[leg.mode],
+        path: resolved ?? greatCirclePoints(fromPos, toPos),
+        // clickable: false（審查 M-6，實測）：Google 預設 true，而虛線段的主線 strokeOpacity 為 0
+        // ——等於一條**看不見**的線在吃地圖點擊。手繪路徑最常沿著既有路線走廊描，命中率很高
+        // （手機更難閃避）。本專案沒有任何地方監聽這些 polyline 的 click，關掉無副作用。
+        clickable: false,
+        strokeColor: color,
         // 虛線：主線透明 + repeat icon（Google Maps 官方 dashed line 做法）
-        strokeOpacity: decoded ? 0.75 : 0,
+        strokeOpacity: solid ? (dimmed ? 0.35 : 0.75) : 0,
         strokeWeight: leg.id === selectedLegId ? 5 : 3,
-        ...(decoded ? {} : {
-          icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.6, strokeColor: MODE_COLOR[leg.mode], scale: 3 }, offset: '0', repeat: '14px' }],
+        ...(solid ? {} : {
+          icons: [{
+            icon: {
+              path: 'M 0,-1 0,1',
+              strokeOpacity: dimmed ? 0.3 : walkingFallback ? 0.5 : 0.6,
+              strokeColor: color,
+              scale: 3,
+            },
+            offset: '0',
+            repeat: '14px',
+          }],
         }),
       }))
     }
     return () => overlays.forEach(o => o.setMap(null))
-  }, [map, legs, stops, selectedLegId])
+  }, [map, legs, stops, selectedLegId, dimmed, hiddenLegId])
 
   return null
 }

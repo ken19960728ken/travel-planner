@@ -31,6 +31,9 @@ export type TimelineProps = {
   dayView: DayView
   selectedLegId: string | null
   onSelectLeg: (id: string | null) => void
+  /** 手繪路徑編輯中：時間軸的互動一律停用並顯示原因。傳 no-op callback 只會讓按鈕「按了沒反應」，
+   *  比停用更糟——使用者不知道為什麼沒動靜（2026-08-11 總審 M-5 的修正再修正）。 */
+  interactionsDisabled?: boolean
 }
 
 /** 當日視窗：停留點最早前 1h ~ 最晚後 1h；空日 fallback 當地 08:00–20:00 概念上以 UTC 對齊隱藏 */
@@ -43,7 +46,7 @@ export function dayWindow(dayStops: Stop[]): { start: number; end: number } | nu
 
 export default function Timeline({
   stops, dayKeys, activeDay, onDayChange, selectedId, onSelect, playheadMs, onPlayheadChange, onMove, busy,
-  playing, onTogglePlay, dayView, selectedLegId, onSelectLeg, pendingShift,
+  playing, onTogglePlay, dayView, selectedLegId, onSelectLeg, pendingShift, interactionsDisabled = false,
 }: TimelineProps) {
   const dayStops = filterDayStops(stops, activeDay)
   const win = dayWindow(dayStops)
@@ -109,7 +112,9 @@ export default function Timeline({
               key={key}
               type="button"
               onClick={() => onDayChange(key)}
-              className={`shrink-0 rounded px-2 py-1 text-xs ${
+              disabled={interactionsDisabled}
+              title={interactionsDisabled ? '畫路徑中，請先儲存或取消' : undefined}
+              className={`shrink-0 rounded px-2 py-1 text-xs disabled:opacity-40 ${
                 activeDay === key ? 'bg-foreground text-background' : 'border'
               }`}
             >
@@ -120,7 +125,8 @@ export default function Timeline({
         <button
           type="button"
           onClick={onTogglePlay}
-          disabled={!win && !playing}
+          disabled={(!win && !playing) || interactionsDisabled}
+          title={interactionsDisabled ? '畫路徑中，請先儲存或取消' : undefined}
           className="shrink-0 rounded border px-2 py-1 text-xs disabled:opacity-40"
         >
           {playing ? '⏸ 暫停' : '▶ 播放'}
@@ -193,7 +199,12 @@ export default function Timeline({
                   data-leg-connector={leg.id}
                   tabIndex={-1}
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
-                  title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
+                  disabled={interactionsDisabled}
+                  title={
+                    interactionsDisabled
+                      ? '畫路徑中，請先儲存或取消'
+                      : `${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`
+                  }
                   className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
                     isDeadZone ? 'pointer-events-none' : ''
                   } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${

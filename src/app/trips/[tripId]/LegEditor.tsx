@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { utcMsToWallInput, wallInputToUtcMs } from '@/lib/domain/tz'
+import { parseCustomPath } from '@/lib/domain/routePath'
 import { MODE_LABEL, isNoRoute, isNoTransitData } from './legUi'
 import type { TablesUpdate } from '@/lib/supabase/database.types'
 import type { Leg, Stop } from './TripView'
@@ -13,13 +14,15 @@ const AUTO_MODES = ['transit', 'walking', 'driving'] as const
 type Mode = Leg['mode']
 
 export default function LegEditor({
-  leg, fromStop, toStop, currency, onChanged,
+  leg, fromStop, toStop, currency, onChanged, onDrawPath,
 }: {
   leg: Leg
   fromStop: Stop
   toStop: Stop
   currency: string
   onChanged?: () => void
+  /** 進入手繪路徑模式。LegEditor 拿不到 map 實例，必須上拋給 TripView 處理 */
+  onDrawPath: () => void
 }) {
   const router = useRouter()
   const [mode, setMode] = useState<Mode>(leg.mode)
@@ -42,6 +45,7 @@ export default function LegEditor({
 
   const isTimed = mode === 'flight' || mode === 'custom'
   const isAutoMode = (AUTO_MODES as ReadonlyArray<string>).includes(mode)
+  const hasCustomPath = parseCustomPath(leg.custom_path).length > 0
 
   // 樂觀鎖令牌（審查 Important-A；審查原提案是 ref 版，但本專案 eslint-plugin-react-hooks 的
   // react-hooks/refs 規則禁止 render 期間存取 ref——實測會噴 error，故改用與 Minor-B 同款的
@@ -97,6 +101,11 @@ export default function LegEditor({
     }
   }
 
+  // ⚠️ 下面三個分支都清 `polyline`，但**一律不得清 `custom_path`**（2026-08-10 手繪路徑）：
+  //    polyline 是 Google 衍生資料（30 天 TTL、manual 段不得夾帶）；custom_path 是**使用者自己畫的**，
+  //    永久保存、進定稿快照與匯出。改時間／交通方式不該把使用者畫的路線一起洗掉。
+  //    要清除只有一條路徑：下方「還原成自動路線」鈕明確寫入 custom_path: null。
+  //
   // 四種儲存形態：
   // A. auto 模式、時長留空 → 交還自動計算（source=auto、清 Google 衍生欄位與起訖，sync 重算）
   // B. auto 模式、填了時長；或 custom 只填時長 → source=manual，只存使用者資料、起訖留 null；清 polyline/detail——
@@ -189,7 +198,8 @@ export default function LegEditor({
         <p className="text-xs text-amber-700">查無路線：可改用其他交通方式，或切為航班/自訂手動填寫</p>
       ) : isNoTransitData(leg) ? (
         <p className="text-xs text-amber-700">
-          此路段 Google 未提供大眾運輸班次，以下為步行估算——可改開車／步行，或切為航班／自訂手動填寫
+          此路段 Google 未提供大眾運輸班次，以下為步行估算——可改開車／步行，或切為航班／自訂手動填寫。
+          {!hasCustomPath && '地圖上這段畫的是「步行路徑」（灰色虛線），與實際搭乘路線不同；可按下方「畫路徑」自行描出正確走向。'}
         </p>
       ) : null}
       <label className="flex items-center gap-2 text-xs">
@@ -235,6 +245,21 @@ export default function LegEditor({
       <button className="rounded bg-foreground p-1 text-background disabled:opacity-50" onClick={save} disabled={busy}>
         儲存
       </button>
+      {/* 手繪路徑（設計文件 §4）：與上方的時間/花費表單是兩件獨立的事——畫路徑純視覺、不影響
+          時長與距離，故不走 save()，由 RouteEditor 自己寫入 custom_path。 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="rounded border px-2 py-1 text-xs disabled:opacity-50"
+          disabled={busy} onClick={onDrawPath}>
+          {hasCustomPath ? '編輯路徑' : '畫路徑'}
+        </button>
+        {hasCustomPath && (
+          <button type="button" className="rounded border px-2 py-1 text-xs text-amber-700 disabled:opacity-50"
+            disabled={busy}
+            onClick={() => write({ custom_path: null }, { kind: 'success', text: '已還原成自動路線 ✓' })}>
+            還原成自動路線
+          </button>
+        )}
+      </div>
       {notice && (
         <p className={`text-xs ${
           notice.kind === 'error' ? 'text-red-600' : notice.kind === 'warn' ? 'text-amber-700' : 'text-green-600'

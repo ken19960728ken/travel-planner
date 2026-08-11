@@ -53,7 +53,7 @@ export default async function TripDetailPage({
       .limit(500),
     supabase
       .from('legs')
-      .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, detail, source, stale, departs_at, arrives_at, estimated_cost, updated_at')
+      .select('id, from_stop_id, to_stop_id, mode, duration_minutes, distance_meters, polyline, custom_path, detail, source, stale, departs_at, arrives_at, estimated_cost, updated_at')
       .eq('trip_id', tripId)
       .order('id', { ascending: true })
       .limit(500),

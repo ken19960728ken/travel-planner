@@ -30,6 +30,10 @@ const LEG_KEYS = [
   // jsonb_build_object('polyline', l.polyline) 即使該筆資料 polyline 為 null 仍會產生這個 key
   // （value 是 JSON null，key 本身存在），所以測試資料不含 polyline 也必須把它列進白名單
   'polyline',
+  // custom_path：migration 20260810000000 加入白名單。與 polyline 不同，這是**使用者自己畫的
+  // 路徑**（非 Google 衍生），分享頁重用同一套 TripView 渲染，不放行的話旅伴看到的線會與擁有者
+  // 不一致。同樣受上述「值為 null 仍產生 key」的規則約束，必須列進白名單。
+  'custom_path',
   'source', 'stale', 'departs_at', 'arrives_at', 'estimated_cost', 'updated_at',
 ].sort()
 

@@ -41,6 +41,11 @@ export type Trip = {
   /** Task 8：分享頁重用此型別，但資料來自 get_shared_trip RPC 白名單，不含 share_token
    *  （白名單本就刻意不收，撤銷憑證不能送給匿名訪客）——宣告為可選讓兩種資料來源都能通過型別檢查 */
   share_token?: string
+  /** 參與人名冊。**刻意宣告為 unknown**：資料來自 DB 與分享 RPC，形狀不可信，強迫所有消費端
+   *  必須先過 `parseRoster`（src/lib/domain/participants.ts）。同 Leg.custom_path 的理由。
+   *  另一層原因：分享 RPC 的投影刻意少了 user_id（不能給匿名訪客），與 DB 的形狀本就不同，
+   *  宣告成具體型別會讓兩個來源之一必然說謊。 */
+  participants: unknown
 }
 
 export type Stop = {
@@ -57,6 +62,9 @@ export type Stop = {
   notes: string | null
   estimated_cost: number | null
   category: StopCategory
+  /** 誰會去。null ＝ 全員。**刻意宣告為 unknown**，一律先過 `resolveStopParticipants`
+   *  （src/lib/domain/participants.ts）——那裡集中處理 null、未知 id、全部無效三種情況。 */
+  participant_ids: unknown
 }
 
 export type Leg = {

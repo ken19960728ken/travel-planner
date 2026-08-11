@@ -18,6 +18,7 @@ function stop(id: string, startsAtMs: number, endsAtMs: number, overrides: Parti
     locked: false,
     notes: null,
     estimated_cost: null,
+    participant_ids: null,
     category: 'other',
     ...overrides,
   }

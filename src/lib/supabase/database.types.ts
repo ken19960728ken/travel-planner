@@ -167,6 +167,7 @@ export type Database = {
           locked: boolean
           name: string
           notes: string | null
+          participant_ids: string[] | null
           place_id: string | null
           place_refreshed_at: string | null
           starts_at: string
@@ -186,6 +187,7 @@ export type Database = {
           locked?: boolean
           name: string
           notes?: string | null
+          participant_ids?: string[] | null
           place_id?: string | null
           place_refreshed_at?: string | null
           starts_at: string
@@ -205,6 +207,7 @@ export type Database = {
           locked?: boolean
           name?: string
           notes?: string | null
+          participant_ids?: string[] | null
           place_id?: string | null
           place_refreshed_at?: string | null
           starts_at?: string
@@ -376,6 +379,7 @@ export type Database = {
           end_date: string
           id: string
           owner_id: string | null
+          participants: Json
           share_token: string
           start_date: string
           title: string
@@ -386,6 +390,7 @@ export type Database = {
           end_date: string
           id?: string
           owner_id?: string | null
+          participants?: Json
           share_token?: string
           start_date: string
           title: string
@@ -396,6 +401,7 @@ export type Database = {
           end_date?: string
           id?: string
           owner_id?: string | null
+          participants?: Json
           share_token?: string
           start_date?: string
           title?: string

@@ -21,7 +21,7 @@ export default async function TripDetailPage({
 
   const { data: trip, error: tripError } = await supabase
     .from('trips')
-    .select('id, title, start_date, end_date, currency, share_token')
+    .select('id, title, start_date, end_date, currency, share_token, participants')
     .eq('id', tripId)
     .maybeSingle()
   if (tripError) {
@@ -46,7 +46,7 @@ export default async function TripDetailPage({
     supabase.from('trip_members').select('user_id, role').eq('trip_id', tripId),
     supabase
       .from('stops')
-      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category')
+      .select('id, name, lat, lng, place_id, is_custom, timezone, starts_at, ends_at, locked, notes, estimated_cost, category, participant_ids')
       .eq('trip_id', tripId)
       .order('starts_at', { ascending: true })
       .order('id', { ascending: true })

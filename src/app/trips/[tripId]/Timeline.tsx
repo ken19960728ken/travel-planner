@@ -112,7 +112,9 @@ export default function Timeline({
               key={key}
               type="button"
               onClick={() => onDayChange(key)}
-              className={`shrink-0 rounded px-2 py-1 text-xs ${
+              disabled={interactionsDisabled}
+              title={interactionsDisabled ? '畫路徑中，請先儲存或取消' : undefined}
+              className={`shrink-0 rounded px-2 py-1 text-xs disabled:opacity-40 ${
                 activeDay === key ? 'bg-foreground text-background' : 'border'
               }`}
             >
@@ -197,7 +199,12 @@ export default function Timeline({
                   data-leg-connector={leg.id}
                   tabIndex={-1}
                   onClick={() => onSelectLeg(selectedLegId === leg.id ? null : leg.id)}
-                  title={`${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`}
+                  disabled={interactionsDisabled}
+                  title={
+                    interactionsDisabled
+                      ? '畫路徑中，請先儲存或取消'
+                      : `${MODE_LABEL[leg.mode]} ${legDurationText(leg)}`
+                  }
                   className={`absolute top-1/2 z-10 -translate-y-1/2 overflow-hidden text-ellipsis whitespace-nowrap rounded text-center text-[10px] leading-tight ${
                     isDeadZone ? 'pointer-events-none' : ''
                   } ${tight ? 'bg-red-100 text-red-700' : 'bg-background/80 text-gray-600'} ${

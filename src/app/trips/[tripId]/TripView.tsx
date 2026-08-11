@@ -848,8 +848,15 @@ export default function TripView({
   /** 編輯模式是否**實際生效**（審查 M-3）。所有互動閘門一律讀這個衍生布林，不讀 routeEditingLegId
    *  ——協作者刪掉停留點會 FK cascade 掉 leg，此時 RouteEditor 卸載但 id 還留著；閘門若讀 id
    *  就會把地圖永久鎖死（實測：右鍵開不了草稿、圖釘淡化、沒有任何出口可按取消，只能重新整理）。
-   *  讀衍生布林則 leg 一消失閘門就自動解除，殘留 id 無害。 */
-  const routeEditing = editingLeg !== null && editingFrom !== undefined && editingTo !== undefined
+   *  讀衍生布林則 leg 一消失閘門就自動解除，殘留 id 無害。
+   *
+   *  ⚠️ **這個條件必須與下方 RouteEditor 的掛載條件逐字相同**（審查 N-1，實測復現）：第一版漏了
+   *  `canEdit && !writesBlocked`，於是權限被降級（owner 把 editor 改成 viewer）或 Realtime 斷線時，
+   *  RouteEditor 卸載而閘門續留——播放鈕還提示「畫路徑中，請先儲存或取消」，但畫面上根本沒有
+   *  可以儲存或取消的東西。同一種鎖死換個入口又回來。兩處讀同一個布林才不會再分岔。 */
+  const routeEditing =
+    canEdit && !writesBlocked &&
+    editingLeg !== null && editingFrom !== undefined && editingTo !== undefined
 
   const win = dayWindow(activeDayStops)
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
@@ -1061,7 +1068,7 @@ export default function TripView({
               disabled={busy}
             />
           )}
-          {canEdit && searchPreview && !writesBlocked && (
+          {canEdit && searchPreview && !writesBlocked && !routeEditing && (
             <PlacePreviewCard
               key={searchPreview.seq}
               place={searchPreview.place}
@@ -1086,7 +1093,7 @@ export default function TripView({
               onCancel={() => setSearchPreview(null)}
             />
           )}
-          {canEdit && draftPin && !writesBlocked && (
+          {canEdit && draftPin && !writesBlocked && !routeEditing && (
             <form
               className="flex gap-1 rounded border p-2"
               onSubmit={async e => {
@@ -1151,7 +1158,9 @@ export default function TripView({
                       onClick={() => {
                         const selecting = selectedId !== stop.id
                         setSelectedId(selecting ? stop.id : null)
-                        if (selecting) setCameraTarget({ lat: stop.lat, lng: stop.lng }) // 點側欄 → 鏡頭帶過去
+                        // 畫路徑中不移鏡頭（審查 N-3，實測位移 134px）：選取本身無害，但把畫布
+                        // 從使用者手下移走，跟停用播放鈕要防的是同一種傷害
+                        if (selecting && !routeEditing) setCameraTarget({ lat: stop.lat, lng: stop.lng })
                       }}
                     >
                       <span className="mr-1 text-xs text-gray-400">{i + 1}.</span>
@@ -1360,7 +1369,7 @@ export default function TripView({
                     </AdvancedMarker>
                   )
                 })}
-                {canEdit && !writesBlocked && draftPin && (
+                {canEdit && !writesBlocked && !routeEditing && draftPin && (
                   <AdvancedMarker position={draftPin}>
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
@@ -1372,7 +1381,7 @@ export default function TripView({
                     <Pin background="#f59e0b" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
                 )}
-                {canEdit && !writesBlocked && searchPreview && (
+                {canEdit && !writesBlocked && !routeEditing && searchPreview && (
                   <AdvancedMarker position={{ lat: searchPreview.lat, lng: searchPreview.lng }}>
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
@@ -1416,10 +1425,10 @@ export default function TripView({
                   // 後它還留著，容易讓人以為沒清掉；而且那條線也會吃掉落在它上面的點擊
                   hiddenLegId={routeEditing ? routeEditingLegId : null}
                 />
-                {/* canEdit && !writesBlocked（審查 M-4）：畫路徑是寫入動作，比照其他寫入入口。
-                    少了這道閘門，斷線期間（writesBlocked=true、橫幅顯示「編輯功能已暫停」）
-                    RouteEditor 的儲存鈕仍會真的寫 DB，而畫面不會更新，使用者只看到線消失。 */}
-                {canEdit && !writesBlocked && editingLeg && editingFrom && editingTo && (
+                {/* 讀同一個 routeEditing（審查 N-1）——它已內含 canEdit && !writesBlocked（M-4：
+                    畫路徑是寫入動作，斷線期間不得寫 DB）。後三項是 TypeScript 的型別窄化需要，
+                    語義上與 routeEditing 完全重疊，不會造成兩處條件分岔。 */}
+                {routeEditing && editingLeg && editingFrom && editingTo && (
                   <RouteEditor
                     // key 讓換一段編輯時整顆重建，內部 effect 的 legId deps 不必再處理跨段殘留
                     key={editingLeg.id}
@@ -1470,6 +1479,7 @@ export default function TripView({
         selectedId={selectedId}
         onSelect={id => {
           setSelectedId(id)
+          if (routeEditing) return // 同 N-3：編輯中不移鏡頭
           const s = stops.find(x => x.id === id)
           if (s) setCameraTarget({ lat: s.lat, lng: s.lng })
         }}

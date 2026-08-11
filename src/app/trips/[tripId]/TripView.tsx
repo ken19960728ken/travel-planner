@@ -10,7 +10,8 @@ import { tripDayKeys, filterDayStops } from '@/lib/domain/days'
 import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
-import { adjacentPairs } from '@/lib/domain/legSync'
+import { parseRoster } from '@/lib/domain/participants'
+import { participantPairs } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import PlaceSearch, { type PlacePick } from './PlaceSearch'
@@ -818,12 +819,20 @@ export default function TripView({
   // deps，若這裡每次 render 都給新的 Map 參照，routeLegs 會跟著每次 render（含每秒播放 tick）重建
   // 新陣列，RoutePolylines 收到新的 legs prop 參照又會觸發它內部 effect 全量拆建 overlays——
   // 只在 stops 真的變動時才重建，理由與下面 stopById 相同
+  // 名冊：分軌的唯一輸入。parseRoster 清洗 DB／分享 RPC 的未知形狀（兩者的 participants 形狀
+  // 本就不同——分享版少了 user_id），下游一律只吃這裡產出的 id 陣列。
+  const roster = useMemo(() => parseRoster(trip.participants), [trip.participants])
+  const rosterIds = useMemo(() => roster.map(p => p.id), [roster])
   const nextByStopId = useMemo(
     () => new globalThis.Map(
-      adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-        .map(([f, t]) => [f.id, t.id]),
+      // participantPairs（非 adjacentPairs）：單軌配對在分頭時會把甲的停留點接到乙的停留點上，
+      // 於是側欄與 Timeline 畫出一條沒有人走過的連接條（與 sync 產生幻影段是同一個 bug 的顯示層版本）
+      participantPairs(
+        stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+        rosterIds,
+      ).map(([f, t]) => [f.id, t.id]),
     ),
-    [stops],
+    [stops, rosterIds],
   )
   // useMemo（非普通宣告）：下面 travelPath 的 useMemo 把 stopById 列進 deps，若這裡每次 render 都給
   // 新的 Map 參照，travelPath 會跟著每秒重算、失去「長 polyline 不逐秒重解」的 memo 效果（本來就是
@@ -1009,7 +1018,7 @@ export default function TripView({
     .filter(l => activeDayStops.some(s => s.id === l.from_stop_id))
 
   // Important-3 根治：Timeline 連接條與側欄交通列的「趕不上」警示同讀這份單一計算來源（審查 M-4）
-  const dayView = buildDayView(activeDayStops, stops, legs)
+  const dayView = buildDayView(activeDayStops, stops, legs, rosterIds)
 
   // M-7：selectedLegId 若指向已從 legs 消失的段（結構同步移除/重建），清空選取避免殘留 dangling id。
   // 不開新 effect 直接 setState（同 line 296 註解提到的 set-state-in-effect lint），改用 React 官方文件

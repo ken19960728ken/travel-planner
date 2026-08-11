@@ -1,5 +1,5 @@
 import type { Stop, Leg } from './TripView'
-import { adjacentPairs } from '@/lib/domain/legSync'
+import { participantPairs } from '@/lib/domain/legSync'
 import { detectConflicts } from '@/lib/domain/conflicts'
 import type { ScheduleWarning } from '@/lib/domain/types'
 
@@ -11,13 +11,20 @@ export type DayView = {
 }
 
 /** 當日 leg 配對 + 衝突/趕不上警示的單一計算來源（審查 M-4 根治：Timeline 的連接條渲染與側欄
- *  警示都讀這裡的 dayLegs/warnings，避免各自組裝出現不一致）。邏輯照搬自原 Timeline.tsx 內部計算，
- *  零改動——dayStops 需已按當日過濾（filterDayStops）；stops/legs 為全行程資料，
- *  跨夜段的相鄰配對需要全行程順序才能判定（M-4：跨夜段顯示在出發日末尾）。 */
-export function buildDayView(dayStops: Stop[], stops: Stop[], legs: Leg[]): DayView {
+ *  警示都讀這裡的 dayLegs/warnings，避免各自組裝出現不一致）。邏輯照搬自原 Timeline.tsx 內部計算——
+ *  dayStops 需已按當日過濾（filterDayStops）；stops/legs 為全行程資料，
+ *  跨夜段的相鄰配對需要全行程順序才能判定（M-4：跨夜段顯示在出發日末尾）。
+ *
+ *  roster（2026-08-11 參與人）：**顯示配對與衝突偵測都必須分軌**。這裡的 nextByStopId 決定
+ *  「哪個交通段顯示在哪個停留點之後」，用單軌的 adjacentPairs 會在分頭時把甲的停留點接到乙的
+ *  停留點上——側欄與 Timeline 會畫出一條沒有人走過的連接條，與 sync 產生幻影段是同一個 bug
+ *  的顯示層版本。省略 roster 時退回單軌行為。 */
+export function buildDayView(dayStops: Stop[], stops: Stop[], legs: Leg[], roster: readonly string[] = []): DayView {
   const nextByStopId = new Map(
-    adjacentPairs(stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime() })))
-      .map(([f, t]) => [f.id, t.id]),
+    participantPairs(
+      stops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+      roster,
+    ).map(([f, t]) => [f.id, t.id]),
   )
   const stopById = new Map(stops.map(s => [s.id, s]))
   const legByPair = new Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
@@ -35,10 +42,12 @@ export function buildDayView(dayStops: Stop[], stops: Stop[], legs: Leg[]): DayV
       startsAt: new Date(s.starts_at).getTime(),
       endsAt: new Date(s.ends_at).getTime(),
       locked: s.locked,
+      participantIds: s.participant_ids,
     })),
     dayLegs
       .filter(x => x.leg.duration_minutes !== null)
       .map(x => ({ fromStopId: x.from.id, toStopId: x.to.id, durationMinutes: x.leg.duration_minutes! })),
+    roster,
   )
   const conflictIds = new Set(
     warnings.flatMap(w => (w.type === 'overlap' ? w.stopIds : [w.fromStopId, w.toStopId])),

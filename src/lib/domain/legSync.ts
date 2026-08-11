@@ -1,4 +1,10 @@
-export type SyncStop = { id: string; lat: number; lng: number; startsAt: number; endsAt: number }
+import { resolveStopParticipants } from './participants'
+
+export type SyncStop = {
+  id: string; lat: number; lng: number; startsAt: number; endsAt: number
+  /** 誰會去。形狀不可信（來自 DB），一律經 resolveStopParticipants 解讀。 */
+  participantIds: unknown
+}
 export type SyncLeg = {
   id: string
   fromStopId: string
@@ -29,13 +35,47 @@ export function adjacentPairs<T extends { id: string; startsAt: number }>(stops:
   return pairs
 }
 
+/** 每個參與人各自的相鄰配對，聯集去重（設計文件 2026-08-11-participants §4.1）。
+ *
+ *  adjacentPairs 假設整趟行程只有一條時間軸。分頭行動時那個假設會生出「沒有人走過」的
+ *  幻影交通段——A(9-10)、B(11-12,甲)、C(11-12,乙) 按時間排序後相鄰配對是 A→B、**B→C**，
+ *  而真正存在的 A→C 永遠不會被建立。本函式對每個人各自取鏈，聯集後去重。
+ *
+ *  名冊為空時直接退回 adjacentPairs——這不是特例分支，是「零個參與人＝單一虛擬參與人」的
+ *  自然結果，但顯式寫出來讓退化路徑一眼可見（測試逐項鎖住兩者相等）。 */
+export function participantPairs<T extends { id: string; startsAt: number; participantIds: unknown }>(
+  stops: T[],
+  roster: readonly string[],
+): Array<[T, T]> {
+  if (roster.length === 0) return adjacentPairs(stops)
+  // 先算一次：否則內層 filter 會對每個「參與人 × 停留點」重跑解讀，上限 20 × 500
+  const resolved = new Map(stops.map(s => [s.id, resolveStopParticipants(s.participantIds, roster)]))
+  const seen = new Set<string>()
+  const out: Array<[T, T]> = []
+  for (const p of roster) {
+    const mine = stops.filter(s => resolved.get(s.id)!.includes(p))
+    for (const pair of adjacentPairs(mine)) {
+      const k = `${pair[0].id}→${pair[1].id}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(pair)
+    }
+  }
+  return out
+}
+
 /** 比對「應有的相鄰配對」與「現有 legs」，產出同步計畫。純函式，不碰 DB。
  *  規則（spec §4/§6）：manual 段絕不覆蓋/刪除，最多標 stale；auto 段「從未計算、基準偏移、逾 TTL」
  *  三者之一才重算。判準刻意用 computed_at 而非 duration——no_route 段 duration 恆為 null，
  *  若以 duration 判會每次 sync 重打 Google，擊穿成本護欄（審查 M-2）；no_route 靠 TTL 與停留點變動重試。 */
-export function planLegSync(stops: SyncStop[], legs: SyncLeg[], nowMs: number): LegSyncPlan {
+export function planLegSync(
+  stops: SyncStop[],
+  legs: SyncLeg[],
+  nowMs: number,
+  roster: readonly string[] = [],
+): LegSyncPlan {
   const key = (f: string, t: string) => `${f}→${t}`
-  const wanted = new Map(adjacentPairs(stops).map(([f, t]) => [key(f.id, t.id), { from: f, to: t }]))
+  const wanted = new Map(participantPairs(stops, roster).map(([f, t]) => [key(f.id, t.id), { from: f, to: t }]))
   const plan: LegSyncPlan = { create: [], removeAuto: [], detachAuto: [], markStale: [], recompute: [] }
   const covered = new Set<string>()
 

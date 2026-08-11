@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createServiceClient } from '@/lib/supabase/service'
 import { planLegSync, type SyncStop, type SyncLeg } from '@/lib/domain/legSync'
+import { parseRoster } from '@/lib/domain/participants'
 import { buildRouteCacheKey, type RouteQuery } from '@/lib/domain/cacheKey'
 import {
   buildComputeRoutesRequest, parseComputeRoutesResponse, clampTransitDeparture,
@@ -36,11 +37,15 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const { data: isEditor } = await supabase.rpc('is_trip_editor', { p_trip_id: tripId })
   if (!isEditor) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
 
-  // 讀現況（user client：RLS 生效）。兩查詢互不依賴，平行送出（審查 S-1）。
-  const [{ data: stopRows, error: stopsErr }, { data: legRows, error: legsErr }] = await Promise.all([
+  // 讀現況（user client：RLS 生效）。三查詢互不依賴，平行送出（審查 S-1）。
+  const [
+    { data: stopRows, error: stopsErr },
+    { data: legRows, error: legsErr },
+    { data: tripRow, error: tripErr },
+  ] = await Promise.all([
     supabase
       .from('stops')
-      .select('id, lat, lng, starts_at, ends_at')
+      .select('id, lat, lng, starts_at, ends_at, participant_ids')
       .eq('trip_id', tripId)
       .order('starts_at')
       .limit(501), // 501 = 500 護欄 + 1 哨兵，藉此偵測「剛好卡在上限」與「真的超過上限」的差異（審查 I-2）
@@ -50,10 +55,15 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
       .eq('trip_id', tripId)
       .order('id')
       .limit(501),
+    // 名冊：決定交通段要按幾條時間軸生成（participantPairs）。
+    // 讀失敗必須整個中止而不能退回空名冊——空名冊會讓 planLegSync 退回單軌演算法，
+    // 於是分頭行程的幻影段被「重新建立」、真正的段落被判為脫離配對而刪除。
+    supabase.from('trips').select('participants').eq('id', tripId).maybeSingle(),
   ])
-  if (stopsErr || legsErr) {
+  if (stopsErr || legsErr || tripErr) {
     if (stopsErr) console.error('[legs/sync] stops read failed', { tripId, code: stopsErr.code, message: stopsErr.message })
     if (legsErr) console.error('[legs/sync] legs read failed', { tripId, code: legsErr.code, message: legsErr.message })
+    if (tripErr) console.error('[legs/sync] trip read failed', { tripId, code: tripErr.code, message: tripErr.message })
     return NextResponse.json({ error: 'read failed' }, { status: 500 })
   }
   // 哨兵命中（審查 I-2）：行程規模超出同步上限，拒絕處理而非悄悄截斷資料造成配對錯亂
@@ -72,7 +82,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
   const stops: SyncStop[] = (stopRows ?? []).map(s => ({
     id: s.id, lat: s.lat, lng: s.lng,
     startsAt: new Date(s.starts_at).getTime(), endsAt: new Date(s.ends_at).getTime(),
+    participantIds: s.participant_ids,
   }))
+  const roster = parseRoster(tripRow?.participants).map(p => p.id)
   const legs: SyncLeg[] = (legRows ?? []).map(l => ({
     id: l.id, fromStopId: l.from_stop_id, toStopId: l.to_stop_id,
     source: l.source as SyncLeg['source'],
@@ -82,7 +94,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ tripId
     stale: l.stale,
     estimatedCost: l.estimated_cost,
   }))
-  const plan = planLegSync(stops, legs, now)
+  const plan = planLegSync(stops, legs, now, roster)
 
   // 結構同步——一律逐列寫入（legs 表註解的鎖序規約），user client（RLS editor 生效）。
   // 【審查 C-1 強制要求】計算對象在寫入成功「當下」連同起訖與模式一起入列 computeQueue，

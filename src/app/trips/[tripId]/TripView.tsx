@@ -799,6 +799,43 @@ export default function TripView({
     }
   }
 
+  /** 有幾筆「會被 shift_following_stops 移動」的後續停留點。判準必須與該 RPC 逐條一致，
+   *  否則提示的數字跟實際移動的筆數對不起來：未鎖定、開始時間晚於錨點、且與錨點有共同參與人。 */
+  //  ⚠️ 錨點一律用 **id** 定位，不可用 starts_at 比對：使用者按下「一起順延」時資料已經
+  //  refresh 過，錨點的 starts_at 已是新值，靠時間戳會找不到它——或更糟，找到另一筆剛好
+  //  同時間的停留點（分頭行程正是同時間多筆的常態）。afterIso 只當「切點」用。
+  const countFollowingStops = (anchorId: string, afterIso: string): number => {
+    const after = new Date(afterIso).getTime()
+    const anchor = stops.find(s => s.id === anchorId)
+    const anchorWho = anchor ? resolveStopParticipants(anchor.participant_ids, rosterIds) : []
+    return stops.filter(s => {
+      if (s.id === anchorId) return false
+      if (s.locked) return false
+      if (new Date(s.starts_at).getTime() <= after) return false
+      if (rosterIds.length === 0) return true
+      return resolveStopParticipants(s.participant_ids, rosterIds).some(id => anchorWho.includes(id))
+    }).length
+  }
+
+  /** 順延後續行程（側欄編輯器改完時間後由使用者確認觸發）。回傳實際移動筆數，失敗回 null。 */
+  const shiftFollowingStops = async (anchorId: string, afterIso: string, deltaMs: number): Promise<number | null> => {
+    if (!canEdit || writesBlocked) return null
+    const supabase = createClient()
+    const { data, error } = await supabase.rpc('shift_following_stops', {
+      p_trip_id: trip.id,
+      p_anchor_stop_id: anchorId,
+      p_after: afterIso,
+      p_delta_seconds: Math.round(deltaMs / 1000),
+    })
+    if (error) {
+      console.error('[shiftFollowingStops]', { code: error.code, message: error.message })
+      return null
+    }
+    void syncLegs()
+    router.refresh()
+    return data ?? 0
+  }
+
   // 切換 Day：連動重置播放頭、播放狀態，並清空選取（舊選取可能不在新的一天，側欄已過濾看不到編輯器）
   function changeDay(day: string) {
     setActiveDay(day)
@@ -1309,6 +1346,8 @@ export default function TripView({
                         stop={stop}
                         currency={trip.currency}
                         roster={roster}
+                        followingCount={countFollowingStops}
+                        onShiftFollowing={shiftFollowingStops}
                         onDeleted={() => setSelectedId(null)}
                         onChanged={() => void syncLegs()}
                       />

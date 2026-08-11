@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cascadeShift, pendingShiftOffsetMs, pendingShiftResolved, type PendingShift } from './schedule'
+import { cascadeShift, pendingShiftOffsetMs, pendingShiftResolved, followingShiftMs, type PendingShift } from './schedule'
 import type { StopSchedule } from './types'
 
 const HOUR = 60 * 60 * 1000
@@ -89,5 +89,27 @@ describe('pendingShiftResolved', () => {
     // 舊版把這個情境當成「尚未落地」而回 false，會讓偏移預覽永久卡住（2026-08-04 審查 Major）
     expect(pendingShiftResolved(pending, [{ id: 'other', startsAt: 10 * HOUR }])).toBe(true)
     expect(pendingShiftResolved(pending, [])).toBe(true)
+  })
+})
+
+describe('followingShiftMs', () => {
+  const H = 3_600_000
+  const M = 60_000
+
+  it('整段後移半小時 → 後續順延半小時', () => {
+    expect(followingShiftMs(12 * H, 12 * H + 30 * M)).toBe(30 * M)
+  })
+
+  it('只延長停留（多待一小時）→ 後續順延一小時', () => {
+    // 開始時間沒變，取開始時間差會得到 0——那正是這條規則要避免的錯誤
+    expect(followingShiftMs(12 * H, 13 * H)).toBe(1 * H)
+  })
+
+  it('提早結束 → 後續往前移', () => {
+    expect(followingShiftMs(12 * H, 12 * H - 30 * M)).toBe(-30 * M)
+  })
+
+  it('提早到但同時離開 → 後續完全不用動（0 代表不必詢問使用者）', () => {
+    expect(followingShiftMs(12 * H, 12 * H)).toBe(0)
   })
 })

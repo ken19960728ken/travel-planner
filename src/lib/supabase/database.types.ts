@@ -427,6 +427,15 @@ export type Database = {
       is_trip_owner: { Args: { p_trip_id: string }; Returns: boolean }
       my_trip_ids: { Args: never; Returns: string[] }
       regenerate_share_token: { Args: { p_trip_id: string }; Returns: string }
+      shift_following_stops: {
+        Args: {
+          p_after: string
+          p_anchor_stop_id: string
+          p_delta_seconds: number
+          p_trip_id: string
+        }
+        Returns: number
+      }
       remove_trip_participant: {
         Args: { p_participant_id: string; p_trip_id: string }
         Returns: undefined

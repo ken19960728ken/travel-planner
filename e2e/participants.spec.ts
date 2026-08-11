@@ -176,6 +176,51 @@ test('分頭行動：交通段分軌生成、不產生幻影段、重疊不誤�
     await expect(page.locator('[data-stop-block]', { hasText: name })).toBeVisible()
   }
 
+  // ---- 側欄編輯器改時間 → 詢問是否順延（2026-08-11 使用者實際踩到的流程）----
+  // 在此之前只有時間軸拖曳會順延，編輯器完全不會，而畫面上沒有任何提示。
+  {
+    const { data: before } = await admin.from('stops').select('name, starts_at')
+      .eq('trip_id', createdTripId!).order('starts_at')
+    const eveningBefore = before!.find(s => s.name === 'E2E共同晚上')!.starts_at
+
+    await sidebarStop('E2E甲的下午').click()
+    // 只延長停留時間（結束 13:00 → 14:00 JST）：這種改動時間軸拖曳做不到，
+    // 而且「取開始時間差」會算成 0，是最能驗證 followingShiftMs 的案例
+    const endInput = page.locator('input[type="datetime-local"]').nth(1)
+    await endInput.fill('2026-12-05T14:00')
+    await page.getByRole('button', { name: '儲存' }).click()
+
+    // 應該跳出詢問，而不是自動順延、也不是靜默不動
+    await expect(page.getByText(/要一起順延 60 分鐘嗎/)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(/後面還有 1 個行程/)).toBeVisible()
+
+    // 先選「只改這一筆」→ 後續不動
+    await page.getByRole('button', { name: '只改這一筆' }).click()
+    await expect(page.getByText(/要一起順延/)).toHaveCount(0)
+    const { data: mid } = await admin.from('stops').select('starts_at')
+      .eq('trip_id', createdTripId!).eq('name', 'E2E共同晚上').single()
+    expect(mid!.starts_at).toBe(eveningBefore)
+
+    // 再改一次並選「一起順延」→ 後續往後移 60 分鐘
+    // （編輯器在「只改這一筆」之後仍然開著——那個按鈕只關掉詢問框，不改變選取狀態，
+    //   所以這裡不能再點側欄，會變成收合）
+    // 連續儲存兩次：這正是「儲存後跳詢問」造成的常見動線。樂觀鎖的基準在成功寫入後
+    // 會推進到剛寫進去的值，所以第二次不該誤判成「已被其他操作變更」
+    await page.locator('input[type="datetime-local"]').nth(1).fill('2026-12-05T15:00')
+    await page.getByRole('button', { name: '儲存' }).click()
+    await expect(page.getByText('此停留點的時間已被其他操作變更，請重新整理後再編輯')).toHaveCount(0)
+    await page.getByRole('button', { name: '一起順延' }).click()
+    await expect(page.getByText(/已順延 1 個行程/)).toBeVisible({ timeout: 10_000 })
+
+    await expect.poll(async () => {
+      const { data } = await admin!.from('stops').select('starts_at')
+        .eq('trip_id', createdTripId!).eq('name', 'E2E共同晚上').single()
+      return new Date(data!.starts_at).getTime() - new Date(eveningBefore).getTime()
+    }, { timeout: 15_000 }).toBe(60 * 60 * 1000)
+
+    await sidebarStop('E2E甲的下午').click() // 收合
+  }
+
   // ---- 移除甲野：只指派給他的停留點回到「全員」（null），名冊也一併清掉 ----
   await page.getByRole('button', { name: /參與人（2）/ }).click()
   await expect(page.getByText(/1 個停留點指派了這個人/)).toHaveCount(0) // 尚未按下移除，提示不該先出現

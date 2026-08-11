@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { utcMsToWallInput, wallInputToUtcMs } from '@/lib/domain/tz'
+import { followingShiftMs } from '@/lib/domain/schedule'
 import type { StopCategory } from '@/lib/domain/placeCategory'
 import { CATEGORY_LABEL, CATEGORY_ORDER } from '@/lib/domain/placeCategory'
 import { CATEGORY_ICON } from './categoryUi'
@@ -19,6 +20,8 @@ export default function StopEditor({
   roster,
   onDeleted,
   onChanged,
+  onShiftFollowing,
+  followingCount,
 }: {
   stop: Stop
   currency: string
@@ -26,6 +29,10 @@ export default function StopEditor({
   roster: readonly Participant[]
   onDeleted?: () => void
   onChanged?: () => void
+  /** 順延後續行程。回傳實際被移動的筆數；undefined 代表呼叫端不支援（例如唯讀情境）。 */
+  onShiftFollowing?: (anchorId: string, afterIso: string, deltaMs: number) => Promise<number | null>
+  /** 有幾筆「會被順延」的後續停留點（已扣除鎖定與不同參與人者），用來決定要不要問、以及提示文案 */
+  followingCount?: (anchorId: string, afterIso: string) => number
 }) {
   const router = useRouter()
   const [name, setName] = useState(stop.name)
@@ -42,9 +49,22 @@ export default function StopEditor({
     Array.isArray(stop.participant_ids) ? (stop.participant_ids as string[]) : null,
   )
   const [confirmDelete, setConfirmDelete] = useState(false)
+  /** 儲存成功後，若結束時間有變且後面還有行程，停在這裡等使用者決定要不要一起順延。
+   *  刻意**不自動順延**：時間軸拖曳是「你正看著它移動」，編輯器是填表單，
+   *  預設幫使用者做大幅改動（例如把某個景點改到下午）並不安全。 */
+  const [pendingCascade, setPendingCascade] = useState<{ afterIso: string; deltaMs: number; count: number } | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
   const [busy, setBusy] = useState(false)
   const busyRef = useRef(false)
+  /** 樂觀鎖的比對基準。掛載時取 props，**每次成功寫入後更新成剛寫進去的值**。
+   *
+   *  不能每次都直接讀 props：props 要等 router.refresh() 落地，而編輯器儲存後不會關閉。
+   *  使用者連續存兩次時，第二次會拿還沒更新的舊值去比對 → 0 列命中 → 誤判成
+   *  「已被其他操作變更」，但根本沒有別人動過（2026-08-11 E2E 實測復現）。
+   *  「儲存後跳出順延詢問」讓這條路徑變得很常走，所以一併修掉。
+   *
+   *  仍然擋得住真正的外部改動：協作者改過之後 DB 的值就不等於我們上次寫入的值，一樣 0 列。 */
+  const lockRef = useRef({ startsAt: stop.starts_at, endsAt: stop.ends_at })
 
   async function save() {
     if (busyRef.current) return
@@ -75,8 +95,8 @@ export default function StopEditor({
         // 同分頁的舊表單覆寫（拖曳連鎖）由 TripView 的 moveStop 成功後關閉編輯器負責；
         // 若未來新增「同分頁改時間但不關編輯器」的寫入路徑，此守衛擋不住，需改為掛載時快照
         .eq('id', stop.id)
-        .eq('starts_at', stop.starts_at)
-        .eq('ends_at', stop.ends_at)
+        .eq('starts_at', lockRef.current.startsAt)
+        .eq('ends_at', lockRef.current.endsAt)
         .select('id')
       if (error) {
         setNotice(
@@ -91,7 +111,20 @@ export default function StopEditor({
         router.refresh()
         return
       }
+      // 寫入成功：基準推進到剛寫進去的值，讓連續儲存不會誤判成外部衝突
+      const prevEndsAt = lockRef.current.endsAt
+      lockRef.current = {
+        startsAt: new Date(startMs).toISOString(),
+        endsAt: new Date(endMs).toISOString(),
+      }
       setNotice({ kind: 'success', text: '已儲存 ✓' })
+      // 「後續要不要一起順延」取**結束時間**的變化量（followingShiftMs 的檔頭說明了為什麼
+      // 不是開始時間）。0 就完全不問——例如「提早到但同時離開」，後面本來就不用動。
+      const deltaMs = followingShiftMs(new Date(prevEndsAt).getTime(), endMs)
+      if (deltaMs !== 0 && onShiftFollowing && followingCount) {
+        const count = followingCount(stop.id, stop.starts_at)
+        if (count > 0) setPendingCascade({ afterIso: stop.starts_at, deltaMs, count })
+      }
       onChanged?.()
       router.refresh()
     } finally {
@@ -163,6 +196,48 @@ export default function StopEditor({
           <button className="rounded border px-2 text-red-600 disabled:opacity-50" onClick={() => setConfirmDelete(true)} disabled={busy}>刪除</button>
         )}
       </div>
+      {pendingCascade && (
+        <div className="flex flex-col gap-1 rounded border border-amber-300 bg-amber-50 p-2 text-xs">
+          <span>
+            後面還有 {pendingCascade.count} 個行程。要一起
+            {pendingCascade.deltaMs > 0 ? '順延' : '提前'}{' '}
+            {Math.abs(Math.round(pendingCascade.deltaMs / 60000))} 分鐘嗎？
+          </span>
+          <span className="text-gray-500">鎖定 🔒 的行程不會被移動。</span>
+          <div className="flex gap-2">
+            <button
+              className="rounded bg-foreground px-2 py-0.5 text-background disabled:opacity-50"
+              disabled={busy}
+              onClick={async () => {
+                if (busyRef.current) return
+                busyRef.current = true
+                setBusy(true)
+                try {
+                  const moved = await onShiftFollowing!(stop.id, pendingCascade.afterIso, pendingCascade.deltaMs)
+                  setNotice(
+                    moved === null
+                      ? { kind: 'error', text: '順延失敗，請稍後再試' }
+                      : { kind: 'success', text: `已順延 ${moved} 個行程 ✓` },
+                  )
+                } finally {
+                  busyRef.current = false
+                  setBusy(false)
+                  setPendingCascade(null)
+                }
+              }}
+            >
+              一起順延
+            </button>
+            <button
+              className="rounded border px-2 py-0.5 disabled:opacity-50"
+              disabled={busy}
+              onClick={() => setPendingCascade(null)}
+            >
+              只改這一筆
+            </button>
+          </div>
+        </div>
+      )}
       {notice && (
         <p className={`text-sm ${notice.kind === 'error' ? 'text-red-600' : 'text-green-600'}`}>{notice.text}</p>
       )}

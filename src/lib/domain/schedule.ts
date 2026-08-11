@@ -69,3 +69,21 @@ export function pendingShiftResolved(
   if (stop === undefined) return true // 被拖點已不存在：不可能再落地，清掉
   return stop.startsAt === pending.baselineStartMs + pending.deltaMs
 }
+
+/** 側欄編輯器改完時間後，「後續行程要順延多少」的量（毫秒；0 代表不需要問）。
+ *
+ *  **取結束時間的變化量，不是開始時間的**——這是這個功能對不對的關鍵：
+ *
+ *    操作                    Δ開始   Δ結束   後續該順延
+ *    晚半小時出發（整段後移）  +30    +30     +30  ✓
+ *    想多待一小時（只改結束）    0    +60     +60  ✓
+ *    提早結束                   0    −30     −30  ✓
+ *    提早到、但同時離開        −30      0       0  ✓（後面不用動）
+ *
+ *  取開始時間的話，第二與第四種都會算錯。直覺上「我改了開始時間所以後面要跟著移」是錯的——
+ *  真正決定「下一個行程最早能從幾點開始」的是這一個**幾點結束**。
+ *
+ *  時間軸拖曳是純平移（Δ開始 === Δ結束），兩種取法一致，所以那條路徑一直沒暴露這個區別。 */
+export function followingShiftMs(oldEndsAtMs: number, newEndsAtMs: number): number {
+  return newEndsAtMs - oldEndsAtMs
+}

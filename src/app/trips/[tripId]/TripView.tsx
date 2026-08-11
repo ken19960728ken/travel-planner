@@ -11,6 +11,7 @@ import { interpolatePosition, segmentAt } from '@/lib/domain/interpolate'
 import { pathPosition, type LatLng } from '@/lib/domain/polyline'
 import { parseCustomPath, resolveRoutePath } from '@/lib/domain/routePath'
 import { parseRoster, resolveStopParticipants, type Participant } from '@/lib/domain/participants'
+import { participantColorAt, participantInitial, MERGED_MARKER_COLOR, MERGED_MARKER_TEXT } from './participantUi'
 import ParticipantChip from './ParticipantChip'
 import { participantPairs } from '@/lib/domain/legSync'
 import { pendingShiftResolved, type PendingShift } from '@/lib/domain/schedule'
@@ -423,6 +424,8 @@ export default function TripView({
   // Task 11：Realtime 斷線狀態與在線成員——TripRealtime 是純邏輯元件，透過這兩個回呼把狀態交回
   // TripView 渲染（presence 頭像、斷線橫幅）與接線（寫入入口關閉，見下方 writesBlocked）
   const [disconnected, setDisconnected] = useState(false)
+  /** 播放「看誰的行程」：null ＝ 全部一起播。名冊為空時不渲染這個下拉。 */
+  const [focusedParticipant, setFocusedParticipant] = useState<string | null>(null)
   const [peers, setPeers] = useState<PresencePeer[]>([])
   // 既有「讀取失敗即關閉寫入入口」通道（stopsError）與斷線暫停編輯共用同一條通道，不另造一套：
   // 兩者都代表「目前的本地基準不可信任/收不到旁人變動」，關閉寫入入口的理由相同
@@ -888,50 +891,117 @@ export default function TripView({
   // 播放頭可能因資料變動（拖曳/刪除當日停留點後視窗縮小）落在目前視窗之外；顯示前一律夾回視窗內，
   // 避免地圖「我」標記與時間軸的滑桿/畫線互相矛盾
   const clampedPlayheadMs = playheadMs === null || !win ? null : Math.min(Math.max(playheadMs, win.start), win.end)
-  // posStops 抽成共用：播放位置（interpolatePosition）與分段判定（segmentAt）同吃一份，不各自 map 一次
+  // posStops 抽成共用：播放位置（interpolatePosition）與分段判定（segmentAt）同吃一份，不各自 map 一次。
+  // participantIds 一併帶上——沒帶的話下面的軌道 filter 會恆為全員，分軌靜默失效而畫面看不出異常
   const posStops = activeDayStops.map(s => ({
     id: s.id,
     lat: s.lat,
     lng: s.lng,
     startsAt: new Date(s.starts_at).getTime(),
     endsAt: new Date(s.ends_at).getTime(),
+    participantIds: s.participant_ids,
   }))
-  // 播放位置提到 component body：地圖「我」標記與 PlaybackCamera（M-7 鏡頭跟隨）共用同一份，不各算一次
-  const playheadPos = clampedPlayheadMs === null ? null : interpolatePosition(posStops, clampedPlayheadMs)
 
-  // 當前播放分段：stay（停留中）或 travel（交通中）。travel 時查對應 leg 取 mode 與 polyline，
-  // 位置沿路線取位（有 polyline 走實路徑、flight 走大圓弧、其餘直線），取代單純兩點直線內插
-  const segment = clampedPlayheadMs === null ? null : segmentAt(posStops, clampedPlayheadMs)
-  // travel 段的識別 key：下面 segmentKey（completedPaths 的 memo key）與呼叫 PlaybackCamera 的
-  // segmentFitKey prop 共用同一份拼接，不在兩處各自手打 `travel:${fromStopId}`（2026-08-04 總審建議）
-  const travelFitKey = segment?.kind === 'travel' ? `travel:${segment.fromStopId}` : null
-  const travelLeg =
-    segment?.kind === 'travel' ? (legByPair.get(`${segment.fromStopId}→${segment.toStopId}`) ?? null) : null
-  // 路徑解碼在 render body 每秒發生一次，長 polyline 需 memo（key：leg id + 座標端點）。
-  // 優先序（手繪 → Google → flight 大圓弧 → null）收斂在 resolveRoutePath，與 RoutePolylines
-  // 及下方 completedPaths 共用同一份語義，不各寫一份而漂移
-  const travelPath = useMemo(() => {
-    if (!travelLeg) return null
-    const from = stopById.get(travelLeg.from_stop_id)
-    const to = stopById.get(travelLeg.to_stop_id)
-    if (!from || !to) return null
-    return resolveRoutePath(travelLeg, { lat: from.lat, lng: from.lng }, { lat: to.lat, lng: to.lng })
-  }, [travelLeg, stopById])
-  const travelPos = segment?.kind === 'travel' && travelPath ? pathPosition(travelPath, segment.progress) : null
-  const playheadDisplayPos = travelPos ?? playheadPos // travelPos 缺料時退回既有直線內插
+  // ---- 多軌播放（2026-08-11 參與人）----
+  // 名冊為空時只有一條 null 軌道，下面每一步都逐字退回改版前的單軌行為——既有行程零變化。
+  // 聚焦某人時也只有一條，成本與單軌相同。
+  const trackIds: (string | null)[] =
+    rosterIds.length === 0
+      ? [null]
+      : focusedParticipant !== null && rosterIds.includes(focusedParticipant)
+        ? [focusedParticipant]
+        : rosterIds
+  const trackStops = trackIds.map(pid => ({
+    participantId: pid,
+    stops: pid === null
+      ? posStops
+      : posStops.filter(s => resolveStopParticipants(s.participantIds, rosterIds).includes(pid)),
+  }))
 
-  // 進行中交通段的完整路徑：PlaybackCamera 分段取景（Task 4）與 PlaybackTrail 進行中紅線（Task 3）
-  // 共用同一份，避免兩處各自重複同一段 fallback（缺 polyline 的地面段退回兩點直線，與
-  // playheadDisplayPos 的直線內插語義一致）
-  const currentTravelPath =
-    segment?.kind === 'travel'
-      ? (travelPath ??
-          (() => {
-            const f = stopById.get(segment.fromStopId)
-            const t = stopById.get(segment.toStopId)
-            return f && t ? [{ lat: f.lat, lng: f.lng }, { lat: t.lat, lng: t.lng }] : null
-          })())
+  /** 當日每一個「有人會走」的段落 → 完整路徑。
+   *  **以配對為單位而非相鄰索引**：分頭時同一個停留點會有多條出邊（甲往 B、乙往 C），
+   *  索引式的 ordered[i]→ordered[i+1] 迴圈表達不了，會漏掉其中一條並虛構另一條。
+   *  memo 讓長 polyline 不逐秒重解（同改版前 completedPaths 的目的）。 */
+  const dayPathByPair = useMemo(() => {
+    const dayStops = filterDayStops(stops, activeDay)
+    const byId = new globalThis.Map(dayStops.map(s => [s.id, s]))
+    const legs2 = new globalThis.Map(legs.map(l => [`${l.from_stop_id}→${l.to_stop_id}`, l]))
+    const out = new globalThis.Map<string, { toStartsAt: number; path: LatLng[] }>()
+    const pairs = participantPairs(
+      dayStops.map(s => ({ id: s.id, startsAt: new Date(s.starts_at).getTime(), participantIds: s.participant_ids })),
+      rosterIds,
+    )
+    for (const [f, t] of pairs) {
+      const from = byId.get(f.id)
+      const to = byId.get(t.id)
+      if (!from || !to) continue
+      const fromPos = { lat: from.lat, lng: from.lng }
+      const toPos = { lat: to.lat, lng: to.lng }
+      const leg = legs2.get(`${from.id}→${to.id}`)
+      out.set(`${from.id}→${to.id}`, {
+        toStartsAt: new Date(to.starts_at).getTime(),
+        // 與 travelPath／RoutePolylines 共用 resolveRoutePath（手繪 → Google → flight 大圓弧 → 直線）
+        path: (leg ? resolveRoutePath(leg, fromPos, toPos) : null) ?? [fromPos, toPos],
+      })
+    }
+    return out
+  }, [stops, activeDay, legs, rosterIds])
+
+  /** 每條軌道在播放頭時刻的分段與位置。逐秒重算（成本低，路徑本身已在 dayPathByPair memo 過）。 */
+  const trackViews = trackStops.map(t => {
+    const segment = clampedPlayheadMs === null ? null : segmentAt(t.stops, clampedPlayheadMs)
+    const pairKey = segment?.kind === 'travel' ? `${segment.fromStopId}→${segment.toStopId}` : null
+    const path = pairKey ? (dayPathByPair.get(pairKey)?.path ?? null) : null
+    const travel = segment?.kind === 'travel' && path ? pathPosition(path, segment.progress) : null
+    return {
+      participantId: t.participantId,
+      segment,
+      pairKey,
+      path,
+      travel,
+      // travel 缺料時退回既有的兩點直線內插（語義同改版前的 playheadDisplayPos）
+      pos: travel ?? (clampedPlayheadMs === null ? null : interpolatePosition(t.stops, clampedPlayheadMs)),
+      leg: pairKey ? (legByPair.get(pairKey) ?? null) : null,
+    }
+  })
+
+  /** 主軌道：鏡頭與（名冊為空時的）單一標記樣式沿用它。 */
+  const primary = trackViews[0] ?? null
+  const travelLeg = primary?.leg ?? null
+  const travelPos = primary?.travel ?? null
+  const playheadDisplayPos = primary?.pos ?? null
+
+  /** 進行中的所有段落（分頭時可能同時有兩段在跑）。
+   *  以 pairKey 去重——多人走同一段時只畫一條紅線，畫多條會疊出更深的顏色，看起來像不同的線。 */
+  const currentSegmentsUnique = [...new globalThis.Map(
+    trackViews
+      .filter(v => v.pairKey !== null && v.path !== null)
+      .map(v => [v.pairKey!, { path: v.path!, progress: (v.segment as { progress: number }).progress }]),
+  ).values()]
+
+  // 鏡頭分段取景的 key：任一軌道換段就重新取景。單軌時逐字等同改版前的 `travel:${fromStopId}`。
+  const travelFitKey =
+    trackViews.some(v => v.segment?.kind === 'travel')
+      ? trackViews.map(v => (v.segment?.kind === 'travel' ? v.pairKey : '-')).join('|')
       : null
+  // fitBounds 用：把所有進行中的路徑串起來，分頭時鏡頭才涵蓋得到兩條分支
+  const cameraSegmentPath = currentSegmentsUnique.length > 0
+    ? currentSegmentsUnique.flatMap(c => c.path)
+    : null
+
+  /** 地圖標記：同一點的多條軌道合併成一個（全員同行時 N 個圖示會完全重疊）。
+   *  四捨五入到小數 5 位 ≈ 1 公尺。 */
+  const markerGroups = (() => {
+    const groups = new globalThis.Map<string, { pos: LatLng; ids: (string | null)[] }>()
+    for (const v of trackViews) {
+      if (!v.pos) continue
+      const k = `${v.pos.lat.toFixed(5)},${v.pos.lng.toFixed(5)}`
+      const g = groups.get(k)
+      if (g) g.ids.push(v.participantId)
+      else groups.set(k, { pos: { lat: v.pos.lat, lng: v.pos.lng }, ids: [v.participantId] })
+    }
+    return [...groups.values()]
+  })()
 
   // 播放鏡頭 fitBounds 用的當日停留點座標（M-7 修復）：只傳原始點陣列，不在這裡用 Math.min/max 化簡成
   // min/max——跨 180 度經線時 min/max 會反向算出錯誤的框。真正安全的 LatLngBounds 建構（逐點 extend）
@@ -939,30 +1009,21 @@ export default function TripView({
   // PlaybackCamera 的 effect 裡處理
   const playbackBounds = activeDayStops.length > 0 ? activeDayStops.map(s => ({ lat: s.lat, lng: s.lng })) : null
 
-  // 已走完的段落路徑：當日順序中，結束時刻早於當前分段起點的每一段。逐秒重算浪費（每段路徑固定），
-  // memo key 取「當前所在分段的識別」——換段才重算
-  // travelFitKey! 安全：這個分支已由 segment.kind !== 'stay'（PlaybackSegment 只有 stay/travel 兩種）
-  // 縮限到 segment.kind === 'travel'，travelFitKey 的判斷式與此同條件，保證非 null
-  const segmentKey =
-    segment === null ? 'none' : segment.kind === 'stay' ? `stay:${segment.stopId}` : travelFitKey!
+  // 已走完的段落：當日所有配對中，終點開始時刻早於播放頭者。
+  // memo key 取「所有軌道的分段識別」——換段才重算。逐秒重建陣列會讓 PlaybackTrail 的 effect
+  // 每秒全量拆建 Polyline（閃爍），這顆 memo 存在的目的就是擋住它。
+  const segmentKey = trackViews
+    .map(v => (v.segment === null ? 'none' : v.segment.kind === 'stay' ? `s:${v.segment.stopId}` : `t:${v.pairKey}`))
+    .join('|')
   const completedPaths = useMemo(() => {
     if (clampedPlayheadMs === null) return []
-    const ordered = [...posStops].sort((a, b) => a.startsAt - b.startsAt)
     const out: LatLng[][] = []
-    for (let i = 0; i < ordered.length - 1; i++) {
-      const from = ordered[i]
-      const to = ordered[i + 1]
-      if (to.startsAt > clampedPlayheadMs) break // 這段還沒走完（含進行中——由 currentPath 負責）
-      const leg = legByPair.get(`${from.id}→${to.id}`)
-      const fromPos = { lat: from.lat, lng: from.lng }
-      const toPos = { lat: to.lat, lng: to.lng }
-      // 與 travelPath／RoutePolylines 共用 resolveRoutePath（2026-08-10：此處原本是第二份重複的
-      // fallback 實作，未走 travelPath，加手繪路徑時一併收斂，避免三份語義各自漂移）
-      out.push((leg ? resolveRoutePath(leg, fromPos, toPos) : null) ?? [fromPos, toPos])
+    for (const v of dayPathByPair.values()) {
+      if (v.toStartsAt <= clampedPlayheadMs) out.push(v.path)
     }
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 逐秒變動的 clampedPlayheadMs 刻意不入 deps，換段（segmentKey）才需要重算
-  }, [segmentKey, activeDay, stops, legs])
+  }, [segmentKey, dayPathByPair])
 
   // interval callback 需要「最新」playheadMs 但不能把它放進 effect deps（每次都變會重開計時器），故用 ref 讀取
   const playheadMsRef = useRef(playheadMs)
@@ -1418,7 +1479,34 @@ export default function TripView({
                     <Pin background="#9ca3af" glyphColor="#fff" borderColor="#fff" />
                   </AdvancedMarker>
                 )}
-                {playheadDisplayPos && (
+                {/* 名冊非空：每條軌道一個首字圖章，同點合併成一個顯示人數。
+                    名冊為空時走下面原本那條路徑，樣式與改版前逐字相同（既有行程零變化）。 */}
+                {rosterIds.length > 0 && markerGroups.map(g => {
+                  const solo = g.ids.length === 1 ? roster.find(p => p.id === g.ids[0]) : undefined
+                  return (
+                    <AdvancedMarker
+                      key={g.ids.join(',')}
+                      position={g.pos}
+                      title={g.ids.map(id => roster.find(p => p.id === id)?.name ?? '目前時刻位置').join('、')}
+                      anchorLeft="-50%"
+                      anchorTop="-50%"
+                    >
+                      <div
+                        data-testid="playhead-marker"
+                        data-participants={g.ids.join(',')}
+                        className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-white text-sm font-medium shadow"
+                        style={
+                          solo
+                            ? { backgroundColor: solo.color, color: '#fff', textShadow: '0 0 2px rgba(0,0,0,0.6)' }
+                            : { backgroundColor: MERGED_MARKER_COLOR, color: MERGED_MARKER_TEXT }
+                        }
+                      >
+                        {solo ? participantInitial(solo.name) : g.ids.length}
+                      </div>
+                    </AdvancedMarker>
+                  )
+                })}
+                {rosterIds.length === 0 && playheadDisplayPos && (
                   // anchorLeft/Top 置中：預設值 "-50%"/"-100%" 是底部中央（比照 Pin 針尖）。
                   // anchorLeft/anchorTop 是「錨點相對內容左上角的位移」，CENTER 要位移 -50%/-50%
                   // （不是 +50%，那會把錨點移到內容的右下角外側，偏移更大，見 AdvancedMarkerAnchorPoint.CENTER 的官方換算）。
@@ -1475,8 +1563,8 @@ export default function TripView({
                 )}
                 <PlaybackTrail
                   completedPaths={completedPaths}
-                  currentPath={currentTravelPath}
-                  progress={segment?.kind === 'travel' ? segment.progress : 0}
+                  // 分頭時可能同時有兩段在跑，各自畫到自己的進度（改版前是單一 currentPath）
+                  currentSegments={currentSegmentsUnique}
                   // 2026-08-04 總審 m-4 拍板：紅線的存續改綁「播放頭是否有值」而非「是否正在播放」——
                   // 暫停就是為了看路線，線消失是反直覺的；拖曳 Timeline 播放頭（未按播放）也該同步顯示。
                   // 只有切 Day（playheadMs 歸 null，clampedPlayheadMs 隨之為 null）才清除
@@ -1490,7 +1578,7 @@ export default function TripView({
                   bounds={playbackBounds}
                   daySessionKey={`${activeDay}:${playSessionRef.current}`}
                   segmentFitKey={playing ? travelFitKey : null}
-                  segmentPath={currentTravelPath}
+                  segmentPath={cameraSegmentPath}
                   segmentMaxZoom={SEGMENT_MAX_ZOOM[travelLeg?.mode ?? 'custom']}
                 />
               </Map>
@@ -1502,6 +1590,37 @@ export default function TripView({
           )}
         </div>
       </div>
+      {/* 「看誰的行程」：只在有名冊時出現。切換不重置播放頭——使用者是想在同一個時刻
+          看另一個人在哪裡，把時間軸歸零會逼他重找。 */}
+      {rosterIds.length > 0 && (
+        <div className="flex items-center gap-2 border-t px-3 py-1 text-sm">
+          <label htmlFor="playback-focus" className="text-gray-500">看誰的行程</label>
+          <select
+            id="playback-focus"
+            className="rounded border p-1"
+            value={focusedParticipant ?? ''}
+            onChange={e => setFocusedParticipant(e.target.value === '' ? null : e.target.value)}
+          >
+            <option value="">全部一起</option>
+            {roster.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          {focusedParticipant === null && (
+            <span className="flex items-center gap-1 text-xs text-gray-400">
+              {roster.map((p, i) => (
+                <span key={p.id} className="inline-flex items-center gap-0.5">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ backgroundColor: p.color || participantColorAt(i) }}
+                  />
+                  {participantInitial(p.name)}
+                </span>
+              ))}
+            </span>
+          )}
+        </div>
+      )}
       <Timeline
         key={activeDay} // Day 切換即重掛：內部唯一 state（drag）天然歸零，避免切 Day 後拖曳卡死（不用 effect 清 state，踩過 set-state-in-effect lint 錯誤）
         stops={stops}

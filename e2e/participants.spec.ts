@@ -58,15 +58,17 @@ test('分頭行動：交通段分軌生成、不產生幻影段、重疊不誤�
   // ---- 四個停留點：A 共同 → B(甲)/C(乙) 同時段分頭 → D 共同會合 ----
   // 這正是現行單軌演算法會出錯的形狀：按時間排序取相鄰配對會生出 B→C（沒有人走過），
   // 而真正存在的 A→C 永遠不會被建立。
-  const mk = (name: string, from: string, to: string) => ({
-    trip_id: createdTripId, name, lat: 33.59, lng: 130.42, is_custom: true,
+  // 座標必須各不相同：地圖圖示會把同一點（四捨五入到小數 5 位）的多條軌道合併成一個，
+  // 全部同座標的話「分頭時兩個圖示」永遠測不出來（合併本身是設計行為，不是 bug）
+  const mk = (name: string, from: string, to: string, lat: number, lng: number) => ({
+    trip_id: createdTripId, name, lat, lng, is_custom: true,
     timezone: 'Asia/Tokyo', starts_at: from, ends_at: to, category: 'sight',
   })
   const { data: stops, error: stopsErr } = await admin.from('stops').insert([
-    mk('E2E共同早上', '2026-12-05T00:00:00Z', '2026-12-05T01:00:00Z'),
-    mk('E2E甲的下午', '2026-12-05T03:00:00Z', '2026-12-05T04:00:00Z'),
-    mk('E2E乙的下午', '2026-12-05T03:00:00Z', '2026-12-05T04:00:00Z'),
-    mk('E2E共同晚上', '2026-12-05T09:00:00Z', '2026-12-05T10:00:00Z'),
+    mk('E2E共同早上', '2026-12-05T00:00:00Z', '2026-12-05T01:00:00Z', 33.5900, 130.4200),
+    mk('E2E甲的下午', '2026-12-05T03:00:00Z', '2026-12-05T04:00:00Z', 33.6100, 130.4400),
+    mk('E2E乙的下午', '2026-12-05T03:00:00Z', '2026-12-05T04:00:00Z', 33.5700, 130.3900),
+    mk('E2E共同晚上', '2026-12-05T09:00:00Z', '2026-12-05T10:00:00Z', 33.6000, 130.4100),
   ]).select('id, name')
   expect(stopsErr).toBeNull()
   const stopName = new Map((stops ?? []).map(s => [s.id, s.name.replace('E2E', '')]))
@@ -129,6 +131,34 @@ test('分頭行動：交通段分軌生成、不產生幻影段、重疊不誤�
   // ---- 分頭時段時間完全重疊，但不是衝突 ----
   await page.reload()
   await expect(page.getByText(/時間重疊/)).toHaveCount(0)
+
+  // ---- 多軌播放：分頭時段兩個圖示各走各的、共同時段合併成一個 ----
+  // 用滑桿直接把播放頭移到目標時刻，不按播放等它推進——後者每秒只前進 10 分鐘，
+  // 要跑到分頭時段得等 18 秒，是不必要的時間耦合。
+  const marker = page.getByTestId('playhead-marker')
+  const slider = page.getByLabel('時間軸播放頭')
+  const setPlayhead = async (iso: string) => {
+    await slider.fill(String(Date.parse(iso)))
+    await slider.dispatchEvent('change')
+  }
+
+  // 分頭時段（12:00 JST ＝ 03:00Z）：兩個獨立圖示，各顯示自己的首字
+  await setPlayhead('2026-12-05T03:30:00Z')
+  await expect(marker).toHaveCount(2, { timeout: 15_000 })
+  await expect(marker.filter({ hasText: '甲' })).toHaveCount(1)
+  await expect(marker.filter({ hasText: '乙' })).toHaveCount(1)
+
+  // 共同時段（09:00 JST ＝ 00:00Z）：兩人同點，合併成一個顯示人數
+  await setPlayhead('2026-12-05T00:30:00Z')
+  await expect(marker).toHaveCount(1, { timeout: 15_000 })
+  await expect(marker).toHaveText('2')
+
+  // 切「只看甲野」→ 分頭時段只剩一個圖示
+  await setPlayhead('2026-12-05T03:30:00Z')
+  await page.getByLabel('看誰的行程').selectOption({ label: '甲野' })
+  await expect(marker).toHaveCount(1, { timeout: 15_000 })
+  await expect(marker).toHaveText('甲')
+  await page.getByLabel('看誰的行程').selectOption({ label: '全部一起' })
 
   // ---- 移除甲野：只指派給他的停留點回到「全員」（null），名冊也一併清掉 ----
   await page.getByRole('button', { name: /參與人（2）/ }).click()

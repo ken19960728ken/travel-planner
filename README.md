@@ -128,6 +128,49 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 三支安全加固（`is_trip_member` 等四顆 helper 的 `pg_temp`、share RPC 白名單、Realtime policy）皆為純加固，**不列入任何回滾程序**。
 
+## 系統鐵律
+
+> 1. **共同編輯一律要求成員身分。** 匿名使用者若未來要能編輯，只能編輯不屬於任何帳號的獨立副本。
+> 2. **任何授予未登入身分（`anon`）的函式，必須是唯讀的。**
+
+第 1 條的措辭刻意留了「訪客先試玩、覺得好用再註冊」的空間：那不是共編，不該被這條規則誤傷。它由**兩套不同機制**分別守住，別把兩者混為一談：
+
+| 面向 | 守門機制 | 覆蓋測試 |
+|---|---|---|
+| 未登入者不能寫 | 資料庫**授權層**（anon 對 public 零寫入 GRANT），前端拆光也擋得住 | `invariants.test.ts` |
+| 已登入但**非成員**不能編輯 | **RLS policy**（`is_trip_member` / `is_trip_editor` / `is_trip_owner`） | `rls.test.ts` |
+
+表級 GRANT 對所有 `authenticated` 一視同仁，區分成員與否的完全是 RLS。把「匿名不能寫」當成「編輯要成員身分」是偷換——而讓人以為某件事已經被機器守住，正是這一節存在要防的失敗模式。
+
+第 2 條是**必要的補丁，不是補充**。表級授權擋不住 `SECURITY DEFINER` 函式——`get_shared_trip` 正是「anon 對九張表零權限、卻拿得到整份行程」的實例。少了這條，哪天有人為了方便寫一顆「訪客可留言」的匿名可寫函式，前面的零權限就全部白費。
+
+**寫在文件裡的規則會被忘記，能被機器檢查的才叫鐵律。** 由 `src/lib/supabase/invariants.test.ts` 斷言（資料來源是 `public.role_privilege_audit()`，migration `20260812000000`）：
+
+| 斷言 | 擋住什麼 | 強度 |
+|---|---|---|
+| 表級／欄位級寫入權限恆為空 | 有人給 anon 加 GRANT | **確定** |
+| 函式清單與白名單**全等** | 新增或移除 anon 可執行的函式 | **確定** |
+| 每顆函式的**定義雜湊**未變 | `create or replace` 原地改寫既有函式 | **確定** |
+| 無 VOLATILE | 隨手加一顆匿名可寫函式 | 輔助訊號，可繞 |
+| 定義裡無 DML 關鍵字 | 同上 | 輔助訊號，可繞 |
+
+後兩項為何只是訊號：實測 STABLE 函式裡 `perform` 一顆 VOLATILE 函式，該函式的 `INSERT` **會成功寫入**（唯讀模式不沿呼叫鏈傳遞，而函式間的呼叫關係不進 `pg_depend`，這個遞移閉包沒有便宜的機檢法）。原始碼掃描則對 PG14+ 的 `begin atomic` 函式失明過一次——`prosrc` 是空字串——已改為 prosrc 為空時退回 `pg_get_functiondef`。**定義雜湊是唯一擋得住原地改寫的一項**，它紅了不要照抄新值蓋掉，先確認那顆函式為什麼被改、改完還是不是唯讀。
+
+測試另含「偵測器沒瞎」的自證：稽核函式回傳掃描分母（掃了幾個關聯／欄位／函式），並拿 `authenticated` 當對照組（必須回非空）。少了這兩道，「anon 全空」與「查詢寫壞了」長得一模一樣——第一版差點就用了 `information_schema.role_table_grants`，那些 view 只列出「當前角色是授予者／被授予者／其成員」的權限，`service_role` 不是 anon 的成員，查出來永遠是空的。
+
+**範圍限制（不是小字）**：只掃 `public` schema。anon 在 `realtime.messages` 上其實**持有**表級 INSERT/UPDATE，只是被該表 `to authenticated` 的 policy 擋著；`storage` 與 `supabase_functions` 亦然。所以這組斷言證明的是「anon 在 public 只能讀」，不是「anon 在整個資料庫只能讀」。另外 `storage` / `graphql_public` / `supabase_functions` 都有給 anon 的 default privileges，**未來在那些 schema 建的表會自動帶 anon 全 DML**——啟用 storage 的那一刻就要另開一條斷言。`public` 沒有這種 default acl，本組斷言不會被未來新表繞過。
+
+**目前沒有 CI 會跑它。** 本機沒起 Supabase 時整組靜默跳過並回報成功，實際強度是「開發者記得先 `supabase start`」。測試裡放了一條不可跳過的守門（`process.env.CI` 時要求環境齊備），接上 CI 就會生效。
+
+部署後要複查雲端，在 Supabase SQL Editor 執行同一份判準：
+
+```sql
+select public.role_privilege_audit();               -- anon：四個陣列除 functions 外皆須為空
+select public.role_privilege_audit('authenticated'); -- 對照組：必須回非空
+```
+
+**鐵律不解決分享連結的撤銷問題**——兩者正交。鐵律管「能不能寫」，分享連結的麻煩是「讀的權限收不回來」。相關討論見 [`docs/superpowers/specs/2026-08-01-sharing-access-model-notes.md`](docs/superpowers/specs/2026-08-01-sharing-access-model-notes.md)。
+
 ## 已知限制
 
 - 地圖 `mapId` 未設定 `NEXT_PUBLIC_GOOGLE_MAP_ID` 時 fallback 為開發用 `DEMO_MAP_ID`（Google 明載不可用於正式環境、不支援 Cloud Styling）。建立正式 Map ID 與收緊金鑰的完整步驟見 [`docs/guides/gcp-setup.md`](docs/guides/gcp-setup.md)
@@ -172,4 +215,5 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 - 分享頁的交通段若尚未計算或已逾期，只會顯示「待計算」——匿名訪客不會觸發 Google 路線同步（成本與濫用防線），需任一 editor 開啟過該行程才會更新
 - 分享連結沒有流量限制：主防線是 token 為 UUID v4（122 bit 隨機、不可枚舉），但拿到單一 token 後可無限次讀取。商用前需與路線代理同批上集中式限流
 - 分享／邀請 token 位於網址路徑，會進入 Vercel access log 與瀏覽器歷史紀錄；頁面已設 `no-referrer` 阻斷外站 Referer 外洩，且 token 可隨時重新產生或撤銷。商用前可評估改為 POST + 短效兌換碼
+- **成員自行退出時不會使分享連結失效**：owner 移除成員會一併重新產生 `share_token`（舊連結立刻失效），但成員按「退出行程」只刪自己的成員資格，手上那條唯讀分享連結仍可讀整份行程。`regenerate_share_token` 是 owner-only，離開者無從自清——owner 需手動按一次「重新產生連結」
 - 尚未支援轉移擁有權：owner 不可被移除、也無法把成員升為 owner（角色白名單只有 editor／viewer，這同時擋住提權）；owner 若刪除帳號，該行程會變成無人可管理的狀態

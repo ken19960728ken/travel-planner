@@ -1,7 +1,12 @@
 # 分享與存取模型：討論記錄（未定案）
 
-> **狀態：待續。** 2026-08-01 與使用者討論，使用者表示「想一下之後再討論，之後比較有時間再完善，目前應該還不會有太大問題」。
-> 本檔只記錄討論內容與各方案的論證，**未做任何實作決定**。恢復討論時從「待決事項」那節接續。
+> **狀態：部分定案（2026-08-12）。**
+> - ✅ **鐵律已定案並實作** — 措辭見 README「系統鐵律」，機檢斷言見 `src/lib/supabase/invariants.test.ts`（migration `20260812000000_anon_readonly_invariant.sql`）。
+> - ⏸ **具名分享連結暫不立案** — 當初推動它的主要傷害（被 owner 移除的成員仍能讀）已於 `MembersPanel.tsx:238-250` 修掉：owner 移除成員時一併重新產生 `share_token`。
+>   **但只涵蓋「被移除」這條路徑**：`leaveTrip`（`MembersPanel.tsx:277-294`）只刪 `trip_members`，不重生 token 也不撤邀請，**自願退出者手上的分享連結仍可讀整份行程**，而 `regenerate_share_token` 是 owner-only、離開者也無從自清。owner 手動按一次「重新產生連結」即可修復。
+>   判斷是暫不立案：自願退出的敵意程度遠低於被踢，且修復成本是一鍵。等實際出現「一條貼群組、一條給特定對象」的用法再議。
+>
+> 2026-08-01 原始討論記錄保留於下，各方案論證未改動。
 
 ---
 
@@ -122,12 +127,17 @@ Google Docs/Sheets **其實允許匿名編輯**（「匿名的水豚」那些）
 
 ---
 
-## 待決事項（恢復討論時從這裡接續）
+## 待決事項（2026-08-12 結算）
 
-- [ ] 鐵律的**最終措辭**（使用者要再想）——本檔「措辭建議」那段可作為起點
-- [ ] 鐵律要不要納入具名分享連結，或維持兩件事分開處理
-- [ ] 具名分享連結是否立案為 Plan 8；若立案，`expires_at` 要不要一併做
-- [ ] 兩條機檢斷言寫在哪（現有 `src/lib/supabase/rls.test.ts` 或新開一支 `invariants.test.ts`）
+- [x] 鐵律的**最終措辭** — 採本檔「措辭建議」那段，逐字寫進 README「系統鐵律」
+- [x] 鐵律要不要納入具名分享連結 — **兩件事分開**。鐵律管「能不能寫」，具名連結管「讀的權限怎麼收回」，正交
+- [ ] 具名分享連結是否立案 — **暫不**。移除成員已連帶重生成 `share_token`，具體傷害消失；重新產生連結是一鍵的事。等出現「一條貼群組、一條給特定對象」的實際用法再議（`expires_at` 屆時一併考慮）
+- [x] 兩條機檢斷言寫在哪 — 新開 `src/lib/supabase/invariants.test.ts`，不塞進 `rls.test.ts`（後者逐表測行為，前者掃 catalog 測授權佈局，混在一起會讓失敗訊息難讀）
+
+### 實作時的兩個意外發現（2026-08-12）
+
+1. **`information_schema.role_table_grants` 會 fail-open。** 那些 view 只列出「當前角色是授予者／被授予者／其成員」的權限；service_role 不是 anon 的成員，查出來**永遠是空的**。同一筆 anon 授權實測：information_schema 回 0 筆、`has_table_privilege` 回 1 筆、`has_column_privilege` 回 3 筆。斷言若照原本的直覺寫法，會是一條永遠綠的假保證。
+2. **四顆 trigger 函式的 `EXECUTE` 從沒 revoke 過**（`create function` 預設 `grant to public`），其中 `handle_new_trip` / `handle_new_user` 是 SECURITY DEFINER 且會寫表。實測不可利用（`returns trigger` → PostgREST 不暴露、直接呼叫回 `trigger functions can only be called as triggers`），但已一併收乾淨——**revoke 不影響 trigger 觸發，PostgreSQL 只在 `create trigger` 當下檢查 EXECUTE**（隔離實測確認）。
 
 ## 眼前的便宜緩解（與上述架構討論無關，成本極低）
 

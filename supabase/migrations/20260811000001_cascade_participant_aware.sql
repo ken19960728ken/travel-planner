@@ -34,7 +34,7 @@ create or replace function public.cascade_shift_stops(
   p_changed_stop_id uuid,
   p_delta_seconds bigint
 ) returns void
-language plpgsql security invoker set search_path = public, pg_temp as $$
+language plpgsql security invoker set search_path = public as $$
 declare
   v_changed_start timestamptz;
   v_roster uuid[];
@@ -64,8 +64,14 @@ begin
   end if;
 
   -- 名冊（只取 id）。空名冊 → v_roster 為空陣列 → 下方 resolve 恆回空 → 交集判定恆為真，
-  -- 整支函式行為與 v3 逐字相同。取法與 shift_following_stops 共用同一個函式（審查 s-1）。
-  v_roster := public.trip_roster_ids(p_trip_id);
+  -- 整支函式行為與 v3 逐字相同。
+  select coalesce(array_agg((e->>'id')::uuid), '{}'::uuid[])
+    into v_roster
+    from public.trips t, jsonb_array_elements(t.participants) e
+   where t.id = p_trip_id
+     and (e->>'id') is not null
+     -- 畸形元素（缺 id／id 不是 uuid）跳過，與 parseRoster 逐個丟棄的作法一致
+     and (e->>'id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
   -- 被拖停留點的參與人（已 resolve）。
   select public.resolve_stop_participants(participant_ids, v_roster)

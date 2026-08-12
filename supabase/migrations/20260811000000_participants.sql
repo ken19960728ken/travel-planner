@@ -94,21 +94,6 @@ returns uuid[] language sql immutable set search_path = public, pg_temp as $$
   end
 $$;
 
--- ---------- 名冊 id 取用（共用，避免兩支 RPC 各抄一份而漂移） ----------
--- 審查 s-1：cascade_shift_stops 與 shift_following_stops 都要取「這個行程的名冊 id 陣列」。
--- 兩份手抄的 SQL 已經開始有字面差異（一支有 `is not null` 一支沒有，功能等價但看起來不同），
--- 而「兩支判準必須逐條一致」是這組功能的硬性不變量——抽成一個函式才是結構性保證。
--- stable 而非 immutable：它讀表。呼叫端一律在取得 advisory lock 之後才呼叫。
-create or replace function public.trip_roster_ids(p_trip_id uuid) returns uuid[]
-language sql stable security invoker set search_path = public, pg_temp as $$
-  select coalesce(array_agg((e->>'id')::uuid), '{}'::uuid[])
-    from public.trips t, jsonb_array_elements(t.participants) e
-   where t.id = p_trip_id
-     -- 畸形元素（缺 id／id 不是 uuid）跳過，與 parseRoster 逐個丟棄的作法一致。
-     -- NULL ~ regex 求值為 NULL，所以缺 id 的元素天然被 WHERE 濾掉，不需另加 is not null。
-     and (e->>'id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-$$;
-
 -- ---------- 新增／更新參與人（在 SQL 端合併，不做 client 端 read-modify-write） ----------
 -- 為何是 RPC 而不是 client 讀出整份名冊改完再寫回：後者是典型的 lost update——兩個人同時各自
 -- 加一個參與人，後寫入者會把前一個人加的整個蓋掉，而且沒有任何錯誤。jsonb 欄位也無法用

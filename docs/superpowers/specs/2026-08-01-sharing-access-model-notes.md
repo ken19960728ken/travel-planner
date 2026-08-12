@@ -2,7 +2,9 @@
 
 > **狀態：部分定案（2026-08-12）。**
 > - ✅ **鐵律已定案並實作** — 措辭見 README「系統鐵律」，機檢斷言見 `src/lib/supabase/invariants.test.ts`（migration `20260812000000_anon_readonly_invariant.sql`）。
-> - ⏸ **具名分享連結暫不立案** — 當初推動它的具體傷害（被移除的成員仍能讀）已於 `MembersPanel.tsx:238-250` 修掉：owner 移除成員時一併重新產生 `share_token`。等實際出現「一條貼群組、一條給特定對象」的用法再議。
+> - ⏸ **具名分享連結暫不立案** — 當初推動它的主要傷害（被 owner 移除的成員仍能讀）已於 `MembersPanel.tsx:238-250` 修掉：owner 移除成員時一併重新產生 `share_token`。
+>   **但只涵蓋「被移除」這條路徑**：`leaveTrip`（`MembersPanel.tsx:277-294`）只刪 `trip_members`，不重生 token 也不撤邀請，**自願退出者手上的分享連結仍可讀整份行程**，而 `regenerate_share_token` 是 owner-only、離開者也無從自清。owner 手動按一次「重新產生連結」即可修復。
+>   判斷是暫不立案：自願退出的敵意程度遠低於被踢，且修復成本是一鍵。等實際出現「一條貼群組、一條給特定對象」的用法再議。
 >
 > 2026-08-01 原始討論記錄保留於下，各方案論證未改動。
 

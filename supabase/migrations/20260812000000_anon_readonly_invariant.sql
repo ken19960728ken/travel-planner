@@ -30,6 +30,17 @@ revoke execute on function public.handle_new_user() from public;
 revoke execute on function public.mark_manual_legs_stale() from public;
 revoke execute on function public.touch_updated_at() from public;
 
+-- 順手補齊 search_path（審查 critic m-3 / db-expert m-3 各自查到）：全庫 21 顆函式裡就這四顆
+-- 不合專案硬性約束——前三顆是 `search_path=public`（缺 pg_temp）、touch_updated_at 完全沒設，
+-- 整個吃呼叫端的設定。手正好按在這四顆上，不補說不過去。
+-- 目前不可利用（兩顆 DEFINER 的表引用都有 public. 限定、anon/authenticated 對 public 無
+-- CREATE 權限），但這是「下次有人在函式裡少寫一個 public.」就成立的洞。
+-- `alter function … set` 冪等、不重建函式本體、不影響既有 trigger 綁定。
+alter function public.handle_new_trip() set search_path = public, pg_temp;
+alter function public.handle_new_user() set search_path = public, pg_temp;
+alter function public.mark_manual_legs_stale() set search_path = public, pg_temp;
+alter function public.touch_updated_at() set search_path = public, pg_temp;
+
 -- ============ 二、稽核函式 ============
 -- 寫在文件裡的規則會被忘記，能被機器檢查的才叫鐵律。這顆函式回一份指定角色（預設 anon）的
 -- 權限快照，供 `src/lib/supabase/invariants.test.ts` 斷言，也供部署後在 Supabase SQL Editor
@@ -47,17 +58,35 @@ revoke execute on function public.touch_updated_at() from public;
 -- 欄位級要單獨掃：本專案用過欄位級授權（20260811000000 的 `grant update (title, …) on trips`），
 -- 而 has_table_privilege 只看表級，漏掉欄位級的話「只給 anon 改一欄」會整個看不見。
 --
--- 【掃描範圍：只有 public schema】刻意的。Supabase 平台自己會授予 anon 一批 storage／
--- realtime／graphql_public 的權限，掃進來會有一長串平台管理的雜訊，斷言就沒人看了。
--- 本專案的資料全在 public，且未使用 storage。**若日後開始用 storage，這條斷言不覆蓋它。**
--- 同理未涵蓋 sequence 的 USAGE（沒有表的 INSERT 權限時，能 nextval 也寫不進東西）。
+-- 【掃描範圍：只有 public schema —— 這是誠實面，不是小字】
+-- 「anon 只能讀」在**整個資料庫**的層面上目前**並不成立**，只是被 RLS 與 PostgREST 設定救著。
+-- 兩位審查員各自實查出 public 以外的 anon 寫入 GRANT：
+--   realtime.messages                       INSERT UPDATE   RLS=on   ← 本專案有在用
+--   storage.objects / buckets / …           I U D           RLS=on   ← 本專案未使用
+--   supabase_functions.hooks / migrations   I U D           RLS=off  ← 未被 PostgREST 暴露
+-- 目前擋住的是別的機制：realtime.messages 兩條 policy 都 `to authenticated`（anon 被 RLS 擋死）；
+-- storage 的 RLS 開著且無任何 policy；supabase_functions 不在 config.toml 的 exposed schemas。
+-- 掃進來只會得到一長串平台管理的雜訊，斷言就沒人看了，所以範圍限在 public——但要知道
+-- **這條斷言證明的是「anon 在 public 只能讀」，不是「anon 在整個 DB 只能讀」**。
+--
+-- ⚠️ 已知的未來地雷（實查 pg_default_acl）：storage / graphql_public / supabase_functions
+-- 都有給 anon 的 default privileges，**未來在那些 schema 建的表，anon 自動拿到完整 DML**。
+-- 好消息是 public **沒有**任何 anon 的 default acl，所以 public 的斷言不會被未來新表繞過。
+-- 啟用 storage 的那一刻就要另開一條斷言，不能等它自己冒出來。
+--
+-- sequence（relkind 'S'）已納入掃描：`grant update on sequence … to anon` 對 has_table_privilege
+-- 的 UPDATE 會回 true，而 INSERT/TRUNCATE 只回 false 不拋錯，加進來零成本零噪音。目前 public
+-- 一顆 sequence 都沒有（全 uuid 主鍵），純屬防未來的 bigserial。
 --
 -- 【p_role 為何可傳】「全空」有兩種可能：真的沒有權限，或**查詢本身瞎了**（上面那個
 -- information_schema 的坑就是後者，而且它看起來一模一樣）。開放角色參數後，測試可以拿
 -- authenticated 當對照組——它確實有一大票寫入權限，回非空才證明偵測器活著。
 -- 沒有這個對照，這顆函式哪天被改壞成恆回空陣列，四條斷言會一起變成永遠的綠燈。
 create or replace function public.role_privilege_audit(p_role text default 'anon') returns jsonb
-language sql stable security invoker set search_path = public, pg_temp as $$
+-- strict（= returns null on null input）：審查 db-expert M-2。傳 null 進來時，五個陣列會全部
+-- 回空——與「真的沒有權限」一模一樣，五條斷言一起變綠。strict 讓它回 NULL，測試端取欄位
+-- 得到 undefined，`expect(undefined).toEqual([])` 直接紅。fail-closed。
+language sql stable strict security invoker set search_path = public, pg_temp as $$
   select jsonb_build_object(
     -- 鐵律第 1 條：這兩個陣列必須恆為空
     'table_writes', coalesce((
@@ -67,7 +96,7 @@ language sql stable security invoker set search_path = public, pg_temp as $$
           join pg_namespace n on n.oid = c.relnamespace
           cross join unnest(array['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) priv
          where n.nspname = 'public'
-           and c.relkind in ('r', 'p', 'v', 'm', 'f')
+           and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
            and has_table_privilege(p_role, c.oid, priv)
       ) t
     ), '[]'::jsonb),
@@ -79,7 +108,7 @@ language sql stable security invoker set search_path = public, pg_temp as $$
           join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
           cross join unnest(array['INSERT', 'UPDATE']) priv
          where n.nspname = 'public'
-           and c.relkind in ('r', 'p', 'v', 'm', 'f')
+           and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
            and has_column_privilege(p_role, c.oid, a.attnum, priv)
       ) t
     ), '[]'::jsonb),
@@ -102,25 +131,62 @@ language sql stable security invoker set search_path = public, pg_temp as $$
     -- 改白名單的人必須來看一眼。三個機檢訊號的作用是讓「不小心」擋在門外，
     -- 「刻意」則交給那一次 review。
     'volatile_functions', coalesce((
-      select jsonb_agg(p.proname::text order by p.proname::text)
+      select jsonb_agg(p.oid::regprocedure::text order by p.oid::regprocedure::text)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
        where n.nspname = 'public'
          and p.provolatile = 'v'
          and has_function_privilege(p_role, p.oid, 'EXECUTE')
     ), '[]'::jsonb),
+    -- ⚠️ prosrc 對 SQL standard-body（PG14+ 的 `begin atomic … end`）函式是**空字串**，
+    -- regex 恆不命中。那是官方推薦寫法（body 會做依賴追蹤），不是什麼偏門——換句話說
+    -- 「有人用標準寫法改寫函式」就會讓這條訊號靜默歸零。改為 prosrc 空時退回
+    -- pg_get_functiondef。（審查 critic M-2 / db-expert M-1，兩人各自實測。）
+    -- prokind = 'f' 不可省：pg_get_functiondef 對 aggregate 會拋錯，整支稽核跟著死。
     'writes_in_source', coalesce((
-      select jsonb_agg(p.proname::text order by p.proname::text)
+      select jsonb_agg(p.oid::regprocedure::text order by p.oid::regprocedure::text)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
        where n.nspname = 'public'
-         and p.prosrc ~* '\y(insert|update|delete|merge|truncate)\y'
+         and p.prokind = 'f'
+         and coalesce(nullif(p.prosrc, ''), pg_get_functiondef(p.oid))
+             ~* '\y(insert|update|delete|merge|truncate|copy)\y'
          and has_function_privilege(p_role, p.oid, 'EXECUTE')
     ), '[]'::jsonb),
+    -- 全部改用 regprocedure（帶參數型別的完整簽章）而非 proname：overload 用 proname 會塌成
+    -- 兩個一模一樣的字串，靠「長度對不上」才勉強變紅——那是巧合不是設計，錯誤訊息也難讀。
     'functions', coalesce((
-      select jsonb_agg(p.proname::text order by p.proname::text)
+      select jsonb_agg(p.oid::regprocedure::text order by p.oid::regprocedure::text)
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
        where n.nspname = 'public'
          and has_function_privilege(p_role, p.oid, 'EXECUTE')
-    ), '[]'::jsonb)
+    ), '[]'::jsonb),
+    -- ============ fingerprints：唯一擋得住「原地改寫」的一項 ============
+    -- 前面三個訊號加上 functions 全等，全部只看得到**新增與移除**。最危險的第三種動作是
+    -- `create or replace` 原地改寫既有白名單函式的 body——名字沒變、標成 stable、body 用
+    -- begin atomic 讓 prosrc 為空，四項一起綠，沒有任何 review 觸發點（實測：改成轉呼叫一顆
+    -- volatile writer，寫入成功而測試全綠）。定義雜湊把「修改」也納進來：任何 anon 可執行
+    -- 函式的定義動一個字元，測試就紅。
+    -- ⚠️ pg_get_functiondef 的輸出格式綁 PostgreSQL 版本，升級大版本時雜湊會整批變動——
+    -- 那是預期行為（去看一眼），不是壞掉。
+    'fingerprints', coalesce((
+      select jsonb_object_agg(p.oid::regprocedure::text, substr(md5(pg_get_functiondef(p.oid)), 1, 12))
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.prokind = 'f'
+         and has_function_privilege(p_role, p.oid, 'EXECUTE')
+    ), '{}'::jsonb),
+    -- ============ scanned：讓這顆函式自證「我真的有在看東西」 ============
+    -- has_*_privilege 對不存在的角色會拋錯（fail-closed），但那道保險**只在掃描產出列時**
+    -- 才被求值。條件寫壞（nspname 打成 'pubic'、relkind 條件寫反）時掃描回零列，五個陣列
+    -- 一起變 []，與「真的沒有權限」無從區分。分母非零才代表偵測器活著。
+    -- （審查 db-expert m-1；authenticated 對照組只覆蓋 table_writes/column_writes 兩項，
+    --  補不上函式那三項，所以需要這個獨立的分母。）
+    'scanned', jsonb_build_object(
+      'relations', (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                     where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')),
+      'columns',   (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                     join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+                     where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')),
+      'functions', (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                     where n.nspname = 'public'))
   )
 $$;
 

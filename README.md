@@ -128,6 +128,28 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 三支安全加固（`is_trip_member` 等四顆 helper 的 `pg_temp`、share RPC 白名單、Realtime policy）皆為純加固，**不列入任何回滾程序**。
 
+## 系統鐵律
+
+> 1. **共同編輯一律要求成員身分。** 匿名使用者若未來要能編輯，只能編輯不屬於任何帳號的獨立副本。
+> 2. **任何授予未登入身分（`anon`）的函式，必須是唯讀的。**
+
+第 1 條的強制點在**資料庫授權層**，不是 UI——前端限制被整個拆掉也一樣擋得住。措辭刻意留了「訪客先試玩、覺得好用再註冊」的空間：那不是共編，不該被這條規則誤傷。
+
+第 2 條是**必要的補丁，不是補充**。表級授權擋不住 `SECURITY DEFINER` 函式——`get_shared_trip` 正是「anon 對九張表零權限、卻拿得到整份行程」的實例。少了這條，哪天有人為了方便寫一顆「訪客可留言」的匿名可寫函式，前面的零權限就全部白費。
+
+**寫在文件裡的規則會被忘記，能被機器檢查的才叫鐵律。** 兩條都由 `src/lib/supabase/invariants.test.ts` 斷言（資料來源是 `public.role_privilege_audit()`，migration `20260812000000`）：anon 的表級／欄位級寫入權限恆為空、anon 可執行的函式清單與白名單**全等**、且無 VOLATILE、原始碼無 DML 關鍵字。測試另含一條「偵測器沒瞎」的對照斷言——拿 `authenticated` 去掃必須回非空，否則「anon 全空」與「查詢壞掉」長得一模一樣。
+
+真正的把關是**白名單全等**那條：任何新增／移除都會讓測試變紅，逼改動的人來看一眼。volatility 與原始碼掃描是輔助訊號，**都可以被繞過**——實測 STABLE 函式裡 `perform` 一顆 VOLATILE 函式，該函式的 `INSERT` 會成功寫入（唯讀模式不沿呼叫鏈傳遞，而函式間的呼叫關係不進 `pg_depend`，這個遞移閉包沒有便宜的機檢法）。機檢擋的是「不小心」，「刻意」交給那一次 review。掃描範圍限 `public` schema，未涵蓋 storage（本專案未使用）。
+
+部署後要複查雲端，在 Supabase SQL Editor 執行同一份判準：
+
+```sql
+select public.role_privilege_audit();               -- anon：四個陣列除 functions 外皆須為空
+select public.role_privilege_audit('authenticated'); -- 對照組：必須回非空
+```
+
+**鐵律不解決分享連結的撤銷問題**——兩者正交。鐵律管「能不能寫」，分享連結的麻煩是「讀的權限收不回來」。相關討論見 [`docs/superpowers/specs/2026-08-01-sharing-access-model-notes.md`](docs/superpowers/specs/2026-08-01-sharing-access-model-notes.md)。
+
 ## 已知限制
 
 - 地圖 `mapId` 未設定 `NEXT_PUBLIC_GOOGLE_MAP_ID` 時 fallback 為開發用 `DEMO_MAP_ID`（Google 明載不可用於正式環境、不支援 Cloud Styling）。建立正式 Map ID 與收緊金鑰的完整步驟見 [`docs/guides/gcp-setup.md`](docs/guides/gcp-setup.md)

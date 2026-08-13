@@ -117,6 +117,39 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 `trip_invites` 表、兩顆 RPC 與 `trip_members` policy 收緊**刻意不回滾**：它們對舊版程式碼完全透明，而 policy 收緊是已用 PoC 證實的帳號接管路徑的修復，回滾等於把漏洞放回去。
 
+### ⚠️ 動到資料表授權的 migration 必須設 `lock_timeout`
+
+```sql
+begin;
+set local lock_timeout = '5s';   -- ← 任何 grant / revoke / alter table 都要
+…
+commit;
+```
+
+**這條是 2026-08-13 推 `20260813000000` 時補的。** 那支對九張表下 `revoke all … from anon`，`REVOKE` 要 **AccessExclusiveLock**——最強的鎖，連 `SELECT` 都擋。而 PostgreSQL 的鎖佇列**先到先服務、不讓輕量請求插隊**：
+
+```
+t=0  某個查詢正在跑 stops（AccessShareLock）
+t=1  REVOKE 要 AccessExclusiveLock → 衝突 → 排隊
+t=2  使用者開行程頁要 SELECT stops → 本來完全不衝突，但排在 REVOKE 後面 → 卡住
+```
+
+所以一個原本無害的查詢加上一支 DDL，就是**整張表對所有人凍結**。最壞情況是有連線 idle in transaction 握著鎖不放——那就變成**無限等 + 全站無限凍結**，不會自己好。
+
+預設 `lock_timeout = 0` 就是無限等。設 5 秒的話搶不到就整筆回滾、退出佇列，後面排隊的查詢立刻通行，代價只是「這次沒推成功，等等再推」。
+
+當時那支最後是 commit 成功的（卡住的是 CLI 收尾），但**沒有 `lock_timeout` 就無法分辨「卡在等鎖」還是「卡在別的地方」**，只能假設最壞情況中止。有了它，超過五秒還沒動靜就一定不是鎖的問題。
+
+判斷是否卡在鎖（另開一個連線）：
+
+```sql
+select pid, pg_blocking_pids(pid) as 被誰擋, wait_event_type,
+       now() - xact_start as 已跑, left(query, 60)
+from pg_stat_activity where cardinality(pg_blocking_pids(pid)) > 0;
+```
+
+⚠️ `20260813000000` 本身**不會**補上這行——它已套用到雲端，[已套用的 migration 視同不可變](#回滾路徑速查依-migration-分類)。這條只對之後的 migration 生效。
+
 ### 回滾路徑速查（依 migration 分類）
 
 | 類別 | 對應 migration | 回滾方式 |

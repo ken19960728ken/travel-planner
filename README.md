@@ -117,6 +117,39 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 `trip_invites` 表、兩顆 RPC 與 `trip_members` policy 收緊**刻意不回滾**：它們對舊版程式碼完全透明，而 policy 收緊是已用 PoC 證實的帳號接管路徑的修復，回滾等於把漏洞放回去。
 
+### ⚠️ 動到資料表授權的 migration 必須設 `lock_timeout`
+
+```sql
+begin;
+set local lock_timeout = '5s';   -- ← 任何 grant / revoke / alter table 都要
+…
+commit;
+```
+
+**這條是 2026-08-13 推 `20260813000000` 時補的。** 那支對九張表下 `revoke all … from anon`，`REVOKE` 要 **AccessExclusiveLock**——最強的鎖，連 `SELECT` 都擋。而 PostgreSQL 的鎖佇列**先到先服務、不讓輕量請求插隊**：
+
+```
+t=0  某個查詢正在跑 stops（AccessShareLock）
+t=1  REVOKE 要 AccessExclusiveLock → 衝突 → 排隊
+t=2  使用者開行程頁要 SELECT stops → 本來完全不衝突，但排在 REVOKE 後面 → 卡住
+```
+
+所以一個原本無害的查詢加上一支 DDL，就是**整張表對所有人凍結**。最壞情況是有連線 idle in transaction 握著鎖不放——那就變成**無限等 + 全站無限凍結**，不會自己好。
+
+預設 `lock_timeout = 0` 就是無限等。設 5 秒的話搶不到就整筆回滾、退出佇列，後面排隊的查詢立刻通行，代價只是「這次沒推成功，等等再推」。
+
+當時那支最後是 commit 成功的（卡住的是 CLI 收尾），但**沒有 `lock_timeout` 就無法分辨「卡在等鎖」還是「卡在別的地方」**，只能假設最壞情況中止。有了它，超過五秒還沒動靜就一定不是鎖的問題。
+
+判斷是否卡在鎖（另開一個連線）：
+
+```sql
+select pid, pg_blocking_pids(pid) as 被誰擋, wait_event_type,
+       now() - xact_start as 已跑, left(query, 60)
+from pg_stat_activity where cardinality(pg_blocking_pids(pid)) > 0;
+```
+
+⚠️ `20260813000000` 本身**不會**補上這行——它已套用到雲端，[已套用的 migration 視同不可變](#回滾路徑速查依-migration-分類)。這條只對之後的 migration 生效。
+
 ### 回滾路徑速查（依 migration 分類）
 
 | 類別 | 對應 migration | 回滾方式 |
@@ -148,9 +181,12 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 | 斷言 | 擋住什麼 | 強度 |
 |---|---|---|
-| 表級／欄位級寫入權限恆為空 | 有人給 anon 加 GRANT | **確定** |
-| 函式清單與白名單**全等** | 新增或移除 anon 可執行的函式 | **確定** |
+| 表級／欄位級寫入、表級讀取權限恆為空 | 有人給 anon 加 GRANT | **確定** |
+| 函式清單與白名單**全等**（只有 `get_shared_trip`） | 新增或移除 anon 可執行的函式 | **確定** |
 | 每顆函式的**定義雜湊**未變 | `create or replace` 原地改寫既有函式 | **確定** |
+| **每張表都啟用 RLS** | 新增資料表漏開 RLS | **確定** |
+| **沒有 policy 適用於 anon 或 public** | policy 忘了寫 `to authenticated` | **確定** |
+| **public 無授予 anon 的 default privileges** | 未來新建物件又自動授權回去 | **確定** |
 | 無 VOLATILE | 隨手加一顆匿名可寫函式 | 輔助訊號，可繞 |
 | 定義裡無 DML 關鍵字 | 同上 | 輔助訊號，可繞 |
 
@@ -158,7 +194,25 @@ revoke execute on function public.regenerate_share_token(uuid) from authenticate
 
 測試另含「偵測器沒瞎」的自證：稽核函式回傳掃描分母（掃了幾個關聯／欄位／函式），並拿 `authenticated` 當對照組（必須回非空）。少了這兩道，「anon 全空」與「查詢寫壞了」長得一模一樣——第一版差點就用了 `information_schema.role_table_grants`，那些 view 只列出「當前角色是授予者／被授予者／其成員」的權限，`service_role` 不是 anon 的成員，查出來永遠是空的。
 
-**範圍限制（不是小字）**：只掃 `public` schema。anon 在 `realtime.messages` 上其實**持有**表級 INSERT/UPDATE，只是被該表 `to authenticated` 的 policy 擋著；`storage` 與 `supabase_functions` 亦然。所以這組斷言證明的是「anon 在 public 只能讀」，不是「anon 在整個資料庫只能讀」。另外 `storage` / `graphql_public` / `supabase_functions` 都有給 anon 的 default privileges，**未來在那些 schema 建的表會自動帶 anon 全 DML**——啟用 storage 的那一刻就要另開一條斷言。`public` 沒有這種 default acl，本組斷言不會被未來新表繞過。
+### ⚠️ 2026-08-13：第一版驗錯了層
+
+初版斷言只驗 GRANT，本機全綠。**實際到雲端跑同一顆稽核函式才發現本機與雲端的 anon 授權完全不同**：
+
+| | 本機（`supabase start`） | 雲端（Supabase 託管） |
+|---|---|---|
+| anon 對 public 資料表 | 零授權 | **八張表 `arwdDxtm`（含 TRUNCATE）** |
+| anon 可執行的函式 | 7 顆 | **17 顆**（含 `role_privilege_audit`） |
+| public 的 default privileges | 0 筆 | **6 筆**（`postgres` 與 `supabase_admin` 各三種物件） |
+
+成因是 Supabase 平台在 public schema 預設下了 `alter default privileges ... grant all to anon, authenticated, service_role`，本機 CLI 沒有複製。當時沒有可利用的洞（RLS 全開、34 條 policy 全部 `to authenticated`、寫入 RPC 都有 `is_trip_editor`），但**縱深防禦在雲端等於不存在**，而且更麻煩的是：
+
+> 本專案的 RPC 慣例（`revoke execute … from public;` + `grant … to authenticated;`）在雲端**收不掉 anon**——anon 的 EXECUTE 是 default privileges 顯式授予的，不是靠 PUBLIC 繼承。所以每一顆照慣例寫的新 RPC，在雲端預設都是匿名可呼叫的。
+
+`20260813000000_anon_grant_lockdown.sql` 收回 anon 在 public 的全部表／序列／函式授權（只留 `get_shared_trip`）、移除 default privileges 中 anon 的部分，並把斷言擴充到實際防線。**新增 RPC 時仍建議寫成 `revoke execute … from public, anon;`**，把這件事釘在 migration 本身而不是只靠事後稽核。
+
+**殘留（已知、可接受）**：六筆 default privileges 裡有三筆的授予者是 `supabase_admin`，`postgres` 無權修改（本機以等價情境實測確認會 `insufficient_privilege`）。migration 的 DO 區塊逐筆嘗試、失敗只發 warning 不中止。影響有限——我們的 migration 都以 `postgres` 身分執行，套用的是 `postgres` 的 default privileges，那三筆只對「平台自己建立的物件」生效。雲端跑稽核時 `default_privileges` 若非空即為此。
+
+**範圍限制（不是小字）**：只掃 `public` schema。anon 在 `realtime.messages` 上仍**持有**表級 INSERT/UPDATE，只是被該表 `to authenticated` 的 policy 擋著；`storage` 與 `supabase_functions` 亦然，且它們的 default privileges 動不了。所以這組斷言證明的是「anon 在 public 只能讀」，不是「anon 在整個資料庫只能讀」。啟用 storage 的那一刻就要另開一條斷言。
 
 **目前沒有 CI 會跑它。** 本機沒起 Supabase 時整組靜默跳過並回報成功，實際強度是「開發者記得先 `supabase start`」。測試裡放了一條不可跳過的守門（`process.env.CI` 時要求環境齊備），接上 CI 就會生效。
 
